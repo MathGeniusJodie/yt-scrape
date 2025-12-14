@@ -86,7 +86,7 @@ const channelIdToJsonFeed = throttle((channelId) => {
 }, maxConcurentRequests);
 
 let cachedJsonFeed = false;
-const thumnailWidth = 60;
+const thumnailWidth = 40;
 
 const scrape = async () => {
 	const channelIds = (await readFile(channelIdsFile, "utf8")).split("\n").filter(a=>a);
