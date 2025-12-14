@@ -145,7 +145,13 @@ const show = async () => {
 const play = async (number) => {
 	const feed = await getCachedJsonFeed();
 	let video = feed[feed.length - number];
-	exec(`mpv ${video.link}`);
+	const { spawn } = require('child_process');
+	// Spawn mpv detached so it keeps running after Node.js exits
+	const child = spawn('mpv', [`--ytdl-format=bestvideo[height<=720]`,video.link], {
+		detached: true,
+		stdio: 'ignore'
+	});
+	child.unref();
 };
 
 const help = () => {
