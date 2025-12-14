@@ -86,7 +86,7 @@ const channelIdToJsonFeed = throttle((channelId) => {
 }, maxConcurentRequests);
 
 let cachedJsonFeed = false;
-const thumnailWidth = 28;
+const thumnailWidth = 60;
 
 const scrape = async () => {
 	const channelIds = (await readFile(channelIdsFile, "utf8")).split("\n").filter(a=>a);
@@ -128,13 +128,15 @@ const show = async () => {
 			const titleLines = lineWrap(title);
 			const titleLine0 = titleLines[0];
 			const titleLine1 = titleLines[1];
-			console.log(thumbnail + "\x1b[7A");
+			console.log(thumbnail);
+			console.log("\x1b[11A");
 			console.log(`\x1b[${thumnailWidth+1}C\x1b[1;94m[${number}]`);
 			console.log(`\x1b[${thumnailWidth+1}C\x1b[0;97m${titleLine0}`);
 			if (titleLine1) console.log(`\x1b[${thumnailWidth+1}C${titleLine1}`);
 			console.log(`\x1b[${thumnailWidth+1}C\x1b[2m${name}\x1b[0m`);
 			console.log(`\x1b[${thumnailWidth+1}C\x1b[4;34m${link}\x1b[0m`);
 			if (!titleLine1) console.log("");
+			console.log(`\x1b[${thumnailWidth+1}C\n`);
 			console.log(`\x1b[${thumnailWidth+1}C\n`);
 		}
 	);
