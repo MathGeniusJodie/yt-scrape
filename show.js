@@ -147,7 +147,7 @@ const play = async (number) => {
 	let video = feed[feed.length - number];
 	const { spawn } = require('child_process');
 	// Spawn mpv detached so it keeps running after Node.js exits
-	const child = spawn('mpv', [`--ytdl-format=bestvideo[height<=720]`,video.link], {
+	const child = spawn('mpv', [`--ytdl-format=bestvideo[height<=720]+bestaudio/best`, video.link], {
 		detached: true,
 		stdio: 'ignore'
 	});
