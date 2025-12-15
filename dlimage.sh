@@ -11,7 +11,8 @@ curl -L "$url" -o "$tmpfile" -s
 # convert "$tmpfile" -gravity center -crop 8:4 -resize "$size>" RGBA:- | ./jodie-s-image-viewer/jiv_binary "$size"
 
 # If jiv_binary accepts the file directly:
-~/jiv2/target/release/sextant "$tmpfile" --width="$size"
+#~/jiv2/target/release/sextant "$tmpfile" --width="$size"
+chafa "$tmpfile" --work=9 --symbols=all --size="$size"x"$size"
 
 # Clean up
 rm -f "$tmpfile"
