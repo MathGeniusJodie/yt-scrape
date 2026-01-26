@@ -13,11 +13,11 @@ pub struct GridLayout {
 
 impl GridLayout {
     /// Fixed card dimensions - CARD_WIDTH is the single source of truth
-    const CARD_WIDTH: u16 = 34;
+    const CARD_WIDTH: u16 = 16*2+2;
     const BORDER_WIDTH: u16 = 2; // left + right border
     const THUMBNAIL_WIDTH: u16 = Self::CARD_WIDTH - Self::BORDER_WIDTH; // fills inner area
     const THUMBNAIL_HEIGHT: u16 = 9; // 16:9 aspect ratio accounting for ~1:2 char cells
-    const TEXT_LINES: u16 = 4; // title (2) + channel + time
+    const TEXT_LINES: u16 = 4; // pad + title (2) + channel and time
     const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + 2; // +2 for top/bottom border
 
     pub const HEADER_HEIGHT: u16 = 3;

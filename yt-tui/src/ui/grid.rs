@@ -3,7 +3,7 @@ use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 /// Render the entire UI
 pub fn render(
@@ -82,7 +82,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let tabs_width: usize = tab_parts.iter().map(|(top, _, _, _)| top.chars().count()).sum::<usize>()
         + tab_parts.len().saturating_sub(1); // spaces between tabs
     let right_side_len = refresh_top.chars().count() + 1 + help_top.chars().count();
-    let spacing = (area.width as usize).saturating_sub(tabs_width + right_side_len + 1);
+    let spacing = (area.width as usize).saturating_sub(tabs_width + right_side_len);
 
     // Build line 1: tab tops with right-aligned buttons
     let mut line1_spans: Vec<Span> = Vec::new();
@@ -120,7 +120,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         }
         line3_spans.push(Span::styled(bottom.clone(), selected_style));
     }
-    line3_spans.push(Span::raw(" ".repeat(spacing)));
+    line3_spans.push(Span::raw("─".repeat(spacing)));
     line3_spans.push(Span::styled(&refresh_bottom, refresh_style));
     line3_spans.push(Span::raw(" "));
     line3_spans.push(Span::styled(&help_bottom, Style::default().fg(Color::Cyan)));
@@ -234,6 +234,7 @@ fn render_video_card(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style);
 
     let inner = block.inner(area);
@@ -318,6 +319,7 @@ fn render_video_card(
             let padding = (inner.width as usize).saturating_sub(channel_len + time_len);
 
             let mut text_lines = vec![
+                Line::from(" "),
                 Line::from(Span::styled(title_line1, title_style)),
                 Line::from(Span::styled(title_line2, title_style)),
                 Line::from(vec![
@@ -385,7 +387,7 @@ fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: R
     };
 
     let footer = Paragraph::new(status)
-        .style(Style::default().fg(Color::Cyan).bg(Color::DarkGray));
+        .style(Style::default().fg(Color::LightCyan).bg(Color::Rgb(20, 20, 20)));
 
     frame.render_widget(footer, footer_area);
 }
