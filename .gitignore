@@ -1,3 +1,4 @@
 /node_modules
 /youtube-feeds.xml
 youtube-feeds.json
+/yt-tui/target
