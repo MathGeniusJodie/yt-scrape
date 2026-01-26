@@ -428,6 +428,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         .title(" Help ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
+        .border_type(BorderType::Rounded)
         .style(Style::default().bg(Color::Black));
 
     let help = Paragraph::new(help_text).block(block);
