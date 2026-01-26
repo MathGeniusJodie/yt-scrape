@@ -189,10 +189,10 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                self.scroll(1);
+                self.scroll(3);
             }
             MouseEventKind::ScrollUp => {
-                self.scroll(-1);
+                self.scroll(-3);
             }
             _ => {}
         }
