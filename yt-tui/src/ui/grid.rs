@@ -3,7 +3,7 @@ use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 /// Render the entire UI
 pub fn render(
@@ -56,21 +56,21 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(Color::Cyan)
     };
 
+    // Calculate button widths for proper spacing
+    let left_side = " [Feed]  [Watch Later] "; // 24 chars
+    let refresh_text = if state.is_refreshing { "[↻…]" } else { "[↻]" };
+    let help_text = "[?]";
+    let right_side_len = refresh_text.chars().count() + 1 + help_text.chars().count() + 1; // +1 for spaces
+    let spacing = (area.width as usize).saturating_sub(left_side.len() + right_side_len);
+
     let header = Line::from(vec![
         Span::styled(" [Feed] ", feed_style),
         Span::raw(" "),
         Span::styled("[Watch Later] ", watch_later_style),
-        Span::raw(" ".repeat((area.width as usize).saturating_sub(40))),
-        Span::styled(
-            if state.is_refreshing {
-                "[Refreshing...]"
-            } else {
-                "[r:Refresh]"
-            },
-            refresh_style,
-        ),
+        Span::raw(" ".repeat(spacing)),
+        Span::styled(refresh_text, refresh_style),
         Span::raw(" "),
-        Span::styled("[?:Help]", Style::default().fg(Color::Cyan)),
+        Span::styled(help_text, Style::default().fg(Color::Cyan)),
         Span::raw(" "),
     ]);
 
@@ -281,7 +281,7 @@ fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: R
             .unwrap_or_default();
 
         format!(
-            " {} videos{} | ↑↓ scroll, Enter play, w watch later, q quit",
+            " {} videos{} | ↑↓ scroll, ⏎ play, w watch later, r refresh, ? help, q quit",
             videos.len(),
             refresh_info
         )
@@ -321,6 +321,9 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw(""),
         Line::raw("Mouse: Click to select/play, scroll to navigate"),
     ];
+
+    // Clear the area first so content behind doesn't show through
+    frame.render_widget(Clear, help_area);
 
     let block = Block::default()
         .title(" Help ")
