@@ -3,8 +3,8 @@ use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use tui_scrollview::{ScrollView, ScrollViewState};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 /// Render the entire UI
 pub fn render(
@@ -175,8 +175,10 @@ fn render_grid(
     let total_rows = videos.len().div_ceil(layout.cols);
     let content_height = (total_rows as u16 * layout.card_height).max(layout.grid_height);
 
-    // Create scroll view with full content size
-    let mut scroll_view = ScrollView::new(Size::new(area.width, content_height));
+    // Create scroll view with full content size (disable built-in scrollbars)
+    let mut scroll_view = ScrollView::new(Size::new(area.width, content_height))
+        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
+        .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
 
     // Calculate which rows are visible for performance (don't render off-screen cards)
     let scroll_offset = scroll_state.offset().y as usize;
@@ -215,6 +217,18 @@ fn render_grid(
 
     // Render the scroll view to the frame
     frame.render_stateful_widget(scroll_view, grid_area, scroll_state);
+
+    // Render custom scrollbar (cyan, no arrows, no track)
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(None)
+        .thumb_style(Style::default().fg(Color::Cyan));
+
+    let mut scrollbar_state = ScrollbarState::new(content_height as usize)
+        .position(scroll_offset);
+
+    frame.render_stateful_widget(scrollbar, grid_area, &mut scrollbar_state);
 }
 
 fn render_video_card(
