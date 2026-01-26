@@ -102,4 +102,53 @@ impl GridLayout {
     pub fn thumbnail_height(&self) -> u16 {
         Self::THUMBNAIL_HEIGHT
     }
+
+    /// Check if coordinates are on the watch later checkbox within a card
+    /// Returns Some(video_index) if click is on a checkbox, None otherwise
+    pub fn is_checkbox_click(
+        &self,
+        x: u16,
+        y: u16,
+        scroll_offset_lines: usize,
+        total_items: usize,
+    ) -> Option<usize> {
+        // Account for header
+        if y < Self::HEADER_HEIGHT {
+            return None;
+        }
+
+        let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
+        let col = (x / self.card_width) as usize;
+        let row = y_in_grid / self.card_height as usize;
+
+        if col >= self.cols {
+            return None;
+        }
+
+        let index = row * self.cols + col;
+        if index >= total_items {
+            return None;
+        }
+
+        // Check if click is on the bottom border row where checkbox is rendered
+        // Card height is 15, so bottom border is at row 14 (0-indexed)
+        let y_in_card = y_in_grid % self.card_height as usize;
+        let bottom_border_row = self.card_height as usize - 1;
+
+        if y_in_card != bottom_border_row {
+            return None;
+        }
+
+        // Check if x is in the checkbox area (right side of bottom border)
+        // Checkbox " W:☑ " is 5 chars, positioned 2 chars from right edge
+        let x_in_card = (x as usize) % self.card_width as usize;
+        let checkbox_start = self.card_width as usize - 7; // 5 chars + 2 offset from edge
+        let checkbox_end = self.card_width as usize - 2;
+
+        if x_in_card >= checkbox_start && x_in_card < checkbox_end {
+            return Some(index);
+        }
+
+        None
+    }
 }

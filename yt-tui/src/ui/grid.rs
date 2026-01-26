@@ -234,12 +234,10 @@ fn render_video_card(
             let channel = truncate_str(&video.channel_name, inner.width as usize);
             let time_ago = format_time_ago(&video.published);
 
-            let watch_later_marker = if is_watch_later { " [W]" } else { "" };
             let title_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
 
             // Calculate padding to right-align timestamp
-            let channel_part = format!("{}{}", channel, watch_later_marker);
-            let channel_len = channel_part.chars().count();
+            let channel_len = channel.chars().count();
             let time_len = time_ago.chars().count();
             let padding = (inner.width as usize).saturating_sub(channel_len + time_len);
 
@@ -247,9 +245,9 @@ fn render_video_card(
                 Line::from(Span::styled(title_line1, title_style)),
                 Line::from(Span::styled(title_line2, title_style)),
                 Line::from(vec![
-                    Span::styled(channel_part, Style::default().fg(Color::Gray)),
+                    Span::styled(channel.clone(), Style::default().fg(Color::Gray)),
                     Span::raw(" ".repeat(padding)),
-                    Span::styled(time_ago, Style::default().fg(Color::DarkGray)),
+                    Span::styled(time_ago.clone(), Style::default().fg(Color::DarkGray)),
                 ]),
             ];
 
@@ -261,6 +259,29 @@ fn render_video_card(
 
             frame.render_widget(Paragraph::new(text), text_area);
         }
+    }
+
+    // Render watch later checkbox on bottom border (overlapping like a title)
+    let bottom_border_row = area.y + area.height - 1;
+    if bottom_border_row >= area.y && bottom_border_row < area.y + area.height {
+        let (checkbox_text, checkbox_style) = if is_watch_later {
+            (" W:☑ ", Style::default().fg(Color::Rgb(255, 165, 0))) // Bright orange
+        } else {
+            (" W:☐ ", Style::default().fg(Color::Rgb(128, 128, 128))) // Medium grey
+        };
+
+        // Position checkbox on the right side of the bottom border
+        let checkbox_len = checkbox_text.chars().count() as u16;
+        let checkbox_x = area.x + area.width.saturating_sub(checkbox_len + 2);
+
+        let checkbox_area = Rect {
+            x: checkbox_x,
+            y: bottom_border_row,
+            width: checkbox_len,
+            height: 1,
+        };
+
+        frame.render_widget(Paragraph::new(checkbox_text).style(checkbox_style), checkbox_area);
     }
 }
 

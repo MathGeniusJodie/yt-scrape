@@ -175,7 +175,17 @@ impl App {
                 } else {
                     // Grid click
                     let total = self.state.current_videos().len();
-                    if let Some(idx) =
+
+                    // Check if click is on a watch later checkbox
+                    if let Some(idx) = self.layout.is_checkbox_click(
+                        mouse.column,
+                        mouse.row,
+                        self.state.scroll_offset,
+                        total,
+                    ) {
+                        self.state.selected_index = Some(idx);
+                        self.toggle_watch_later()?;
+                    } else if let Some(idx) =
                         self.layout
                             .coords_to_index(mouse.column, mouse.row, self.state.scroll_offset, total)
                     {
