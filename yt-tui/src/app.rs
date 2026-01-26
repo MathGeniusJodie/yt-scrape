@@ -204,7 +204,6 @@ impl App {
         self.state.terminal_cols = cols;
         self.state.terminal_rows = rows;
         self.layout = GridLayout::calculate(cols, rows);
-        self.thumb_cache.clear_rendered_cache();
 
         // Clamp scroll offset to valid range
         let total = self.state.current_videos().len();

@@ -79,8 +79,25 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    /// Render an image with chafa (matching original dlimage.sh settings)
+    /// Render an image with chafa, cropping to 16:9 first
     fn render_with_chafa(&self, path: &Path, width: u16, height: u16) -> Option<String> {
+        use std::process::Stdio;
+
+        // Use ImageMagick to crop to 16:9 centered, then pipe to chafa
+        let convert = Command::new("convert")
+            .args([
+                path.to_str()?,
+                "-gravity",
+                "center",
+                "-crop",
+                "16:9",
+                "+repage",
+                "png:-",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .ok()?;
+
         let output = Command::new("chafa")
             .args([
                 "--size",
@@ -89,8 +106,9 @@ impl ThumbnailCache {
                 "sextant+block+quad",
                 "--work",
                 "9",
-                path.to_str()?,
+                "-",
             ])
+            .stdin(convert.stdout?)
             .output()
             .ok()?;
 

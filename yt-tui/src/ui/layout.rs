@@ -3,39 +3,36 @@
 pub struct GridLayout {
     /// Number of video cards per row
     pub cols: usize,
-    /// Width of each card in terminal columns
+    /// Width of each card in terminal columns (fixed)
     pub card_width: u16,
-    /// Height of each card in terminal rows
+    /// Height of each card in terminal rows (fixed)
     pub card_height: u16,
     /// Available height for the grid area (excluding header/footer)
     pub grid_height: u16,
 }
 
 impl GridLayout {
-    /// Card dimensions (1.5x wider than before)
-    const THUMBNAIL_WIDTH: u16 = 30;
-    const THUMBNAIL_HEIGHT: u16 = 9;
+    /// Fixed card dimensions - CARD_WIDTH is the single source of truth
+    const CARD_WIDTH: u16 = 34;
+    const BORDER_WIDTH: u16 = 2; // left + right border
+    const THUMBNAIL_WIDTH: u16 = Self::CARD_WIDTH - Self::BORDER_WIDTH; // fills inner area
+    const THUMBNAIL_HEIGHT: u16 = 9; // 16:9 aspect ratio accounting for ~1:2 char cells
     const TEXT_LINES: u16 = 4; // title (2) + channel + time
-    const CARD_PADDING: u16 = 1;
+    const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + 2; // +2 for top/bottom border
 
     pub const HEADER_HEIGHT: u16 = 1;
     pub const FOOTER_HEIGHT: u16 = 1;
 
     pub fn calculate(terminal_width: u16, terminal_height: u16) -> Self {
-        let min_card_width = Self::THUMBNAIL_WIDTH + Self::CARD_PADDING * 2;
-        let card_height = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + Self::CARD_PADDING;
-
         let grid_height = terminal_height.saturating_sub(Self::HEADER_HEIGHT + Self::FOOTER_HEIGHT);
 
-        // Calculate how many columns fit
-        let cols = (terminal_width / min_card_width).max(1) as usize;
-        // Distribute width evenly
-        let card_width = terminal_width / cols as u16;
+        // Calculate how many fixed-width columns fit
+        let cols = (terminal_width / Self::CARD_WIDTH).max(1) as usize;
 
         Self {
             cols,
-            card_width,
-            card_height,
+            card_width: Self::CARD_WIDTH,
+            card_height: Self::CARD_HEIGHT,
             grid_height,
         }
     }
@@ -96,12 +93,12 @@ impl GridLayout {
         total_height.saturating_sub(self.grid_height as usize)
     }
 
-    /// Width available for thumbnail inside card
+    /// Width available for thumbnail inside card (fixed)
     pub fn thumbnail_width(&self) -> u16 {
-        self.card_width.saturating_sub(Self::CARD_PADDING * 2 + 2) // -2 for border
+        Self::THUMBNAIL_WIDTH
     }
 
-    /// Height for thumbnail
+    /// Height for thumbnail (fixed)
     pub fn thumbnail_height(&self) -> u16 {
         Self::THUMBNAIL_HEIGHT
     }
