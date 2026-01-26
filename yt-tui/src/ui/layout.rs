@@ -20,7 +20,7 @@ impl GridLayout {
     const TEXT_LINES: u16 = 4; // title (2) + channel + time
     const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + 2; // +2 for top/bottom border
 
-    pub const HEADER_HEIGHT: u16 = 1;
+    pub const HEADER_HEIGHT: u16 = 3;
     pub const FOOTER_HEIGHT: u16 = 1;
 
     pub fn calculate(terminal_width: u16, terminal_height: u16) -> Self {

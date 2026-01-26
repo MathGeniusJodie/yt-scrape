@@ -31,24 +31,14 @@ pub fn render(
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
-    let header_area = Rect {
-        x: 0,
-        y: 0,
-        width: area.width,
-        height: 1,
-    };
+    let feed_label = " Feed ";
+    let watch_later_label = " Watch Later ";
 
-    let feed_style = if state.current_tab == Tab::Feed {
-        Style::default().fg(Color::Black).bg(Color::White)
-    } else {
-        Style::default().fg(Color::White)
-    };
+    let feed_selected = state.current_tab == Tab::Feed;
+    let watch_later_selected = state.current_tab == Tab::WatchLater;
 
-    let watch_later_style = if state.current_tab == Tab::WatchLater {
-        Style::default().fg(Color::Black).bg(Color::White)
-    } else {
-        Style::default().fg(Color::White)
-    };
+    let selected_style = Style::default().fg(Color::White);
+    let unselected_style = Style::default().fg(Color::DarkGray);
 
     let refresh_style = if state.is_refreshing {
         Style::default().fg(Color::Yellow)
@@ -56,25 +46,65 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(Color::Cyan)
     };
 
-    // Calculate button widths for proper spacing
-    let left_side = " [Feed]  [Watch Later] "; // 24 chars
-    let refresh_text = if state.is_refreshing { "[↻…]" } else { "[↻]" };
-    let help_text = "[?]";
-    let right_side_len = refresh_text.chars().count() + 1 + help_text.chars().count() + 1; // +1 for spaces
-    let spacing = (area.width as usize).saturating_sub(left_side.len() + right_side_len);
+    let refresh_text = if state.is_refreshing { "↻…" } else { "↻" };
+    let help_text = "?";
 
-    let header = Line::from(vec![
-        Span::styled(" [Feed] ", feed_style),
+    // Build tab tops: ╭──────╮
+    let feed_top = format!("╭{}╮", "─".repeat(feed_label.chars().count()));
+    let watch_later_top = format!("╭{}╮", "─".repeat(watch_later_label.chars().count()));
+
+        // Build tab bottoms with labels: ╯ Feed ╰
+    let feed_middle = format!("│{}│", feed_label);
+    let watch_later_middle = format!("│{}│", watch_later_label);
+
+    // Build tab bottoms with labels: ╯ Feed ╰
+    let feed_bottom = format!("╯{}╰", feed_label);
+    let watch_later_bottom = format!("╯{}╰", watch_later_label);
+
+
+
+    // Calculate spacing for right-aligned buttons
+    let tabs_width = feed_top.chars().count() + 1 + watch_later_top.chars().count();
+    let right_side_len = refresh_text.chars().count() + 2 + help_text.chars().count() + 2;
+    let spacing = (area.width as usize).saturating_sub(tabs_width + right_side_len + 1);
+
+    // Line 1: tab tops
+    let line1 = Line::from(vec![
+        Span::styled(feed_top, if feed_selected { selected_style } else { unselected_style }),
         Span::raw(" "),
-        Span::styled("[Watch Later] ", watch_later_style),
+        Span::styled(watch_later_top, if watch_later_selected { selected_style } else { unselected_style }),
         Span::raw(" ".repeat(spacing)),
         Span::styled(refresh_text, refresh_style),
-        Span::raw(" "),
+        Span::raw("  "),
         Span::styled(help_text, Style::default().fg(Color::Cyan)),
         Span::raw(" "),
     ]);
 
-    frame.render_widget(Paragraph::new(header), header_area);
+    // Line 2: tab middle with labels
+    let line2 = Line::from(vec![
+        Span::styled(feed_middle, if feed_selected { selected_style } else { unselected_style }),
+        Span::raw(" "),
+        Span::styled(watch_later_middle, if watch_later_selected { selected_style } else { unselected_style }),
+    ]);
+
+    let header_area1 = Rect { x: 0, y: 0, width: area.width, height: 1 };
+    let header_area2 = Rect { x: 0, y: 1, width: area.width, height: 1 };
+    let header_area3 = Rect { x: 0, y: 2, width: area.width, height: 1 };
+
+        // Line 3: tab bottom
+    let line3 = Line::from(vec![
+        Span::styled(feed_bottom, if feed_selected { selected_style } else { unselected_style }),
+        Span::raw((if feed_selected {" "} else {"─"}).repeat(spacing)),
+        Span::styled(watch_later_bottom, if watch_later_selected { selected_style } else { unselected_style }),
+        Span::raw((if watch_later_selected {" "} else {"─"}).repeat(spacing)),
+        Span::styled(refresh_text, refresh_style),
+        Span::raw("  "),
+        Span::styled(help_text, Style::default().fg(Color::Cyan)),
+        Span::raw(" "),
+    ]);
+    frame.render_widget(Paragraph::new(line1), header_area1);
+    frame.render_widget(Paragraph::new(line2), header_area2);
+    frame.render_widget(Paragraph::new(line3), header_area3);
 }
 
 fn render_grid(
@@ -369,8 +399,8 @@ fn wrap_title_two_lines(s: &str, line_width: usize) -> (String, String) {
     let chars: Vec<char> = s.chars().collect();
 
     if chars.len() <= line_width {
-        // Fits in one line - return with empty second line
-        return (s.to_string(), String::new());
+        // Fits in one line - use em dash on second line
+        return (s.to_string(), "—".to_string());
     }
 
     // Find a good break point for first line (prefer breaking at space)
