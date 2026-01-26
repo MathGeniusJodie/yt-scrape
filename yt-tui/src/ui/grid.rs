@@ -109,14 +109,20 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let right_width = refresh_btn.width() + 1 + help_btn.width();
     let spacing = (area.width as usize).saturating_sub(tabs_width + right_width);
 
-    // Build all three lines using a helper closure
-    let build_line = |get_part: fn(&BoxButton) -> &str, separator: &str| -> Vec<Span> {
+    // Build all three lines using a helper closure. The third parameter
+    // controls whether unselected tabs should use white for this line
+    // (used to make unselected tab bottoms white).
+    let build_line =
+        |get_part: fn(&BoxButton) -> &str, separator: &str, unselected_use_white: bool| -> Vec<Span>
+    {
         let mut spans = Vec::new();
         for (i, (btn, is_selected)) in tab_btns.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::raw(separator.to_string()));
             }
             let style = if *is_selected {
+                selected_style
+            } else if unselected_use_white {
                 selected_style
             } else {
                 unselected_style
@@ -133,9 +139,9 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         spans
     };
 
-    let line1 = build_line(|b| &b.top, " ");
-    let line2 = build_line(|b| &b.middle, " ");
-    let line3 = build_line(|b| &b.bottom, "─");
+    let line1 = build_line(|b| &b.top, " ", false);
+    let line2 = build_line(|b| &b.middle, " ", false);
+    let line3 = build_line(|b| &b.bottom, "─", true);
 
     for (y, spans) in [line1, line2, line3].into_iter().enumerate() {
         let rect = Rect {
