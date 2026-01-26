@@ -31,11 +31,11 @@ pub fn render(
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
-    let feed_label = " Feed ";
-    let watch_later_label = " Watch Later ";
-
-    let feed_selected = state.current_tab == Tab::Feed;
-    let watch_later_selected = state.current_tab == Tab::WatchLater;
+    // Tab definitions: (label, Tab variant)
+    let tabs: &[(&str, Tab)] = &[
+        (" Feed ", Tab::Feed),
+        (" Watch Later ", Tab::WatchLater),
+    ];
 
     let selected_style = Style::default().fg(Color::White);
     let unselected_style = Style::default().fg(Color::DarkGray);
@@ -49,62 +49,90 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let refresh_text = if state.is_refreshing { "↻…" } else { "↻" };
     let help_text = "?";
 
-    // Build tab tops: ╭──────╮
-    let feed_top = format!("╭{}╮", "─".repeat(feed_label.chars().count()));
-    let watch_later_top = format!("╭{}╮", "─".repeat(watch_later_label.chars().count()));
+    // Build tab parts for each tab
+    let tab_parts: Vec<(String, String, String, bool)> = tabs
+        .iter()
+        .map(|(label, tab)| {
+            let width = label.chars().count();
+            let top = format!("╭{}╮", "─".repeat(width));
+            let middle = format!("│{}│", label);
+            let is_selected = state.current_tab == *tab;
+            let bottom = if is_selected{
+                format!("╯{}╰", " ".repeat(width))   
+            } else {
+                format!("─{}─", "─".repeat(width))
+            };
+            
+            (top, middle, bottom, is_selected)
+        })
+        .collect();
 
-        // Build tab bottoms with labels: ╯ Feed ╰
-    let feed_middle = format!("│{}│", feed_label);
-    let watch_later_middle = format!("│{}│", watch_later_label);
-
-    // Build tab bottoms with labels: ╯ Feed ╰
-    let feed_bottom = format!("╯{}╰", feed_label);
-    let watch_later_bottom = format!("╯{}╰", watch_later_label);
-
-
-
-    // Calculate spacing for right-aligned buttons
-    let tabs_width = feed_top.chars().count() + 1 + watch_later_top.chars().count();
+    // Calculate total tabs width
+    let tabs_width: usize = tab_parts.iter().map(|(top, _, _, _)| top.chars().count()).sum::<usize>()
+        + tab_parts.len().saturating_sub(1); // spaces between tabs
     let right_side_len = refresh_text.chars().count() + 2 + help_text.chars().count() + 2;
     let spacing = (area.width as usize).saturating_sub(tabs_width + right_side_len + 1);
 
-    // Line 1: tab tops
-    let line1 = Line::from(vec![
-        Span::styled(feed_top, if feed_selected { selected_style } else { unselected_style }),
-        Span::raw(" "),
-        Span::styled(watch_later_top, if watch_later_selected { selected_style } else { unselected_style }),
-        Span::raw(" ".repeat(spacing)),
-        Span::styled(refresh_text, refresh_style),
-        Span::raw("  "),
-        Span::styled(help_text, Style::default().fg(Color::Cyan)),
-        Span::raw(" "),
-    ]);
+    // Build line 1: tab tops with right-aligned buttons
+    let mut line1_spans: Vec<Span> = Vec::new();
+    for (i, (top, _, _, is_selected)) in tab_parts.iter().enumerate() {
+        if i > 0 {
+            line1_spans.push(Span::raw(" "));
+        }
+        let style = if *is_selected { selected_style } else { unselected_style };
+        line1_spans.push(Span::styled(top.clone(), style));
+    }
+    line1_spans.push(Span::raw(" ".repeat(spacing)));
+    line1_spans.push(Span::styled(refresh_text, refresh_style));
+    line1_spans.push(Span::raw("  "));
+    line1_spans.push(Span::styled(help_text, Style::default().fg(Color::Cyan)));
+    line1_spans.push(Span::raw(" "));
 
-    // Line 2: tab middle with labels
-    let line2 = Line::from(vec![
-        Span::styled(feed_middle, if feed_selected { selected_style } else { unselected_style }),
-        Span::raw(" "),
-        Span::styled(watch_later_middle, if watch_later_selected { selected_style } else { unselected_style }),
-    ]);
+    // Build line 2: tab middles with labels
+    let mut line2_spans: Vec<Span> = Vec::new();
+    for (i, (_, middle, _, is_selected)) in tab_parts.iter().enumerate() {
+        if i > 0 {
+            line2_spans.push(Span::raw(" "));
+        }
+        let style = if *is_selected { selected_style } else { unselected_style };
+        line2_spans.push(Span::styled(middle.clone(), style));
+    }
+
+    // Build line 3: tab bottoms
+    let mut line3_spans: Vec<Span> = Vec::new();
+    for (i, (_, _, bottom, is_selected)) in tab_parts.iter().enumerate() {
+        if i > 0 {
+            line3_spans.push(Span::raw(" "));
+        }
+        let style = selected_style;
+        line3_spans.push(Span::styled(bottom.clone(), style));
+    }
 
     let header_area1 = Rect { x: 0, y: 0, width: area.width, height: 1 };
     let header_area2 = Rect { x: 0, y: 1, width: area.width, height: 1 };
     let header_area3 = Rect { x: 0, y: 2, width: area.width, height: 1 };
 
-        // Line 3: tab bottom
-    let line3 = Line::from(vec![
-        Span::styled(feed_bottom, if feed_selected { selected_style } else { unselected_style }),
-        Span::raw((if feed_selected {" "} else {"─"}).repeat(spacing)),
-        Span::styled(watch_later_bottom, if watch_later_selected { selected_style } else { unselected_style }),
-        Span::raw((if watch_later_selected {" "} else {"─"}).repeat(spacing)),
-        Span::styled(refresh_text, refresh_style),
-        Span::raw("  "),
-        Span::styled(help_text, Style::default().fg(Color::Cyan)),
-        Span::raw(" "),
-    ]);
-    frame.render_widget(Paragraph::new(line1), header_area1);
-    frame.render_widget(Paragraph::new(line2), header_area2);
-    frame.render_widget(Paragraph::new(line3), header_area3);
+    frame.render_widget(Paragraph::new(Line::from(line1_spans)), header_area1);
+    frame.render_widget(Paragraph::new(Line::from(line2_spans)), header_area2);
+    frame.render_widget(Paragraph::new(Line::from(line3_spans)), header_area3);
+}
+
+/// Returns the click regions for header tabs as (start_col, end_col, Tab)
+/// This is used by the click handler in app.rs
+pub fn header_tab_regions() -> Vec<(u16, u16, Tab)> {
+    let tabs: &[(&str, Tab)] = &[
+        (" Feed ", Tab::Feed),
+        (" Watch Later ", Tab::WatchLater),
+    ];
+
+    let mut regions = Vec::new();
+    let mut x: u16 = 0;
+    for (label, tab) in tabs {
+        let width = label.chars().count() as u16 + 2; // +2 for borders
+        regions.push((x, x + width, *tab));
+        x += width + 1; // +1 for space between tabs
+    }
+    regions
 }
 
 fn render_grid(

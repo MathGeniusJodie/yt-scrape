@@ -158,24 +158,25 @@ impl App {
     async fn handle_mouse(&mut self, mouse: event::MouseEvent) -> Result<()> {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Check header clicks
-                if mouse.row == 0 {
-                    if mouse.column < 8 {
-                        // [Feed]
-                        self.state.current_tab = Tab::Feed;
-                        self.state.scroll_offset = 0;
-                        self.state.selected_index = None;
-                        self.needs_redraw = true;
-                    } else if mouse.column < 22 {
-                        // [Watch Later]
-                        self.state.current_tab = Tab::WatchLater;
-                        self.state.scroll_offset = 0;
-                        self.state.selected_index = None;
-                        self.needs_redraw = true;
-                    } else if mouse.column >= self.state.terminal_cols.saturating_sub(20) {
-                        // Right side buttons
+                // Check header clicks (all 3 rows)
+                if mouse.row < GridLayout::HEADER_HEIGHT {
+                    // Check tab regions
+                    let mut tab_clicked = false;
+                    for (start, end, tab) in ui::header_tab_regions() {
+                        if mouse.column >= start && mouse.column < end {
+                            self.state.current_tab = tab;
+                            self.state.scroll_offset = 0;
+                            self.state.selected_index = None;
+                            self.needs_redraw = true;
+                            tab_clicked = true;
+                            break;
+                        }
+                    }
+
+                    // Check right-side buttons (only on row 0 where they're rendered)
+                    if !tab_clicked && mouse.row == 0 && mouse.column >= self.state.terminal_cols.saturating_sub(10) {
                         let right_offset = self.state.terminal_cols - mouse.column;
-                        if right_offset > 10 {
+                        if right_offset > 4 {
                             // Refresh button area
                             if !self.state.is_refreshing {
                                 self.refresh().await?;
