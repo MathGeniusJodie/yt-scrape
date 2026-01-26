@@ -41,12 +41,12 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let unselected_style = Style::default().fg(Color::DarkGray);
 
     let refresh_style = if state.is_refreshing {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::RAPID_BLINK)
     } else {
         Style::default().fg(Color::Cyan)
     };
 
-    let refresh_label = if state.is_refreshing { " ↻… " } else { " ↻ " };
+    let refresh_label = if state.is_refreshing { " ↻ " } else { " ↻ " };
     let help_label = " ? ";
 
     // Build button parts (top, middle, bottom) for refresh and help
