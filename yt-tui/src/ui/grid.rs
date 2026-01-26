@@ -19,7 +19,7 @@ pub fn render(
 
     // Render video grid
     let videos = state.current_videos();
-    render_grid(frame, &videos, state, layout, thumb_cache);
+    render_grid(frame, &videos, state, layout, thumb_cache, area);
 
     // Render footer (status bar)
     render_footer(frame, state, &videos, area);
@@ -83,32 +83,58 @@ fn render_grid(
     state: &AppState,
     layout: &GridLayout,
     thumb_cache: &mut ThumbnailCache,
+    area: Rect,
 ) {
-    let start_idx = state.scroll_offset * layout.cols;
+    // Grid area (between header and footer)
+    let grid_area = Rect {
+        x: 0,
+        y: GridLayout::HEADER_HEIGHT,
+        width: area.width,
+        height: layout.grid_height,
+    };
 
-    for (i, video) in videos.iter().skip(start_idx).take(layout.visible_items).enumerate() {
-        let global_idx = start_idx + i;
+    // Calculate which video rows might be visible
+    let first_visible_row = state.scroll_offset / layout.card_height as usize;
+    let last_visible_row = (state.scroll_offset + layout.grid_height as usize) / layout.card_height as usize + 1;
 
-        if let Some((x, y, w, h)) = layout.card_area(global_idx, state.scroll_offset) {
-            let card_area = Rect {
-                x,
-                y,
-                width: w,
-                height: h,
-            };
+    let first_video = first_visible_row * layout.cols;
+    let last_video = ((last_visible_row + 1) * layout.cols).min(videos.len());
 
-            let is_selected = state.selected_index == Some(global_idx);
-            let is_watch_later = state.watch_later.contains(&video.video_id);
+    for idx in first_video..last_video {
+        if let Some(video) = videos.get(idx) {
+            if let Some((y_offset, x, w)) = layout.card_area(idx, state.scroll_offset) {
+                // Calculate visible portion of card
+                let visible_y_start = y_offset.max(0) as u16;
+                let clip_top = (-y_offset).max(0) as u16;
+                let visible_height = (layout.card_height as i16 - clip_top as i16)
+                    .min((layout.grid_height as i16) - (y_offset.max(0) as i16))
+                    .max(0) as u16;
 
-            render_video_card(
-                frame,
-                video,
-                card_area,
-                is_selected,
-                is_watch_later,
-                layout,
-                thumb_cache,
-            );
+                if visible_height == 0 {
+                    continue;
+                }
+
+                let card_area = Rect {
+                    x,
+                    y: grid_area.y + visible_y_start,
+                    width: w,
+                    height: visible_height,
+                };
+
+                let is_selected = state.selected_index == Some(idx);
+                let is_watch_later = state.watch_later.contains(&video.video_id);
+
+                render_video_card(
+                    frame,
+                    video,
+                    card_area,
+                    clip_top,
+                    is_selected,
+                    is_watch_later,
+                    layout,
+                    thumb_cache,
+                );
+            }
         }
     }
 }
@@ -117,6 +143,7 @@ fn render_video_card(
     frame: &mut Frame,
     video: &Video,
     area: Rect,
+    clip_top: u16,
     is_selected: bool,
     is_watch_later: bool,
     layout: &GridLayout,
@@ -136,68 +163,99 @@ fn render_video_card(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
     // Thumbnail area
     let thumb_width = layout.thumbnail_width();
     let thumb_height = layout.thumbnail_height();
 
-    if let Some(rendered) = thumb_cache.get_rendered(&video.video_id, thumb_width, thumb_height) {
-        // Render the chafa output with ANSI color codes
-        let thumb_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: thumb_width,
-            height: thumb_height,
-        };
+    // Calculate how much of the thumbnail is clipped
+    let thumb_clip = clip_top.saturating_sub(1); // -1 for border
+    let thumb_visible_height = thumb_height.saturating_sub(thumb_clip).min(inner.height);
 
-        // Convert ANSI escape codes to ratatui Text
-        if let Ok(text) = rendered.into_text() {
-            frame.render_widget(Paragraph::new(text), thumb_area);
+    if thumb_visible_height > 0 && thumb_clip < thumb_height {
+        if let Some(rendered) = thumb_cache.get_rendered(&video.video_id, thumb_width, thumb_height) {
+            let thumb_area = Rect {
+                x: inner.x,
+                y: inner.y,
+                width: thumb_width.min(inner.width),
+                height: thumb_visible_height,
+            };
+
+            // Convert ANSI and skip clipped lines
+            if let Ok(text) = rendered.into_text() {
+                let lines: Vec<Line> = text
+                    .lines
+                    .into_iter()
+                    .skip(thumb_clip as usize)
+                    .take(thumb_visible_height as usize)
+                    .collect();
+                frame.render_widget(Paragraph::new(lines), thumb_area);
+            }
+        } else {
+            // Placeholder while loading
+            if thumb_clip == 0 {
+                let placeholder = Paragraph::new("[Loading...]")
+                    .style(Style::default().fg(Color::DarkGray));
+                let thumb_area = Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: thumb_visible_height.min(1),
+                };
+                frame.render_widget(placeholder, thumb_area);
+            }
         }
-    } else {
-        // Placeholder while loading
-        let placeholder = Paragraph::new("[Loading...]")
-            .style(Style::default().fg(Color::DarkGray));
-        let thumb_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: thumb_height.min(inner.height),
-        };
-        frame.render_widget(placeholder, thumb_area);
     }
 
     // Text area below thumbnail
-    let text_y = inner.y + thumb_height;
-    let text_height = inner.height.saturating_sub(thumb_height);
-
-    if text_height > 0 {
-        let text_area = Rect {
-            x: inner.x,
-            y: text_y,
-            width: inner.width,
-            height: text_height,
+    let text_start_in_card = thumb_height + 1; // +1 for border
+    if clip_top < text_start_in_card + 3 {
+        let text_clip = clip_top.saturating_sub(text_start_in_card);
+        let text_y = if clip_top <= text_start_in_card {
+            inner.y + thumb_height.saturating_sub(thumb_clip)
+        } else {
+            inner.y
         };
+        let text_height = inner.height.saturating_sub(thumb_height.saturating_sub(thumb_clip));
 
-        // Title (truncate to fit)
-        let title = truncate_str(&video.title, inner.width as usize * 2);
-        let channel = truncate_str(&video.channel_name, inner.width as usize);
-        let time_ago = format_time_ago(&video.published);
+        if text_height > 0 {
+            let text_area = Rect {
+                x: inner.x,
+                y: text_y,
+                width: inner.width,
+                height: text_height,
+            };
 
-        let watch_later_marker = if is_watch_later { " [W]" } else { "" };
+            // Title (truncate to fit)
+            let title = truncate_str(&video.title, inner.width as usize * 2);
+            let channel = truncate_str(&video.channel_name, inner.width as usize);
+            let time_ago = format_time_ago(&video.published);
 
-        let text = vec![
-            Line::from(Span::styled(
-                title,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                format!("{}{}", channel, watch_later_marker),
-                Style::default().fg(Color::Gray),
-            )),
-            Line::from(Span::styled(time_ago, Style::default().fg(Color::DarkGray))),
-        ];
+            let watch_later_marker = if is_watch_later { " [W]" } else { "" };
 
-        frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), text_area);
+            let mut text_lines = vec![
+                Line::from(Span::styled(
+                    title,
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("{}{}", channel, watch_later_marker),
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from(Span::styled(time_ago, Style::default().fg(Color::DarkGray))),
+            ];
+
+            // Skip clipped lines
+            let text: Vec<Line> = text_lines
+                .drain(..)
+                .skip(text_clip as usize)
+                .collect();
+
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), text_area);
+        }
     }
 }
 

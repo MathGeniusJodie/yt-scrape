@@ -114,10 +114,10 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') => self.move_selection(1),
             KeyCode::PageUp => {
-                self.scroll(-(self.layout.visible_rows as i32));
+                self.scroll(-(self.layout.grid_height as i32));
             }
             KeyCode::PageDown => {
-                self.scroll(self.layout.visible_rows as i32);
+                self.scroll(self.layout.grid_height as i32);
             }
             KeyCode::Home => {
                 self.state.scroll_offset = 0;
@@ -125,8 +125,7 @@ impl App {
             }
             KeyCode::End => {
                 let total = self.state.current_videos().len();
-                let max_scroll = total.saturating_sub(self.layout.visible_items) / self.layout.cols;
-                self.state.scroll_offset = max_scroll;
+                self.state.scroll_offset = self.layout.max_scroll(total);
                 self.state.selected_index = Some(total.saturating_sub(1));
             }
 
@@ -207,14 +206,11 @@ impl App {
         self.layout = GridLayout::calculate(cols, rows);
         self.thumb_cache.clear_rendered_cache();
 
-        // Adjust selection to stay visible
-        if let Some(selected) = self.state.selected_index {
-            let selected_row = selected / self.layout.cols;
-            if selected_row < self.state.scroll_offset {
-                self.state.scroll_offset = selected_row;
-            } else if selected_row >= self.state.scroll_offset + self.layout.visible_rows {
-                self.state.scroll_offset = selected_row.saturating_sub(self.layout.visible_rows - 1);
-            }
+        // Clamp scroll offset to valid range
+        let total = self.state.current_videos().len();
+        let max_scroll = self.layout.max_scroll(total);
+        if self.state.scroll_offset > max_scroll {
+            self.state.scroll_offset = max_scroll;
         }
     }
 
@@ -228,19 +224,24 @@ impl App {
         let new_idx = (current + delta).clamp(0, total as i32 - 1) as usize;
         self.state.selected_index = Some(new_idx);
 
-        // Adjust scroll to keep selection visible
+        // Adjust scroll to keep selection visible (line-based)
         let selected_row = new_idx / self.layout.cols;
-        if selected_row < self.state.scroll_offset {
-            self.state.scroll_offset = selected_row;
-        } else if selected_row >= self.state.scroll_offset + self.layout.visible_rows {
-            self.state.scroll_offset = selected_row.saturating_sub(self.layout.visible_rows - 1);
+        let card_top = selected_row * self.layout.card_height as usize;
+        let card_bottom = card_top + self.layout.card_height as usize;
+
+        // Scroll up if selection is above viewport
+        if card_top < self.state.scroll_offset {
+            self.state.scroll_offset = card_top;
+        }
+        // Scroll down if selection is below viewport
+        else if card_bottom > self.state.scroll_offset + self.layout.grid_height as usize {
+            self.state.scroll_offset = card_bottom.saturating_sub(self.layout.grid_height as usize);
         }
     }
 
     fn scroll(&mut self, delta: i32) {
         let total = self.state.current_videos().len();
-        let total_rows = (total + self.layout.cols - 1) / self.layout.cols;
-        let max_scroll = total_rows.saturating_sub(self.layout.visible_rows);
+        let max_scroll = self.layout.max_scroll(total);
 
         let new_offset = (self.state.scroll_offset as i32 + delta).clamp(0, max_scroll as i32);
         self.state.scroll_offset = new_offset as usize;
