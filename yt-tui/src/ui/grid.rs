@@ -46,8 +46,19 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(Color::Cyan)
     };
 
-    let refresh_text = if state.is_refreshing { "↻…" } else { "↻" };
-    let help_text = "?";
+    let refresh_label = if state.is_refreshing { " ↻… " } else { " ↻ " };
+    let help_label = " ? ";
+
+    // Build button parts (top, middle, bottom) for refresh and help
+    let refresh_width = refresh_label.chars().count();
+    let refresh_top = format!("╭{}╮", "─".repeat(refresh_width));
+    let refresh_middle = format!("│{}│", refresh_label);
+    let refresh_bottom = format!("╰{}╯", "─".repeat(refresh_width));
+
+    let help_width = help_label.chars().count();
+    let help_top = format!("╭{}╮", "─".repeat(help_width));
+    let help_middle = format!("│{}│", help_label);
+    let help_bottom = format!("╰{}╯", "─".repeat(help_width));
 
     // Build tab parts for each tab
     let tab_parts: Vec<(String, String, String, bool)> = tabs
@@ -70,7 +81,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     // Calculate total tabs width
     let tabs_width: usize = tab_parts.iter().map(|(top, _, _, _)| top.chars().count()).sum::<usize>()
         + tab_parts.len().saturating_sub(1); // spaces between tabs
-    let right_side_len = refresh_text.chars().count() + 2 + help_text.chars().count() + 2;
+    let right_side_len = refresh_top.chars().count() + 1 + help_top.chars().count();
     let spacing = (area.width as usize).saturating_sub(tabs_width + right_side_len + 1);
 
     // Build line 1: tab tops with right-aligned buttons
@@ -83,10 +94,9 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         line1_spans.push(Span::styled(top.clone(), style));
     }
     line1_spans.push(Span::raw(" ".repeat(spacing)));
-    line1_spans.push(Span::styled(refresh_text, refresh_style));
-    line1_spans.push(Span::raw("  "));
-    line1_spans.push(Span::styled(help_text, Style::default().fg(Color::Cyan)));
+    line1_spans.push(Span::styled(&refresh_top, refresh_style));
     line1_spans.push(Span::raw(" "));
+    line1_spans.push(Span::styled(&help_top, Style::default().fg(Color::Cyan)));
 
     // Build line 2: tab middles with labels
     let mut line2_spans: Vec<Span> = Vec::new();
@@ -97,16 +107,24 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         let style = if *is_selected { selected_style } else { unselected_style };
         line2_spans.push(Span::styled(middle.clone(), style));
     }
+    line2_spans.push(Span::raw(" ".repeat(spacing)));
+    line2_spans.push(Span::styled(&refresh_middle, refresh_style));
+    line2_spans.push(Span::raw(" "));
+    line2_spans.push(Span::styled(&help_middle, Style::default().fg(Color::Cyan)));
 
     // Build line 3: tab bottoms
     let mut line3_spans: Vec<Span> = Vec::new();
     for (i, (_, _, bottom, is_selected)) in tab_parts.iter().enumerate() {
         if i > 0 {
-            line3_spans.push(Span::raw(" "));
+            line3_spans.push(Span::raw("─"));
         }
         let style = selected_style;
         line3_spans.push(Span::styled(bottom.clone(), style));
     }
+    line3_spans.push(Span::raw(" ".repeat(spacing)));
+    line3_spans.push(Span::styled(&refresh_bottom, refresh_style));
+    line3_spans.push(Span::raw(" "));
+    line3_spans.push(Span::styled(&help_bottom, Style::default().fg(Color::Cyan)));
 
     let header_area1 = Rect { x: 0, y: 0, width: area.width, height: 1 };
     let header_area2 = Rect { x: 0, y: 1, width: area.width, height: 1 };
