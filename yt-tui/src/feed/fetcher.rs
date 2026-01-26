@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, Semaphore};
 
 /// Progress updates during feed fetching
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum FetchProgress {
     Started { total: usize },
     ChannelComplete { videos: Vec<Video> },

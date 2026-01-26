@@ -88,7 +88,7 @@ impl GridLayout {
 
     /// Maximum scroll offset in lines
     pub fn max_scroll(&self, total_items: usize) -> usize {
-        let total_rows = (total_items + self.cols - 1) / self.cols;
+        let total_rows = total_items.div_ceil(self.cols);
         let total_height = total_rows * self.card_height as usize;
         total_height.saturating_sub(self.grid_height as usize)
     }

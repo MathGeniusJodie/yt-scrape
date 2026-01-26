@@ -120,6 +120,7 @@ impl ThumbnailCache {
     }
 
     /// Clear memory cache (useful when terminal resizes)
+    #[allow(dead_code)]
     pub fn clear_rendered_cache(&mut self) {
         self.rendered.clear();
     }

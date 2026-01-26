@@ -42,13 +42,13 @@ impl App {
         let size = terminal.size()?;
         let layout = GridLayout::calculate(size.width, size.height);
 
-        let mut state = AppState::default();
-        state.terminal_cols = size.width;
-        state.terminal_rows = size.height;
-
-        // Load cached data
-        state.videos = storage.load_videos();
-        state.watch_later = storage.load_watch_later();
+        let state = AppState {
+            terminal_cols: size.width,
+            terminal_rows: size.height,
+            videos: storage.load_videos(),
+            watch_later: storage.load_watch_later(),
+            ..Default::default()
+        };
 
         Ok(Self {
             state,

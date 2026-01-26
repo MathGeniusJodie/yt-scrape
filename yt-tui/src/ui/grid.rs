@@ -114,12 +114,11 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Build line 3: tab bottoms
     let mut line3_spans: Vec<Span> = Vec::new();
-    for (i, (_, _, bottom, is_selected)) in tab_parts.iter().enumerate() {
+    for (i, (_, _, bottom, _)) in tab_parts.iter().enumerate() {
         if i > 0 {
             line3_spans.push(Span::raw("─"));
         }
-        let style = selected_style;
-        line3_spans.push(Span::styled(bottom.clone(), style));
+        line3_spans.push(Span::styled(bottom.clone(), selected_style));
     }
     line3_spans.push(Span::raw(" ".repeat(spacing)));
     line3_spans.push(Span::styled(&refresh_bottom, refresh_style));
@@ -183,7 +182,7 @@ fn render_grid(
                 let visible_y_start = y_offset.max(0) as u16;
                 let clip_top = (-y_offset).max(0) as u16;
                 let visible_height = (layout.card_height as i16 - clip_top as i16)
-                    .min((layout.grid_height as i16) - (y_offset.max(0) as i16))
+                    .min((layout.grid_height as i16) - y_offset.max(0))
                     .max(0) as u16;
 
                 if visible_height == 0 {
@@ -215,6 +214,7 @@ fn render_grid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_video_card(
     frame: &mut Frame,
     video: &Video,
@@ -339,7 +339,7 @@ fn render_video_card(
 
     // Render watch later checkbox on bottom border (overlapping like a title)
     let bottom_border_row = area.y + area.height - 1;
-    if bottom_border_row >= area.y && bottom_border_row < area.y + area.height {
+    if area.height > 0 {
         let (checkbox_text, checkbox_style) = if is_watch_later {
             (" W:☑ ", Style::default().fg(Color::Rgb(255, 165, 0))) // Bright orange
         } else {
@@ -456,11 +456,6 @@ fn wrap_title_two_lines(s: &str, line_width: usize) -> (String, String) {
             break_at = i;
             break;
         }
-    }
-
-    // If no space found, just break at line_width
-    if break_at == line_width {
-        break_at = line_width;
     }
 
     let line1: String = chars[..break_at].iter().collect();
