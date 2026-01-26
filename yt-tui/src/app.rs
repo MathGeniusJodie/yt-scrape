@@ -24,6 +24,7 @@ pub struct App {
     thumb_cache: ThumbnailCache,
     subs_file: PathBuf,
     layout: GridLayout,
+    needs_redraw: bool,
 }
 
 impl App {
@@ -56,6 +57,7 @@ impl App {
             thumb_cache,
             subs_file,
             layout,
+            needs_redraw: true,
         })
     }
 
@@ -64,10 +66,13 @@ impl App {
         self.queue_thumbnail_downloads().await;
 
         loop {
-            // Draw UI
-            self.terminal.draw(|f| {
-                ui::render(f, &self.state, &self.layout, &mut self.thumb_cache);
-            })?;
+            // Only redraw when state has changed
+            if self.needs_redraw {
+                self.terminal.draw(|f| {
+                    ui::render(f, &self.state, &self.layout, &mut self.thumb_cache);
+                })?;
+                self.needs_redraw = false;
+            }
 
             // Handle events with a short timeout
             if event::poll(Duration::from_millis(100))? {
@@ -103,6 +108,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
             ) {
                 self.state.show_help = false;
+                self.needs_redraw = true;
             }
             return Ok(false);
         }
@@ -122,11 +128,13 @@ impl App {
             KeyCode::Home => {
                 self.state.scroll_offset = 0;
                 self.state.selected_index = Some(0);
+                self.needs_redraw = true;
             }
             KeyCode::End => {
                 let total = self.state.current_videos().len();
                 self.state.scroll_offset = self.layout.max_scroll(total);
                 self.state.selected_index = Some(total.saturating_sub(1));
+                self.needs_redraw = true;
             }
 
             // Actions
@@ -134,7 +142,10 @@ impl App {
             KeyCode::Char('w') => self.toggle_watch_later()?,
             KeyCode::Char('r') => self.refresh().await?,
             KeyCode::Tab => self.switch_tab(),
-            KeyCode::Char('?') => self.state.show_help = true,
+            KeyCode::Char('?') => {
+                self.state.show_help = true;
+                self.needs_redraw = true;
+            }
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
 
@@ -154,11 +165,13 @@ impl App {
                         self.state.current_tab = Tab::Feed;
                         self.state.scroll_offset = 0;
                         self.state.selected_index = None;
+                        self.needs_redraw = true;
                     } else if mouse.column < 22 {
                         // [Watch Later]
                         self.state.current_tab = Tab::WatchLater;
                         self.state.scroll_offset = 0;
                         self.state.selected_index = None;
+                        self.needs_redraw = true;
                     } else if mouse.column >= self.state.terminal_cols.saturating_sub(20) {
                         // Right side buttons
                         let right_offset = self.state.terminal_cols - mouse.column;
@@ -170,6 +183,7 @@ impl App {
                         } else {
                             // Help button
                             self.state.show_help = !self.state.show_help;
+                            self.needs_redraw = true;
                         }
                     }
                 } else {
@@ -194,6 +208,7 @@ impl App {
                             self.play_selected()?;
                         } else {
                             self.state.selected_index = Some(idx);
+                            self.needs_redraw = true;
                         }
                     }
                 }
@@ -221,6 +236,7 @@ impl App {
         if self.state.scroll_offset > max_scroll {
             self.state.scroll_offset = max_scroll;
         }
+        self.needs_redraw = true;
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -246,6 +262,7 @@ impl App {
         else if card_bottom > self.state.scroll_offset + self.layout.grid_height as usize {
             self.state.scroll_offset = card_bottom.saturating_sub(self.layout.grid_height as usize);
         }
+        self.needs_redraw = true;
     }
 
     fn scroll(&mut self, delta: i32) {
@@ -253,7 +270,10 @@ impl App {
         let max_scroll = self.layout.max_scroll(total);
 
         let new_offset = (self.state.scroll_offset as i32 + delta).clamp(0, max_scroll as i32);
-        self.state.scroll_offset = new_offset as usize;
+        if new_offset as usize != self.state.scroll_offset {
+            self.state.scroll_offset = new_offset as usize;
+            self.needs_redraw = true;
+        }
     }
 
     fn play_selected(&self) -> Result<()> {
@@ -277,6 +297,7 @@ impl App {
                     self.state.watch_later.insert(video_id);
                 }
                 self.storage.save_watch_later(&self.state.watch_later)?;
+                self.needs_redraw = true;
             }
         }
         Ok(())
@@ -289,6 +310,7 @@ impl App {
         };
         self.state.scroll_offset = 0;
         self.state.selected_index = None;
+        self.needs_redraw = true;
     }
 
     async fn refresh(&mut self) -> Result<()> {
@@ -353,6 +375,7 @@ impl App {
 
         self.state.is_refreshing = false;
         self.state.status_message = None;
+        self.needs_redraw = true;
 
         Ok(())
     }
