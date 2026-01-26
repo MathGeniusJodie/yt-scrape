@@ -3,7 +3,7 @@ use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 /// Render the entire UI
 pub fn render(
@@ -229,23 +229,28 @@ fn render_video_card(
                 height: text_height,
             };
 
-            // Title (truncate to fit)
-            let title = truncate_str(&video.title, inner.width as usize * 2);
+            // Title (always exactly 2 lines)
+            let (title_line1, title_line2) = wrap_title_two_lines(&video.title, inner.width as usize);
             let channel = truncate_str(&video.channel_name, inner.width as usize);
             let time_ago = format_time_ago(&video.published);
 
             let watch_later_marker = if is_watch_later { " [W]" } else { "" };
+            let title_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+
+            // Calculate padding to right-align timestamp
+            let channel_part = format!("{}{}", channel, watch_later_marker);
+            let channel_len = channel_part.chars().count();
+            let time_len = time_ago.chars().count();
+            let padding = (inner.width as usize).saturating_sub(channel_len + time_len);
 
             let mut text_lines = vec![
-                Line::from(Span::styled(
-                    title,
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!("{}{}", channel, watch_later_marker),
-                    Style::default().fg(Color::Gray),
-                )),
-                Line::from(Span::styled(time_ago, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(title_line1, title_style)),
+                Line::from(Span::styled(title_line2, title_style)),
+                Line::from(vec![
+                    Span::styled(channel_part, Style::default().fg(Color::Gray)),
+                    Span::raw(" ".repeat(padding)),
+                    Span::styled(time_ago, Style::default().fg(Color::DarkGray)),
+                ]),
             ];
 
             // Skip clipped lines
@@ -254,7 +259,7 @@ fn render_video_card(
                 .skip(text_clip as usize)
                 .collect();
 
-            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), text_area);
+            frame.render_widget(Paragraph::new(text), text_area);
         }
     }
 }
@@ -331,8 +336,45 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", s.chars().take(max_len.saturating_sub(3)).collect::<String>())
+        format!("{}…", s.chars().take(max_len.saturating_sub(1)).collect::<String>())
     }
+}
+
+/// Wrap text to exactly 2 lines, truncating with ellipsis if needed
+fn wrap_title_two_lines(s: &str, line_width: usize) -> (String, String) {
+    let chars: Vec<char> = s.chars().collect();
+
+    if chars.len() <= line_width {
+        // Fits in one line - return with empty second line
+        return (s.to_string(), String::new());
+    }
+
+    // Find a good break point for first line (prefer breaking at space)
+    let mut break_at = line_width;
+    for i in (0..line_width).rev() {
+        if chars[i] == ' ' {
+            break_at = i;
+            break;
+        }
+    }
+
+    // If no space found, just break at line_width
+    if break_at == line_width {
+        break_at = line_width;
+    }
+
+    let line1: String = chars[..break_at].iter().collect();
+    let remaining: String = chars[break_at..].iter().collect();
+    let remaining = remaining.trim_start();
+
+    // Second line - truncate if needed
+    let line2 = if remaining.chars().count() <= line_width {
+        remaining.to_string()
+    } else {
+        format!("{}…", remaining.chars().take(line_width.saturating_sub(1)).collect::<String>())
+    };
+
+    (line1, line2)
 }
 
 fn format_time_ago(dt: &chrono::DateTime<chrono::Utc>) -> String {
