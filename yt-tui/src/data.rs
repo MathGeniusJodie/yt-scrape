@@ -1,3 +1,4 @@
+use crate::urls;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -18,13 +19,21 @@ impl Video {
     /// Returns the YouTube watch URL
     #[allow(dead_code)]
     pub fn watch_url(&self) -> String {
-        format!("https://www.youtube.com/watch?v={}", self.video_id)
+        urls::watch_url(&self.video_id)
+    }
+
+    /// Returns the YouTube thumbnail URL
+    #[allow(dead_code)]
+    pub fn thumbnail_url(&self) -> String {
+        urls::thumbnail_url(&self.video_id)
     }
 
     /// Returns the local thumbnail cache path
     #[allow(dead_code)]
     pub fn thumbnail_path(&self, cache_dir: &Path) -> PathBuf {
-        cache_dir.join("thumbnails").join(format!("{}.jpg", self.video_id))
+        cache_dir
+            .join("thumbnails")
+            .join(format!("{}.jpg", self.video_id))
     }
 }
 

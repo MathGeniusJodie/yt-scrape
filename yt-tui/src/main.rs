@@ -4,6 +4,7 @@ mod data;
 mod feed;
 mod player;
 mod ui;
+mod urls;
 
 use app::App;
 use std::path::PathBuf;

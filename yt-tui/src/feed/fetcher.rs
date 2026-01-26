@@ -1,16 +1,26 @@
 use crate::data::Video;
 use crate::feed::parser::parse_feed;
+use crate::urls;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 
 /// Progress updates during feed fetching
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum FetchProgress {
-    Started { total: usize },
-    ChannelComplete { videos: Vec<Video> },
-    Error { channel_id: String, error: String },
-    AllComplete { total_videos: usize },
+    Started {
+        total: usize,
+    },
+    #[allow(dead_code)]
+    ChannelComplete {
+        videos: Vec<Video>,
+    },
+    Error {
+        channel_id: String,
+        error: String,
+    },
+    AllComplete {
+        total_videos: usize,
+    },
 }
 
 /// Fetch all feeds from the given channel IDs
@@ -38,17 +48,16 @@ pub async fn fetch_all_feeds(
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            let url = format!(
-                "https://www.youtube.com/feeds/videos.xml?channel_id={}",
-                cid
-            );
+            let url = urls::feed_url(&cid);
 
             match client.get(&url).send().await {
                 Ok(resp) => match resp.text().await {
                     Ok(text) => {
                         let videos = parse_feed(&text, &cid);
                         let _ = tx
-                            .send(FetchProgress::ChannelComplete { videos: videos.clone() })
+                            .send(FetchProgress::ChannelComplete {
+                                videos: videos.clone(),
+                            })
                             .await;
                         videos
                     }

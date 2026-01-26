@@ -1,9 +1,11 @@
-use ansi_to_tui::IntoText;
 use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
+use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 /// Render the entire UI
@@ -21,7 +23,15 @@ pub fn render(
 
     // Render video grid
     let videos = state.current_videos();
-    render_grid(frame, &videos, state, layout, thumb_cache, area, scroll_state);
+    render_grid(
+        frame,
+        &videos,
+        state,
+        layout,
+        thumb_cache,
+        area,
+        scroll_state,
+    );
 
     // Render footer (status bar)
     render_footer(frame, state, &videos, area);
@@ -32,117 +42,116 @@ pub fn render(
     }
 }
 
+/// A 3-line box button (top border, content, bottom border)
+struct BoxButton {
+    top: String,
+    middle: String,
+    bottom: String,
+}
+
+impl BoxButton {
+    fn new(label: &str) -> Self {
+        let width = label.chars().count();
+        Self {
+            top: format!("╭{}╮", "─".repeat(width)),
+            middle: format!("│{}│", label),
+            bottom: format!("╰{}╯", "─".repeat(width)),
+        }
+    }
+
+    fn new_tab(label: &str, is_selected: bool) -> Self {
+        let width = label.chars().count();
+        let bottom = if is_selected {
+            format!("╯{}╰", " ".repeat(width))
+        } else {
+            format!("─{}─", "─".repeat(width))
+        };
+        Self {
+            top: format!("╭{}╮", "─".repeat(width)),
+            middle: format!("│{}│", label),
+            bottom,
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.top.chars().count()
+    }
+}
+
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
-    // Tab definitions: (label, Tab variant)
-    let tabs: &[(&str, Tab)] = &[
-        (" Feed ", Tab::Feed),
-        (" Watch Later ", Tab::WatchLater),
-    ];
+    let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (" Watch Later ", Tab::WatchLater)];
 
     let selected_style = Style::default().fg(Color::White);
     let unselected_style = Style::default().fg(Color::DarkGray);
-
+    let help_style = Style::default().fg(Color::Cyan);
     let refresh_style = if state.is_refreshing {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::RAPID_BLINK)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::RAPID_BLINK)
     } else {
-        Style::default().fg(Color::Cyan)
+        help_style
     };
 
-    let refresh_label = if state.is_refreshing { " ↻ " } else { " ↻ " };
-    let help_label = " ? ";
-
-    // Build button parts (top, middle, bottom) for refresh and help
-    let refresh_width = refresh_label.chars().count();
-    let refresh_top = format!("╭{}╮", "─".repeat(refresh_width));
-    let refresh_middle = format!("│{}│", refresh_label);
-    let refresh_bottom = format!("╰{}╯", "─".repeat(refresh_width));
-
-    let help_width = help_label.chars().count();
-    let help_top = format!("╭{}╮", "─".repeat(help_width));
-    let help_middle = format!("│{}│", help_label);
-    let help_bottom = format!("╰{}╯", "─".repeat(help_width));
-
-    // Build tab parts for each tab
-    let tab_parts: Vec<(String, String, String, bool)> = tabs
+    // Build buttons
+    let refresh_btn = BoxButton::new(" ↻ ");
+    let help_btn = BoxButton::new(" ? ");
+    let tab_btns: Vec<(BoxButton, bool)> = tabs
         .iter()
         .map(|(label, tab)| {
-            let width = label.chars().count();
-            let top = format!("╭{}╮", "─".repeat(width));
-            let middle = format!("│{}│", label);
             let is_selected = state.current_tab == *tab;
-            let bottom = if is_selected{
-                format!("╯{}╰", " ".repeat(width))   
-            } else {
-                format!("─{}─", "─".repeat(width))
-            };
-            
-            (top, middle, bottom, is_selected)
+            (BoxButton::new_tab(label, is_selected), is_selected)
         })
         .collect();
 
-    // Calculate total tabs width
-    let tabs_width: usize = tab_parts.iter().map(|(top, _, _, _)| top.chars().count()).sum::<usize>()
-        + tab_parts.len().saturating_sub(1); // spaces between tabs
-    let right_side_len = refresh_top.chars().count() + 1 + help_top.chars().count();
-    let spacing = (area.width as usize).saturating_sub(tabs_width + right_side_len);
+    // Calculate spacing
+    let tabs_width: usize =
+        tab_btns.iter().map(|(b, _)| b.width()).sum::<usize>() + tab_btns.len().saturating_sub(1);
+    let right_width = refresh_btn.width() + 1 + help_btn.width();
+    let spacing = (area.width as usize).saturating_sub(tabs_width + right_width);
 
-    // Build line 1: tab tops with right-aligned buttons
-    let mut line1_spans: Vec<Span> = Vec::new();
-    for (i, (top, _, _, is_selected)) in tab_parts.iter().enumerate() {
-        if i > 0 {
-            line1_spans.push(Span::raw(" "));
+    // Build all three lines using a helper closure
+    let build_line = |get_part: fn(&BoxButton) -> &str, separator: &str| -> Vec<Span> {
+        let mut spans = Vec::new();
+        for (i, (btn, is_selected)) in tab_btns.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(separator.to_string()));
+            }
+            let style = if *is_selected {
+                selected_style
+            } else {
+                unselected_style
+            };
+            spans.push(Span::styled(get_part(btn).to_string(), style));
         }
-        let style = if *is_selected { selected_style } else { unselected_style };
-        line1_spans.push(Span::styled(top.clone(), style));
+        spans.push(Span::raw(separator.repeat(spacing)));
+        spans.push(Span::styled(
+            get_part(&refresh_btn).to_string(),
+            refresh_style,
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(get_part(&help_btn).to_string(), help_style));
+        spans
+    };
+
+    let line1 = build_line(|b| &b.top, " ");
+    let line2 = build_line(|b| &b.middle, " ");
+    let line3 = build_line(|b| &b.bottom, "─");
+
+    for (y, spans) in [line1, line2, line3].into_iter().enumerate() {
+        let rect = Rect {
+            x: 0,
+            y: y as u16,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     }
-    line1_spans.push(Span::raw(" ".repeat(spacing)));
-    line1_spans.push(Span::styled(&refresh_top, refresh_style));
-    line1_spans.push(Span::raw(" "));
-    line1_spans.push(Span::styled(&help_top, Style::default().fg(Color::Cyan)));
-
-    // Build line 2: tab middles with labels
-    let mut line2_spans: Vec<Span> = Vec::new();
-    for (i, (_, middle, _, is_selected)) in tab_parts.iter().enumerate() {
-        if i > 0 {
-            line2_spans.push(Span::raw(" "));
-        }
-        let style = if *is_selected { selected_style } else { unselected_style };
-        line2_spans.push(Span::styled(middle.clone(), style));
-    }
-    line2_spans.push(Span::raw(" ".repeat(spacing)));
-    line2_spans.push(Span::styled(&refresh_middle, refresh_style));
-    line2_spans.push(Span::raw(" "));
-    line2_spans.push(Span::styled(&help_middle, Style::default().fg(Color::Cyan)));
-
-    // Build line 3: tab bottoms
-    let mut line3_spans: Vec<Span> = Vec::new();
-    for (i, (_, _, bottom, _)) in tab_parts.iter().enumerate() {
-        if i > 0 {
-            line3_spans.push(Span::raw("─"));
-        }
-        line3_spans.push(Span::styled(bottom.clone(), selected_style));
-    }
-    line3_spans.push(Span::raw("─".repeat(spacing)));
-    line3_spans.push(Span::styled(&refresh_bottom, refresh_style));
-    line3_spans.push(Span::raw(" "));
-    line3_spans.push(Span::styled(&help_bottom, Style::default().fg(Color::Cyan)));
-
-    let header_area1 = Rect { x: 0, y: 0, width: area.width, height: 1 };
-    let header_area2 = Rect { x: 0, y: 1, width: area.width, height: 1 };
-    let header_area3 = Rect { x: 0, y: 2, width: area.width, height: 1 };
-
-    frame.render_widget(Paragraph::new(Line::from(line1_spans)), header_area1);
-    frame.render_widget(Paragraph::new(Line::from(line2_spans)), header_area2);
-    frame.render_widget(Paragraph::new(Line::from(line3_spans)), header_area3);
 }
 
 /// Returns the click regions for header tabs as (start_col, end_col, Tab)
 /// This is used by the click handler in app.rs
 pub fn header_tab_regions() -> Vec<(u16, u16, Tab)> {
-    let tabs: &[(&str, Tab)] = &[
-        (" Feed ", Tab::Feed),
-        (" Watch Later ", Tab::WatchLater),
-    ];
+    let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (" Watch Later ", Tab::WatchLater)];
 
     let mut regions = Vec::new();
     let mut x: u16 = 0;
@@ -183,7 +192,8 @@ fn render_grid(
     // Calculate which rows are visible for performance (don't render off-screen cards)
     let scroll_offset = scroll_state.offset().y as usize;
     let first_visible_row = scroll_offset / layout.card_height as usize;
-    let last_visible_row = (scroll_offset + layout.grid_height as usize) / layout.card_height as usize + 1;
+    let last_visible_row =
+        (scroll_offset + layout.grid_height as usize) / layout.card_height as usize + 1;
     let first_video = first_visible_row * layout.cols;
     let last_video = ((last_visible_row + 1) * layout.cols).min(videos.len());
 
@@ -225,8 +235,7 @@ fn render_grid(
         .track_symbol(None)
         .thumb_style(Style::default().fg(Color::Cyan));
 
-    let mut scrollbar_state = ScrollbarState::new(content_height as usize)
-        .position(scroll_offset);
+    let mut scrollbar_state = ScrollbarState::new(content_height as usize).position(scroll_offset);
 
     frame.render_stateful_widget(scrollbar, grid_area, &mut scrollbar_state);
 }
@@ -301,7 +310,9 @@ fn render_video_card(
         let channel = truncate_str(&video.channel_name, inner.width as usize);
         let time_ago = format_time_ago(&video.published);
 
-        let title_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let title_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
 
         // Calculate padding to right-align timestamp
         let channel_len = channel.chars().count();
@@ -366,8 +377,11 @@ fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: R
         )
     };
 
-    let footer = Paragraph::new(status)
-        .style(Style::default().fg(Color::LightCyan).bg(Color::Rgb(20, 20, 20)));
+    let footer = Paragraph::new(status).style(
+        Style::default()
+            .fg(Color::LightCyan)
+            .bg(Color::Rgb(20, 20, 20)),
+    );
 
     frame.render_widget(footer, footer_area);
 }
@@ -419,7 +433,12 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}…", s.chars().take(max_len.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            s.chars()
+                .take(max_len.saturating_sub(1))
+                .collect::<String>()
+        )
     }
 }
 
@@ -449,7 +468,13 @@ fn wrap_title_two_lines(s: &str, line_width: usize) -> (String, String) {
     let line2 = if remaining.chars().count() <= line_width {
         remaining.to_string()
     } else {
-        format!("{}…", remaining.chars().take(line_width.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            remaining
+                .chars()
+                .take(line_width.saturating_sub(1))
+                .collect::<String>()
+        )
     };
 
     (line1, line2)

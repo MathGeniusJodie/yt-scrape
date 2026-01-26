@@ -12,11 +12,11 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use tui_scrollview::ScrollViewState;
 use std::io::{stdout, Stdout};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tui_scrollview::ScrollViewState;
 
 pub struct App {
     pub state: AppState,
@@ -72,7 +72,13 @@ impl App {
             // Only redraw when state has changed
             if self.needs_redraw {
                 self.terminal.draw(|f| {
-                    ui::render(f, &self.state, &self.layout, &mut self.thumb_cache, &mut self.scroll_state);
+                    ui::render(
+                        f,
+                        &self.state,
+                        &self.layout,
+                        &mut self.thumb_cache,
+                        &mut self.scroll_state,
+                    );
                 })?;
                 self.needs_redraw = false;
             }
@@ -110,7 +116,8 @@ impl App {
 
     /// Set scroll offset in lines
     fn set_scroll_offset(&mut self, offset: usize) {
-        self.scroll_state.set_offset(ratatui::layout::Position::new(0, offset as u16));
+        self.scroll_state
+            .set_offset(ratatui::layout::Position::new(0, offset as u16));
     }
 
     /// Clamp scroll offset to valid range
@@ -203,7 +210,10 @@ impl App {
                     }
 
                     // Check right-side buttons (only on row 0 where they're rendered)
-                    if !tab_clicked && mouse.row <= 3 && mouse.column >= self.state.terminal_cols.saturating_sub(7) {
+                    if !tab_clicked
+                        && mouse.row <= 3
+                        && mouse.column >= self.state.terminal_cols.saturating_sub(7)
+                    {
                         let right_offset = self.state.terminal_cols - mouse.column;
                         if right_offset > 4 {
                             // Refresh button area
@@ -229,10 +239,12 @@ impl App {
                     ) {
                         self.state.selected_index = Some(idx);
                         self.toggle_watch_later()?;
-                    } else if let Some(idx) =
-                        self.layout
-                            .coords_to_index(mouse.column, mouse.row, self.scroll_offset(), total)
-                    {
+                    } else if let Some(idx) = self.layout.coords_to_index(
+                        mouse.column,
+                        mouse.row,
+                        self.scroll_offset(),
+                        total,
+                    ) {
                         if self.state.selected_index == Some(idx) {
                             // Double-click effect: play if already selected
                             self.play_selected()?;
@@ -266,6 +278,7 @@ impl App {
         self.state.terminal_cols = cols;
         self.state.terminal_rows = rows;
         self.layout = GridLayout::calculate(cols, rows);
+        self.thumb_cache.clear_rendered_cache(); // Re-render thumbnails at new size
         self.clamp_scroll();
         self.needs_redraw = true;
     }
@@ -366,7 +379,13 @@ impl App {
 
                     // Redraw to show progress
                     self.terminal.draw(|f| {
-                        ui::render(f, &self.state, &self.layout, &mut self.thumb_cache, &mut self.scroll_state);
+                        ui::render(
+                            f,
+                            &self.state,
+                            &self.layout,
+                            &mut self.thumb_cache,
+                            &mut self.scroll_state,
+                        );
                     })?;
                 }
                 FetchProgress::Error { channel_id, error } => {

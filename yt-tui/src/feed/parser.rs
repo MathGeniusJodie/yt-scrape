@@ -1,4 +1,5 @@
 use crate::data::Video;
+use crate::urls;
 use chrono::{DateTime, Utc};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -103,9 +104,9 @@ pub fn parse_feed(xml: &str, channel_id: &str) -> Vec<Video> {
                     if let (Some(video_id), Some(title), Some(published)) =
                         (&current_video_id, &current_title, &current_published)
                     {
-                        let thumbnail_url = current_thumbnail.clone().unwrap_or_else(|| {
-                            format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", video_id)
-                        });
+                        let thumbnail_url = current_thumbnail
+                            .clone()
+                            .unwrap_or_else(|| urls::thumbnail_url(video_id));
 
                         videos.push(Video {
                             video_id: video_id.clone(),

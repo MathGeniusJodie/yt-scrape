@@ -1,4 +1,5 @@
 use crate::data::Video;
+use crate::urls;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,11 +67,7 @@ impl ThumbnailCache {
             return Ok(());
         }
 
-        // Use hqdefault (480x360) for good quality
-        let url = format!(
-            "https://i.ytimg.com/vi/{}/hqdefault.jpg",
-            video.video_id
-        );
+        let url = urls::thumbnail_url(&video.video_id);
 
         let response = reqwest::get(&url).await?;
         let bytes = response.bytes().await?;
@@ -120,7 +117,6 @@ impl ThumbnailCache {
     }
 
     /// Clear memory cache (useful when terminal resizes)
-    #[allow(dead_code)]
     pub fn clear_rendered_cache(&mut self) {
         self.rendered.clear();
     }

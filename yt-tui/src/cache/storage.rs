@@ -20,7 +20,10 @@ impl Storage {
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&cache_dir)?;
 
-        Ok(Self { data_dir, cache_dir })
+        Ok(Self {
+            data_dir,
+            cache_dir,
+        })
     }
 
     pub fn cache_dir(&self) -> &PathBuf {
