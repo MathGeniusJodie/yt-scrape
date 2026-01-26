@@ -4,6 +4,7 @@ use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use tui_scrollview::{ScrollView, ScrollViewState};
 
 /// Render the entire UI
 pub fn render(
@@ -11,6 +12,7 @@ pub fn render(
     state: &AppState,
     layout: &GridLayout,
     thumb_cache: &mut ThumbnailCache,
+    scroll_state: &mut ScrollViewState,
 ) {
     let area = frame.area();
 
@@ -19,7 +21,7 @@ pub fn render(
 
     // Render video grid
     let videos = state.current_videos();
-    render_grid(frame, &videos, state, layout, thumb_cache, area);
+    render_grid(frame, &videos, state, layout, thumb_cache, area, scroll_state);
 
     // Render footer (status bar)
     render_footer(frame, state, &videos, area);
@@ -159,6 +161,7 @@ fn render_grid(
     layout: &GridLayout,
     thumb_cache: &mut ThumbnailCache,
     area: Rect,
+    scroll_state: &mut ScrollViewState,
 ) {
     // Grid area (between header and footer)
     let grid_area = Rect {
@@ -168,58 +171,56 @@ fn render_grid(
         height: layout.grid_height,
     };
 
-    // Calculate which video rows might be visible
-    let first_visible_row = state.scroll_offset / layout.card_height as usize;
-    let last_visible_row = (state.scroll_offset + layout.grid_height as usize) / layout.card_height as usize + 1;
+    // Calculate total content height
+    let total_rows = videos.len().div_ceil(layout.cols);
+    let content_height = (total_rows as u16 * layout.card_height).max(layout.grid_height);
 
+    // Create scroll view with full content size
+    let mut scroll_view = ScrollView::new(Size::new(area.width, content_height));
+
+    // Calculate which rows are visible for performance (don't render off-screen cards)
+    let scroll_offset = scroll_state.offset().y as usize;
+    let first_visible_row = scroll_offset / layout.card_height as usize;
+    let last_visible_row = (scroll_offset + layout.grid_height as usize) / layout.card_height as usize + 1;
     let first_video = first_visible_row * layout.cols;
     let last_video = ((last_visible_row + 1) * layout.cols).min(videos.len());
 
+    // Render cards into scroll view at their natural positions
     for idx in first_video..last_video {
         if let Some(video) = videos.get(idx) {
-            if let Some((y_offset, x, w)) = layout.card_area(idx, state.scroll_offset) {
-                // Calculate visible portion of card
-                let visible_y_start = y_offset.max(0) as u16;
-                let clip_top = (-y_offset).max(0) as u16;
-                let visible_height = (layout.card_height as i16 - clip_top as i16)
-                    .min((layout.grid_height as i16) - y_offset.max(0))
-                    .max(0) as u16;
+            let row = idx / layout.cols;
+            let col = idx % layout.cols;
 
-                if visible_height == 0 {
-                    continue;
-                }
+            let card_area = Rect {
+                x: col as u16 * layout.card_width,
+                y: row as u16 * layout.card_height,
+                width: layout.card_width,
+                height: layout.card_height,
+            };
 
-                let card_area = Rect {
-                    x,
-                    y: grid_area.y + visible_y_start,
-                    width: w,
-                    height: visible_height,
-                };
+            let is_selected = state.selected_index == Some(idx);
+            let is_watch_later = state.watch_later.contains(&video.video_id);
 
-                let is_selected = state.selected_index == Some(idx);
-                let is_watch_later = state.watch_later.contains(&video.video_id);
-
-                render_video_card(
-                    frame,
-                    video,
-                    card_area,
-                    clip_top,
-                    is_selected,
-                    is_watch_later,
-                    layout,
-                    thumb_cache,
-                );
-            }
+            render_video_card(
+                scroll_view.buf_mut(),
+                video,
+                card_area,
+                is_selected,
+                is_watch_later,
+                layout,
+                thumb_cache,
+            );
         }
     }
+
+    // Render the scroll view to the frame
+    frame.render_stateful_widget(scroll_view, grid_area, scroll_state);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_video_card(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     video: &Video,
     area: Rect,
-    clip_top: u16,
     is_selected: bool,
     is_watch_later: bool,
     layout: &GridLayout,
@@ -238,7 +239,7 @@ fn render_video_card(
         .border_style(border_style);
 
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    block.render(area, buf);
 
     if inner.height == 0 || inner.width == 0 {
         return;
@@ -248,119 +249,84 @@ fn render_video_card(
     let thumb_width = layout.thumbnail_width();
     let thumb_height = layout.thumbnail_height();
 
-    // Calculate how much of the thumbnail is clipped
-    let thumb_clip = clip_top.saturating_sub(1); // -1 for border
-    let thumb_visible_height = thumb_height.saturating_sub(thumb_clip).min(inner.height);
+    if let Some(rendered) = thumb_cache.get_rendered(&video.video_id, thumb_width, thumb_height) {
+        let thumb_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: thumb_width.min(inner.width),
+            height: thumb_height.min(inner.height),
+        };
 
-    if thumb_visible_height > 0 && thumb_clip < thumb_height {
-        if let Some(rendered) = thumb_cache.get_rendered(&video.video_id, thumb_width, thumb_height) {
-            let thumb_area = Rect {
-                x: inner.x,
-                y: inner.y,
-                width: thumb_width.min(inner.width),
-                height: thumb_visible_height,
-            };
-
-            // Convert ANSI and skip clipped lines
-            if let Ok(text) = rendered.into_text() {
-                let lines: Vec<Line> = text
-                    .lines
-                    .into_iter()
-                    .skip(thumb_clip as usize)
-                    .take(thumb_visible_height as usize)
-                    .collect();
-                frame.render_widget(Paragraph::new(lines), thumb_area);
-            }
-        } else {
-            // Placeholder while loading
-            if thumb_clip == 0 {
-                let placeholder = Paragraph::new("[Loading...]")
-                    .style(Style::default().fg(Color::DarkGray));
-                let thumb_area = Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.width,
-                    height: thumb_visible_height.min(1),
-                };
-                frame.render_widget(placeholder, thumb_area);
-            }
+        if let Ok(text) = rendered.into_text() {
+            Paragraph::new(text).render(thumb_area, buf);
         }
+    } else {
+        // Placeholder while loading
+        let thumb_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        Paragraph::new("[Loading...]")
+            .style(Style::default().fg(Color::DarkGray))
+            .render(thumb_area, buf);
     }
 
     // Text area below thumbnail
-    let text_start_in_card = thumb_height + 1; // +1 for border
-    if clip_top < text_start_in_card + 3 {
-        let text_clip = clip_top.saturating_sub(text_start_in_card);
-        let text_y = if clip_top <= text_start_in_card {
-            inner.y + thumb_height.saturating_sub(thumb_clip)
-        } else {
-            inner.y
-        };
-        let text_height = inner.height.saturating_sub(thumb_height.saturating_sub(thumb_clip));
+    let text_area = Rect {
+        x: inner.x,
+        y: inner.y + thumb_height,
+        width: inner.width,
+        height: inner.height.saturating_sub(thumb_height),
+    };
 
-        if text_height > 0 {
-            let text_area = Rect {
-                x: inner.x,
-                y: text_y,
-                width: inner.width,
-                height: text_height,
-            };
+    if text_area.height > 0 {
+        // Title (always exactly 2 lines)
+        let (title_line1, title_line2) = wrap_title_two_lines(&video.title, inner.width as usize);
+        let channel = truncate_str(&video.channel_name, inner.width as usize);
+        let time_ago = format_time_ago(&video.published);
 
-            // Title (always exactly 2 lines)
-            let (title_line1, title_line2) = wrap_title_two_lines(&video.title, inner.width as usize);
-            let channel = truncate_str(&video.channel_name, inner.width as usize);
-            let time_ago = format_time_ago(&video.published);
+        let title_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
 
-            let title_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        // Calculate padding to right-align timestamp
+        let channel_len = channel.chars().count();
+        let time_len = time_ago.chars().count();
+        let padding = (inner.width as usize).saturating_sub(channel_len + time_len);
 
-            // Calculate padding to right-align timestamp
-            let channel_len = channel.chars().count();
-            let time_len = time_ago.chars().count();
-            let padding = (inner.width as usize).saturating_sub(channel_len + time_len);
+        let text_lines = vec![
+            Line::from(" "),
+            Line::from(Span::styled(title_line1, title_style)),
+            Line::from(Span::styled(title_line2, title_style)),
+            Line::from(vec![
+                Span::styled(channel, Style::default().fg(Color::Gray)),
+                Span::raw(" ".repeat(padding)),
+                Span::styled(time_ago, Style::default().fg(Color::DarkGray)),
+            ]),
+        ];
 
-            let mut text_lines = vec![
-                Line::from(" "),
-                Line::from(Span::styled(title_line1, title_style)),
-                Line::from(Span::styled(title_line2, title_style)),
-                Line::from(vec![
-                    Span::styled(channel.clone(), Style::default().fg(Color::Gray)),
-                    Span::raw(" ".repeat(padding)),
-                    Span::styled(time_ago.clone(), Style::default().fg(Color::DarkGray)),
-                ]),
-            ];
-
-            // Skip clipped lines
-            let text: Vec<Line> = text_lines
-                .drain(..)
-                .skip(text_clip as usize)
-                .collect();
-
-            frame.render_widget(Paragraph::new(text), text_area);
-        }
+        Paragraph::new(text_lines).render(text_area, buf);
     }
 
-    // Render watch later checkbox on bottom border (overlapping like a title)
-    let bottom_border_row = area.y + area.height - 1;
-    if area.height > 0 {
-        let (checkbox_text, checkbox_style) = if is_watch_later {
-            (" W:☑ ", Style::default().fg(Color::Rgb(255, 165, 0))) // Bright orange
-        } else {
-            (" W:☐ ", Style::default().fg(Color::Rgb(128, 128, 128))) // Medium grey
-        };
+    // Render watch later checkbox on bottom border
+    let (checkbox_text, checkbox_style) = if is_watch_later {
+        (" W:☑ ", Style::default().fg(Color::Rgb(255, 165, 0)))
+    } else {
+        (" W:☐ ", Style::default().fg(Color::Rgb(128, 128, 128)))
+    };
 
-        // Position checkbox on the right side of the bottom border
-        let checkbox_len = checkbox_text.chars().count() as u16;
-        let checkbox_x = area.x + area.width.saturating_sub(checkbox_len + 2);
+    let checkbox_len = checkbox_text.chars().count() as u16;
+    let checkbox_x = area.x + area.width.saturating_sub(checkbox_len + 2);
+    let checkbox_area = Rect {
+        x: checkbox_x,
+        y: area.y + area.height - 1,
+        width: checkbox_len,
+        height: 1,
+    };
 
-        let checkbox_area = Rect {
-            x: checkbox_x,
-            y: bottom_border_row,
-            width: checkbox_len,
-            height: 1,
-        };
-
-        frame.render_widget(Paragraph::new(checkbox_text).style(checkbox_style), checkbox_area);
-    }
+    Paragraph::new(checkbox_text)
+        .style(checkbox_style)
+        .render(checkbox_area, buf);
 }
 
 fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: Rect) {

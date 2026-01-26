@@ -12,6 +12,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
+use tui_scrollview::ScrollViewState;
 use std::io::{stdout, Stdout};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub struct App {
     subs_file: PathBuf,
     layout: GridLayout,
     needs_redraw: bool,
+    scroll_state: ScrollViewState,
 }
 
 impl App {
@@ -58,6 +60,7 @@ impl App {
             subs_file,
             layout,
             needs_redraw: true,
+            scroll_state: ScrollViewState::default(),
         })
     }
 
@@ -69,7 +72,7 @@ impl App {
             // Only redraw when state has changed
             if self.needs_redraw {
                 self.terminal.draw(|f| {
-                    ui::render(f, &self.state, &self.layout, &mut self.thumb_cache);
+                    ui::render(f, &self.state, &self.layout, &mut self.thumb_cache, &mut self.scroll_state);
                 })?;
                 self.needs_redraw = false;
             }
@@ -100,6 +103,25 @@ impl App {
         Ok(())
     }
 
+    /// Get current scroll offset in lines
+    fn scroll_offset(&self) -> usize {
+        self.scroll_state.offset().y as usize
+    }
+
+    /// Set scroll offset in lines
+    fn set_scroll_offset(&mut self, offset: usize) {
+        self.scroll_state.set_offset(ratatui::layout::Position::new(0, offset as u16));
+    }
+
+    /// Clamp scroll offset to valid range
+    fn clamp_scroll(&mut self) {
+        let total = self.state.current_videos().len();
+        let max = self.layout.max_scroll(total);
+        if self.scroll_offset() > max {
+            self.set_scroll_offset(max);
+        }
+    }
+
     async fn handle_key(&mut self, key: event::KeyEvent) -> Result<bool> {
         // Handle help overlay first
         if self.state.show_help {
@@ -120,19 +142,26 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') => self.move_selection(1),
             KeyCode::PageUp => {
-                self.scroll(-(self.layout.grid_height as i32));
+                for _ in 0..self.layout.grid_height {
+                    self.scroll_state.scroll_up();
+                }
+                self.needs_redraw = true;
             }
             KeyCode::PageDown => {
-                self.scroll(self.layout.grid_height as i32);
+                for _ in 0..self.layout.grid_height {
+                    self.scroll_state.scroll_down();
+                }
+                self.clamp_scroll();
+                self.needs_redraw = true;
             }
             KeyCode::Home => {
-                self.state.scroll_offset = 0;
+                self.scroll_state.scroll_to_top();
                 self.state.selected_index = Some(0);
                 self.needs_redraw = true;
             }
             KeyCode::End => {
                 let total = self.state.current_videos().len();
-                self.state.scroll_offset = self.layout.max_scroll(total);
+                self.set_scroll_offset(self.layout.max_scroll(total));
                 self.state.selected_index = Some(total.saturating_sub(1));
                 self.needs_redraw = true;
             }
@@ -165,7 +194,7 @@ impl App {
                     for (start, end, tab) in ui::header_tab_regions() {
                         if mouse.column >= start && mouse.column < end {
                             self.state.current_tab = tab;
-                            self.state.scroll_offset = 0;
+                            self.scroll_state.scroll_to_top();
                             self.state.selected_index = None;
                             self.needs_redraw = true;
                             tab_clicked = true;
@@ -195,14 +224,14 @@ impl App {
                     if let Some(idx) = self.layout.is_checkbox_click(
                         mouse.column,
                         mouse.row,
-                        self.state.scroll_offset,
+                        self.scroll_offset(),
                         total,
                     ) {
                         self.state.selected_index = Some(idx);
                         self.toggle_watch_later()?;
                     } else if let Some(idx) =
                         self.layout
-                            .coords_to_index(mouse.column, mouse.row, self.state.scroll_offset, total)
+                            .coords_to_index(mouse.column, mouse.row, self.scroll_offset(), total)
                     {
                         if self.state.selected_index == Some(idx) {
                             // Double-click effect: play if already selected
@@ -215,10 +244,17 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                self.scroll(3);
+                for _ in 0..3 {
+                    self.scroll_state.scroll_down();
+                }
+                self.clamp_scroll();
+                self.needs_redraw = true;
             }
             MouseEventKind::ScrollUp => {
-                self.scroll(-3);
+                for _ in 0..3 {
+                    self.scroll_state.scroll_up();
+                }
+                self.needs_redraw = true;
             }
             _ => {}
         }
@@ -230,13 +266,7 @@ impl App {
         self.state.terminal_cols = cols;
         self.state.terminal_rows = rows;
         self.layout = GridLayout::calculate(cols, rows);
-
-        // Clamp scroll offset to valid range
-        let total = self.state.current_videos().len();
-        let max_scroll = self.layout.max_scroll(total);
-        if self.state.scroll_offset > max_scroll {
-            self.state.scroll_offset = max_scroll;
-        }
+        self.clamp_scroll();
         self.needs_redraw = true;
     }
 
@@ -254,27 +284,17 @@ impl App {
         let selected_row = new_idx / self.layout.cols;
         let card_top = selected_row * self.layout.card_height as usize;
         let card_bottom = card_top + self.layout.card_height as usize;
+        let current_scroll = self.scroll_offset();
 
         // Scroll up if selection is above viewport
-        if card_top < self.state.scroll_offset {
-            self.state.scroll_offset = card_top;
+        if card_top < current_scroll {
+            self.set_scroll_offset(card_top);
         }
         // Scroll down if selection is below viewport
-        else if card_bottom > self.state.scroll_offset + self.layout.grid_height as usize {
-            self.state.scroll_offset = card_bottom.saturating_sub(self.layout.grid_height as usize);
+        else if card_bottom > current_scroll + self.layout.grid_height as usize {
+            self.set_scroll_offset(card_bottom.saturating_sub(self.layout.grid_height as usize));
         }
         self.needs_redraw = true;
-    }
-
-    fn scroll(&mut self, delta: i32) {
-        let total = self.state.current_videos().len();
-        let max_scroll = self.layout.max_scroll(total);
-
-        let new_offset = (self.state.scroll_offset as i32 + delta).clamp(0, max_scroll as i32);
-        if new_offset as usize != self.state.scroll_offset {
-            self.state.scroll_offset = new_offset as usize;
-            self.needs_redraw = true;
-        }
     }
 
     fn play_selected(&self) -> Result<()> {
@@ -309,7 +329,7 @@ impl App {
             Tab::Feed => Tab::WatchLater,
             Tab::WatchLater => Tab::Feed,
         };
-        self.state.scroll_offset = 0;
+        self.scroll_state.scroll_to_top();
         self.state.selected_index = None;
         self.needs_redraw = true;
     }
@@ -346,7 +366,7 @@ impl App {
 
                     // Redraw to show progress
                     self.terminal.draw(|f| {
-                        ui::render(f, &self.state, &self.layout, &mut self.thumb_cache);
+                        ui::render(f, &self.state, &self.layout, &mut self.thumb_cache, &mut self.scroll_state);
                     })?;
                 }
                 FetchProgress::Error { channel_id, error } => {

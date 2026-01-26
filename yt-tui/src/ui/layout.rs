@@ -66,26 +66,6 @@ impl GridLayout {
         }
     }
 
-    /// Get the area for a specific card (scroll_offset is in lines)
-    /// Returns None if card is completely off-screen
-    pub fn card_area(&self, index: usize, scroll_offset_lines: usize) -> Option<(i16, u16, u16)> {
-        let row = index / self.cols;
-        let col = index % self.cols;
-
-        // Calculate y position in lines, accounting for scroll
-        let card_top = (row as i32 * self.card_height as i32) - scroll_offset_lines as i32;
-        let card_bottom = card_top + self.card_height as i32;
-
-        // Skip if completely above or below viewport
-        if card_bottom <= 0 || card_top >= self.grid_height as i32 {
-            return None;
-        }
-
-        let x = col as u16 * self.card_width;
-
-        Some((card_top as i16, x, self.card_width))
-    }
-
     /// Maximum scroll offset in lines
     pub fn max_scroll(&self, total_items: usize) -> usize {
         let total_rows = total_items.div_ceil(self.cols);
