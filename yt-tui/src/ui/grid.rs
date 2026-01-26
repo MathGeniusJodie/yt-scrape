@@ -112,9 +112,10 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     // Build all three lines using a helper closure. The third parameter
     // controls whether unselected tabs should use white for this line
     // (used to make unselected tab bottoms white).
-    let build_line =
-        |get_part: fn(&BoxButton) -> &str, separator: &str, unselected_use_white: bool| -> Vec<Span>
-    {
+    let build_line = |get_part: fn(&BoxButton) -> &str,
+                      separator: &str,
+                      unselected_use_white: bool|
+     -> Vec<Span> {
         let mut spans = Vec::new();
         for (i, (btn, is_selected)) in tab_btns.iter().enumerate() {
             if i > 0 {

@@ -212,10 +212,10 @@ impl App {
                     // Check right-side buttons (only on row 0 where they're rendered)
                     if !tab_clicked
                         && mouse.row <= 3
-                        && mouse.column >= self.state.terminal_cols.saturating_sub(7)
+                        && mouse.column >= self.state.terminal_cols.saturating_sub(11)
                     {
                         let right_offset = self.state.terminal_cols - mouse.column;
-                        if right_offset > 4 {
+                        if right_offset > 6 {
                             // Refresh button area
                             if !self.state.is_refreshing {
                                 self.refresh().await?;
