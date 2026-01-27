@@ -8,7 +8,8 @@ use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use termimad::MadSkin;
+use reqwest::header;
+use termimad::{MadSkin, StyledChar};
 
 use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
@@ -517,9 +518,9 @@ fn render_video_card(
         channel_and_time_style.push_str(&" ");
 
         let checkbox_line = if is_watch_later {
-            format!("{:>width$}", "✦ 🗁  ⊂⬤ ", width = thumb_width as usize)
+            format!("{:>width$}", "✨ 🗁  ⊂⬤ ", width = thumb_width as usize)
         } else {
-            format!("{:>width$}", "✦ 🗁  ⬤⊃ ", width = thumb_width as usize)
+            format!("{:>width$}", "✨ 🗁  ⬤⊃ ", width = thumb_width as usize)
         };
 
         // Colors for folder (based on download status) and toggle (based on watch later status)
@@ -541,12 +542,12 @@ fn render_video_card(
                 .take(thumb_width as usize)
                 .zip(checkbox_line.chars())
                 .map(|((r, g, b), char)| {
-                    // Folder icon gets folder_color, toggle chars get toggle_color, ✦ gets cyan
+                    // Folder icon gets folder_color, toggle chars get toggle_color, ✨ gets cyan
                     let fg_color = if char == '🗁' {
                         folder_color
                     } else if char == '⊂' || char == '⬤' || char == '⊃' {
                         toggle_color
-                    } else if char == '✦' {
+                    } else if char == '✨' {
                         Color::Cyan
                     } else {
                         Color::Rgb(128, 128, 128) // Spaces stay grey
@@ -699,15 +700,15 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
     let title = state
         .summary_video_title
         .as_ref()
-        .map(|t| format!(" ✦ {} ", truncate_str(t, modal_width.saturating_sub(6) as usize)))
-        .unwrap_or_else(|| " ✦ Summary ".to_string());
+        .map(|t| format!(" ✨ {} ", truncate_str(t, modal_width.saturating_sub(6) as usize)))
+        .unwrap_or_else(|| " ✨ Summary ".to_string());
 
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .border_type(BorderType::Rounded)
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(Color::Black).add_modifier(Modifier::BOLD));
 
     let inner = block.inner(modal_area);
 
@@ -736,9 +737,29 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // Use termimad to format markdown with ANSI codes
             let mut skin = MadSkin::default_dark();
-            skin.set_headers_fg(termimad::crossterm::style::Color::Cyan);
-            skin.bold.set_fg(termimad::crossterm::style::Color::White);
-            skin.italic.set_fg(termimad::crossterm::style::Color::Rgb { r: 180, g: 180, b: 220 });
+
+            // Polished unicode typography
+            skin.bullet = StyledChar::from_fg_char(
+                termimad::crossterm::style::Color::White,
+                '•',
+            );
+            skin.quote_mark = StyledChar::from_fg_char(
+                termimad::crossterm::style::Color::Grey,
+                '▌'
+            );
+
+            let mut header_style = termimad::LineStyle::default();
+            header_style.add_attr(crossterm::style::Attribute::Bold);
+            skin.headers = [
+               header_style.clone(),
+               header_style.clone(),
+               header_style.clone(),
+               header_style.clone(),
+               header_style.clone(),
+               header_style.clone(),
+               header_style.clone(),
+               header_style.clone(),
+            ];
 
             let text_width = inner.width.saturating_sub(3) as usize;
             let formatted = skin.text(summary, Some(text_width));
@@ -746,7 +767,17 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // Convert ANSI to ratatui Text
             let text: Text = ansi_string.into_text().unwrap_or_else(|_| Text::raw(summary));
-            let total_lines = text.lines.len() as u16;
+
+            // Add left padding to each line, plus empty lines at top and bottom
+            let mut text_lines: Vec<Line> = vec![Line::raw("")]; // top padding
+            text_lines.extend(text.lines.into_iter().map(|line| {
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }));
+            text_lines.push(Line::raw("")); // bottom padding
+
+            let total_lines = text_lines.len() as u16;
             let viewport_height = inner.height;
 
             // Calculate content height for scroll view
@@ -761,15 +792,7 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
                 .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
                 .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
 
-            // Add left padding to each line
-            let text: Vec<Line> = text.lines
-                .into_iter()
-                .map(|line| {
-                    let mut spans = vec![Span::raw(" ")];
-                    spans.extend(line.spans);
-                    Line::from(spans)
-                })
-                .collect();
+            let text = text_lines;
 
             Paragraph::new(text)
                 .style(Style::default().bg(Color::Black))
