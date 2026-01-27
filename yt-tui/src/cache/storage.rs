@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct Storage {
     data_dir: PathBuf,
     cache_dir: PathBuf,
+    videos_dir: PathBuf,
 }
 
 impl Storage {
@@ -16,18 +17,35 @@ impl Storage {
 
         let data_dir = project_dirs.data_dir().to_path_buf();
         let cache_dir = project_dirs.cache_dir().to_path_buf();
+        let videos_dir = cache_dir.join("videos");
 
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&cache_dir)?;
+        std::fs::create_dir_all(&videos_dir)?;
 
         Ok(Self {
             data_dir,
             cache_dir,
+            videos_dir,
         })
     }
 
     pub fn cache_dir(&self) -> &PathBuf {
         &self.cache_dir
+    }
+
+    pub fn videos_dir(&self) -> &PathBuf {
+        &self.videos_dir
+    }
+
+    /// Get the path where a video would be stored
+    pub fn video_path(&self, video_id: &str) -> PathBuf {
+        self.videos_dir.join(format!("{}.mp4", video_id))
+    }
+
+    /// Check if a video is downloaded
+    pub fn has_video(&self, video_id: &str) -> bool {
+        self.video_path(video_id).exists()
     }
 
     /// Load watch later video IDs

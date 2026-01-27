@@ -1,4 +1,4 @@
-use crate::cache::{Storage, ThumbnailCache};
+use crate::cache::{download_video, Storage, ThumbnailCache};
 use crate::data::{AppState, Tab};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use crate::player;
@@ -67,10 +67,13 @@ impl App {
     pub async fn run(&mut self) -> Result<()> {
         // Start thumbnail downloads for any videos we have
         self.queue_thumbnail_downloads().await;
+        // Start video downloads for watch later items
+        self.queue_watch_later_downloads();
 
         loop {
             // Only redraw when state has changed
             if self.needs_redraw {
+                let videos_dir = self.storage.videos_dir();
                 self.terminal.draw(|f| {
                     ui::render(
                         f,
@@ -78,6 +81,7 @@ impl App {
                         &self.layout,
                         &mut self.thumb_cache,
                         &mut self.scroll_state,
+                        videos_dir,
                     );
                 })?;
                 self.needs_redraw = false;
@@ -314,7 +318,13 @@ impl App {
         if let Some(idx) = self.state.selected_index {
             let videos = self.state.current_videos();
             if let Some(video) = videos.get(idx) {
-                player::play_video(&video.video_id)?;
+                // Check if this video is in watch later and might have a local copy
+                let local_path = if self.state.watch_later.contains(&video.video_id) {
+                    Some(self.storage.video_path(&video.video_id))
+                } else {
+                    None
+                };
+                player::play_video(&video.video_id, local_path.as_deref())?;
             }
         }
         Ok(())
@@ -328,7 +338,14 @@ impl App {
                 if self.state.watch_later.contains(&video_id) {
                     self.state.watch_later.remove(&video_id);
                 } else {
-                    self.state.watch_later.insert(video_id);
+                    self.state.watch_later.insert(video_id.clone());
+                    // Start background download if not already downloaded
+                    let video_path = self.storage.video_path(&video_id);
+                    if !video_path.exists() {
+                        tokio::spawn(async move {
+                            let _ = download_video(&video_id, &video_path).await;
+                        });
+                    }
                 }
                 self.storage.save_watch_later(&self.state.watch_later)?;
                 self.needs_redraw = true;
@@ -378,6 +395,7 @@ impl App {
                         Some(format!("Fetching {}/{}...", completed, total_channels));
 
                     // Redraw to show progress
+                    let videos_dir = self.storage.videos_dir();
                     self.terminal.draw(|f| {
                         ui::render(
                             f,
@@ -385,6 +403,7 @@ impl App {
                             &self.layout,
                             &mut self.thumb_cache,
                             &mut self.scroll_state,
+                            videos_dir,
                         );
                     })?;
                 }
@@ -425,6 +444,19 @@ impl App {
         for video in &self.state.videos {
             if !self.thumb_cache.has_thumbnail(&video.video_id) {
                 let _ = self.thumb_cache.download(video).await;
+            }
+        }
+    }
+
+    fn queue_watch_later_downloads(&self) {
+        // Download videos for watch later items that aren't already downloaded
+        for video_id in &self.state.watch_later {
+            let video_path = self.storage.video_path(video_id);
+            if !video_path.exists() {
+                let video_id = video_id.clone();
+                tokio::spawn(async move {
+                    let _ = download_video(&video_id, &video_path).await;
+                });
             }
         }
     }

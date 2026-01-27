@@ -1,15 +1,14 @@
 use std::ops::Add;
+use std::path::Path;
 
 use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
-use futures::sink::Fanout;
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
-use tokio::sync::watch;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 /// Render the entire UI
@@ -19,6 +18,7 @@ pub fn render(
     layout: &GridLayout,
     thumb_cache: &mut ThumbnailCache,
     scroll_state: &mut ScrollViewState,
+    videos_dir: &Path,
 ) {
     let area = frame.area();
 
@@ -35,6 +35,7 @@ pub fn render(
         thumb_cache,
         area,
         scroll_state,
+        videos_dir,
     );
 
     // Render footer (status bar)
@@ -233,6 +234,7 @@ fn render_grid(
     thumb_cache: &mut ThumbnailCache,
     area: Rect,
     scroll_state: &mut ScrollViewState,
+    videos_dir: &Path,
 ) {
     // Grid area (between header and footer)
     let grid_area = Rect {
@@ -310,6 +312,7 @@ fn render_grid(
 
             let is_selected = state.selected_index == Some(idx);
             let is_watch_later = state.watch_later.contains(&video.video_id);
+            let is_downloaded = videos_dir.join(format!("{}.mp4", video.video_id)).exists();
 
             render_video_card(
                 scroll_view.buf_mut(),
@@ -317,6 +320,7 @@ fn render_grid(
                 card_area,
                 is_selected,
                 is_watch_later,
+                is_downloaded,
                 layout,
                 thumb_cache,
             );
@@ -348,6 +352,7 @@ fn render_video_card(
     area: Rect,
     is_selected: bool,
     is_watch_later: bool,
+    is_downloaded: bool,
     layout: &GridLayout,
     thumb_cache: &mut ThumbnailCache,
 ) {
@@ -458,6 +463,18 @@ fn render_video_card(
             format!("{:>width$}", "🗁  ⬤⊃ ", width = thumb_width as usize)
         };
 
+        // Colors for folder (based on download status) and toggle (based on watch later status)
+        let folder_color = if is_downloaded {
+            Color::Rgb(255, 165, 0) // Orange when downloaded
+        } else {
+            Color::Rgb(128, 128, 128) // Grey when not downloaded
+        };
+        let toggle_color = if is_watch_later {
+            Color::Rgb(255, 165, 0) // Orange when watch later
+        } else {
+            Color::Rgb(128, 128, 128) // Grey when not watch later
+        };
+
         let text_lines = vec![
             //Line::from(" "),
             fancy_bg
@@ -465,16 +482,20 @@ fn render_video_card(
                 .take(thumb_width as usize)
                 .zip(checkbox_line.chars())
                 .map(|((r, g, b), char)| {
+                    // Folder icon gets folder_color, toggle chars get toggle_color
+                    let fg_color = if char == '🗁' {
+                        folder_color
+                    } else if char == '⊂' || char == '⬤' || char == '⊃' {
+                        toggle_color
+                    } else {
+                        Color::Rgb(128, 128, 128) // Spaces stay grey
+                    };
                     Span::styled(
                         char.to_string(),
                         Style::default()
                             .add_modifier(Modifier::BOLD)
                             .bg(Color::Rgb(*r, *g, *b))
-                            .fg(if is_watch_later {
-                                Color::Rgb(255, 165, 0)
-                            } else {
-                                Color::Rgb(128, 128, 128)
-                            }),
+                            .fg(fg_color),
                     )
                 })
                 .collect(),
