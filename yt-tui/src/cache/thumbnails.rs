@@ -1,27 +1,40 @@
 use crate::data::Video;
 use crate::urls;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 /// Manages thumbnail downloads and chafa rendering
 pub struct ThumbnailCache {
     cache_dir: PathBuf,
     /// In-memory cache of rendered thumbnails (video_id_WxH -> ANSI string)
-    rendered: HashMap<String, (String, Vec<(u8, u8, u8)>)>,
+    rendered: Arc<Mutex<HashMap<String, (String, Vec<(u8, u8, u8)>)>>>,
+    /// Set of cache keys currently being rendered (to avoid duplicate work)
+    pending: Arc<Mutex<HashSet<String>>>,
+    /// Channel to notify when a thumbnail finishes rendering
+    render_complete_tx: mpsc::UnboundedSender<()>,
 }
 
 impl ThumbnailCache {
-    pub fn new(cache_dir: PathBuf) -> Result<Self> {
+    pub fn new(cache_dir: PathBuf) -> Result<(Self, mpsc::UnboundedReceiver<()>)> {
         let thumb_dir = cache_dir.join("thumbnails");
         std::fs::create_dir_all(&thumb_dir)?;
 
-        Ok(Self {
-            cache_dir,
-            rendered: HashMap::new(),
-        })
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        Ok((
+            Self {
+                cache_dir,
+                rendered: Arc::new(Mutex::new(HashMap::new())),
+                pending: Arc::new(Mutex::new(HashSet::new())),
+                render_complete_tx: tx,
+            },
+            rx,
+        ))
     }
 
     /// Get the path where a thumbnail would be stored
@@ -36,33 +49,78 @@ impl ThumbnailCache {
         self.thumbnail_path(video_id).exists()
     }
 
-    /// Get rendered thumbnail from cache, or render it if needed
+    /// Get rendered thumbnail from cache (non-blocking, returns None if not cached)
     pub fn get_rendered(
-        &mut self,
+        &self,
         video_id: &str,
         width: u16,
         height: u16,
     ) -> Option<(String, Vec<(u8, u8, u8)>)> {
         let cache_key = format!("{}_{}x{}", video_id, width, height);
 
-        // Check memory cache
-        if let Some(rendered) = self.rendered.get(&cache_key) {
-            return Some(rendered.clone());
+        // Only check memory cache - never block
+        let cache = self.rendered.lock().ok()?;
+        cache.get(&cache_key).cloned()
+    }
+
+    /// Queue a thumbnail for background rendering if not already cached or pending
+    pub fn queue_render(&self, video_id: &str, width: u16, height: u16) {
+        let cache_key = format!("{}_{}x{}", video_id, width, height);
+
+        // Check if already cached
+        if let Ok(cache) = self.rendered.lock() {
+            if cache.contains_key(&cache_key) {
+                return;
+            }
+        }
+
+        // Check if already pending
+        {
+            let mut pending = match self.pending.lock() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            if pending.contains(&cache_key) {
+                return;
+            }
+            pending.insert(cache_key.clone());
         }
 
         // Check if raw thumbnail exists
         let thumb_path = self.thumbnail_path(video_id);
         if !thumb_path.exists() {
-            return None;
+            // Remove from pending since we can't render it
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&cache_key);
+            }
+            return;
         }
 
-        // Render with chafa
-        if let Some(rendered) = self.render_with_chafa(&thumb_path, width, height) {
-            self.rendered.insert(cache_key, rendered.clone());
-            return Some(rendered);
-        }
+        // Spawn blocking task to render
+        let rendered_cache = Arc::clone(&self.rendered);
+        let pending_set = Arc::clone(&self.pending);
+        let cache_key_clone = cache_key.clone();
+        let notify_tx = self.render_complete_tx.clone();
 
-        None
+        tokio::task::spawn_blocking(move || {
+            let success =
+                if let Some(result) = Self::render_with_chafa_static(&thumb_path, width, height) {
+                    if let Ok(mut cache) = rendered_cache.lock() {
+                        cache.insert(cache_key_clone.clone(), result);
+                    }
+                    true
+                } else {
+                    false
+                };
+            // Remove from pending
+            if let Ok(mut pending) = pending_set.lock() {
+                pending.remove(&cache_key_clone);
+            }
+            // Notify that a render completed
+            if success {
+                let _ = notify_tx.send(());
+            }
+        });
     }
 
     /// Download a thumbnail from YouTube
@@ -82,9 +140,8 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    /// Render an image with chafa, cropping to 16:9 first
-    fn render_with_chafa(
-        &self,
+    /// Render an image with chafa, cropping to 16:9 first (static version for spawn_blocking)
+    fn render_with_chafa_static(
         path: &Path,
         width: u16,
         height: u16,
@@ -184,7 +241,12 @@ impl ThumbnailCache {
     }
 
     /// Clear memory cache (useful when terminal resizes)
-    pub fn clear_rendered_cache(&mut self) {
-        self.rendered.clear();
+    pub fn clear_rendered_cache(&self) {
+        if let Ok(mut cache) = self.rendered.lock() {
+            cache.clear();
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
     }
 }

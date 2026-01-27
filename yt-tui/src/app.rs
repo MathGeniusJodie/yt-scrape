@@ -23,6 +23,7 @@ pub struct App {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     storage: Storage,
     thumb_cache: ThumbnailCache,
+    thumb_render_rx: mpsc::UnboundedReceiver<()>,
     subs_file: PathBuf,
     layout: GridLayout,
     needs_redraw: bool,
@@ -44,7 +45,7 @@ impl App {
         let terminal = Terminal::new(backend)?;
 
         let storage = Storage::new()?;
-        let thumb_cache = ThumbnailCache::new(storage.cache_dir().clone())?;
+        let (thumb_cache, thumb_render_rx) = ThumbnailCache::new(storage.cache_dir().clone())?;
 
         let size = terminal.size()?;
         let layout = GridLayout::calculate(size.width, size.height);
@@ -62,6 +63,7 @@ impl App {
             terminal,
             storage,
             thumb_cache,
+            thumb_render_rx,
             subs_file,
             layout,
             needs_redraw: true,
@@ -83,6 +85,11 @@ impl App {
             // Update scroll physics
             self.update_scroll_physics();
 
+            // Check for completed thumbnail renders
+            while self.thumb_render_rx.try_recv().is_ok() {
+                self.needs_redraw = true;
+            }
+
             // Only redraw when state has changed
             if self.needs_redraw {
                 let videos_dir = self.storage.videos_dir();
@@ -91,7 +98,7 @@ impl App {
                         f,
                         &self.state,
                         &self.layout,
-                        &mut self.thumb_cache,
+                        &self.thumb_cache,
                         &mut self.scroll_state,
                         videos_dir,
                     );
@@ -495,7 +502,7 @@ impl App {
                             f,
                             &self.state,
                             &self.layout,
-                            &mut self.thumb_cache,
+                            &self.thumb_cache,
                             &mut self.scroll_state,
                             videos_dir,
                         );

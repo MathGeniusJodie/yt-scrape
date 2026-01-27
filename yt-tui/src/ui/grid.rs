@@ -16,7 +16,7 @@ pub fn render(
     frame: &mut Frame,
     state: &AppState,
     layout: &GridLayout,
-    thumb_cache: &mut ThumbnailCache,
+    thumb_cache: &ThumbnailCache,
     scroll_state: &mut ScrollViewState,
     videos_dir: &Path,
 ) {
@@ -231,7 +231,7 @@ fn render_grid(
     videos: &[&Video],
     state: &AppState,
     layout: &GridLayout,
-    thumb_cache: &mut ThumbnailCache,
+    thumb_cache: &ThumbnailCache,
     area: Rect,
     scroll_state: &mut ScrollViewState,
     videos_dir: &Path,
@@ -356,7 +356,7 @@ fn render_video_card(
     is_watch_later: bool,
     is_downloaded: bool,
     layout: &GridLayout,
-    thumb_cache: &mut ThumbnailCache,
+    thumb_cache: &ThumbnailCache,
 ) {
     // Card border
     let border_style = if is_selected {
@@ -417,7 +417,9 @@ fn render_video_card(
             Paragraph::new(text).render(thumb_area, buf);
         }
     } else {
-        // Placeholder while loading
+        // Queue background render and show placeholder
+        thumb_cache.queue_render(&video.video_id, thumb_width, thumb_height);
+
         let thumb_area = Rect {
             x: inner.x,
             y: inner.y,

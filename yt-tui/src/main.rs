@@ -9,7 +9,7 @@ mod urls;
 use app::App;
 use std::path::PathBuf;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Find the subs file - check current dir, then parent dir (for running from yt-tui/)
     let subs_file = find_subs_file()?;
