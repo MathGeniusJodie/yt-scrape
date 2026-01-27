@@ -349,20 +349,31 @@ fn render_grid(
     let first_video = first_visible_row * layout.cols;
     let last_video = ((last_visible_row + 1) * layout.cols).min(videos.len());
 
+    let mut vec_items: Vec<usize> = (first_video..last_video).collect();
+    if state.selected_index.is_some() {
+        // Ensure selected index is rendered last (on top)
+        let index = vec_items.iter().position(|&idx| Some(idx) == state.selected_index);
+        if let Some(idx) = index {
+            let selected = vec_items.remove(idx);
+            vec_items.insert(0, selected);
+        }
+    }
+
     // Render cards into scroll view at their natural positions
-    for idx in first_video..last_video {
+    for idx in vec_items.into_iter().rev() {
         if let Some(video) = videos.get(idx) {
             let row = idx / layout.cols;
             let col = idx % layout.cols;
 
             let card_area = Rect {
                 x: layout.x_offset + col as u16 * layout.card_width,
-                y: row as u16 * layout.card_height,
+                y: row as u16 * (layout.card_height - 1),
                 width: layout.card_width,
                 height: layout.card_height,
             };
 
             let is_selected = state.selected_index == Some(idx);
+
             let is_watch_later = state.watch_later.contains(&video.video_id);
             let is_downloaded = videos_dir
                 .join(format!("*_{}.mp4", video.video_id))

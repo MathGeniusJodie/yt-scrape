@@ -65,7 +65,7 @@ impl GridLayout {
         let x = x - self.x_offset;
 
         let col = (x / self.card_width) as usize;
-        let row = y / self.card_height as usize;
+        let row = y / (self.card_height-1) as usize;
 
         if col >= self.cols {
             return None;
@@ -118,7 +118,7 @@ impl GridLayout {
 
         let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
         let col = (x / self.card_width) as usize;
-        let row = y_in_grid / self.card_height as usize;
+        let row = y_in_grid / (self.card_height-1) as usize;
 
         if col >= self.cols {
             return None;
@@ -131,7 +131,7 @@ impl GridLayout {
 
         // Check if click is on the bottom border row where checkbox is rendered
         // Card height is 15, so bottom border is at row 14 (0-indexed)
-        let y_in_card = y_in_grid % self.card_height as usize;
+        let y_in_card = y_in_grid % (self.card_height-1) as usize;
         let bottom_border_row = self.card_height as usize - 5;
 
         if y_in_card != bottom_border_row {
@@ -141,8 +141,8 @@ impl GridLayout {
         // Check if x is in the checkbox area (right side of bottom border)
         // Checkbox " W:☑ " is 5 chars, positioned 2 chars from right edge
         let x_in_card = (x as usize) % self.card_width as usize;
-        let checkbox_start = self.card_width as usize - 7; // 5 chars + 2 offset from edge
-        let checkbox_end = self.card_width as usize - 2;
+        let checkbox_start = self.card_width as usize - 6; // 5 chars + 1 offset from edge
+        let checkbox_end = self.card_width as usize;
 
         if x_in_card >= checkbox_start && x_in_card < checkbox_end {
             return Some(index);
@@ -173,7 +173,7 @@ impl GridLayout {
 
         let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
         let col = (x / self.card_width) as usize;
-        let row = y_in_grid / self.card_height as usize;
+        let row = y_in_grid / (self.card_height-1) as usize;
 
         if col >= self.cols {
             return None;
@@ -185,7 +185,7 @@ impl GridLayout {
         }
 
         // Check if click is on the same row as checkbox
-        let y_in_card = y_in_grid % self.card_height as usize;
+        let y_in_card = y_in_grid % (self.card_height-1) as usize;
         let bottom_border_row = self.card_height as usize - 5;
 
         if y_in_card != bottom_border_row {
@@ -196,8 +196,8 @@ impl GridLayout {
         // The checkbox_line is: "✦ 🗁  ⊂⬤ " right-aligned
         // ✦ is at the start of this string, about 10-12 chars from right edge
         let x_in_card = (x as usize) % self.card_width as usize;
-        let button_start = self.card_width as usize - 12;
-        let button_end = self.card_width as usize - 9;
+        let button_start = self.card_width as usize - 8;
+        let button_end = self.card_width as usize - 6;
 
         if x_in_card >= button_start && x_in_card < button_end {
             return Some(index);
