@@ -358,7 +358,9 @@ fn render_video_card(
 ) {
     // Card border
     let border_style = if is_selected {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Black)
     };
