@@ -99,7 +99,7 @@ pub async fn summarize_video(video_url: &str, _video_title: &str, _channel_name:
         .map_err(|_| anyhow::anyhow!("GEMINI_API_KEY environment variable not set"))?;
 
     let prompt = format!(
-        "Summarize this YouTube video with all the relevant information so I don't have to watch it. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections",
+        "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections",
         //video_title, channel_name
     );
 
@@ -179,10 +179,44 @@ async fn call_gemini(api_key: &str, model: &str, video_url: &str, prompt: &str) 
     if let Some(candidates) = response.candidates {
         if let Some(candidate) = candidates.first() {
             if let Some(part) = candidate.content.parts.first() {
-                return Ok(part.text.clone());
+                return Ok(smartify_quotes(&part.text));
             }
         }
     }
 
     Err(anyhow::anyhow!("No response content from Gemini"))
+}
+
+/// Convert straight quotes to curly/smart quotes using the smart_quotes crate heuristic
+fn smartify_quotes(text: &str) -> String {
+    use smart_quotes::{decide_quote_after, Decision};
+
+    const OPEN_DOUBLE: char = '\u{201C}'; // "
+    const CLOSE_DOUBLE: char = '\u{201D}'; // "
+    const OPEN_SINGLE: char = '\u{2018}'; // '
+    const CLOSE_SINGLE: char = '\u{2019}'; // ' (also apostrophe)
+
+    let mut result = String::with_capacity(text.len());
+    let mut prev_char: Option<char> = None;
+
+    for c in text.chars() {
+        match c {
+            '"' => {
+                match decide_quote_after(prev_char) {
+                    Decision::Open => result.push(OPEN_DOUBLE),
+                    Decision::Close => result.push(CLOSE_DOUBLE),
+                }
+            }
+            '\'' => {
+                match decide_quote_after(prev_char) {
+                    Decision::Open => result.push(OPEN_SINGLE),
+                    Decision::Close => result.push(CLOSE_SINGLE),
+                }
+            }
+            _ => result.push(c),
+        }
+        prev_char = Some(c);
+    }
+
+    result
 }

@@ -8,7 +8,6 @@ use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use reqwest::header;
 use termimad::{MadSkin, StyledChar};
 
 use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
@@ -760,6 +759,8 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
                header_style.clone(),
                header_style.clone(),
             ];
+
+            skin.list_items_indentation_mode = termimad::ListItemsIndentationMode::Block;
 
             let text_width = inner.width.saturating_sub(3) as usize;
             let formatted = skin.text(summary, Some(text_width));

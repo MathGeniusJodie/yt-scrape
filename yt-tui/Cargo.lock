@@ -2046,6 +2046,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "smart_quotes"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d19b541b9c1a73cdbee9ff91cc7b369a7d1d18f72a3aefea1376c353ea1b902f"
+
+[[package]]
 name = "socket2"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3093,6 +3099,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "smart_quotes",
  "termimad",
  "tokio",
  "tui-scrollview",
