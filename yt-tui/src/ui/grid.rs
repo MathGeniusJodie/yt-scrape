@@ -6,9 +6,9 @@ use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+
+use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 /// Render the entire UI
@@ -18,6 +18,7 @@ pub fn render(
     layout: &GridLayout,
     thumb_cache: &ThumbnailCache,
     scroll_state: &mut ScrollViewState,
+    scroll_position: f64,
     videos_dir: &Path,
 ) {
     let area = frame.area();
@@ -35,6 +36,7 @@ pub fn render(
         thumb_cache,
         area,
         scroll_state,
+        scroll_position,
         videos_dir,
     );
 
@@ -248,6 +250,7 @@ fn render_grid(
     thumb_cache: &ThumbnailCache,
     area: Rect,
     scroll_state: &mut ScrollViewState,
+    scroll_position: f64,
     videos_dir: &Path,
 ) {
     // Grid area (between header and footer)
@@ -344,20 +347,16 @@ fn render_grid(
     // Render the scroll view to the frame
     frame.render_stateful_widget(scroll_view, grid_area, scroll_state);
 
-    // Render custom scrollbar (cyan, no arrows, no track)
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(Some(&"╻"))
-        .end_symbol(Some(&"╹"))
-        .track_symbol(Some(&"┃"))
-        .begin_style(Style::default().bg(Color::Black).fg(Color::Rgb(10, 10, 10)))
-        .end_style(Style::default().bg(Color::Black).fg(Color::Rgb(10, 10, 10)))
-        .track_style(Style::default().bg(Color::Black).fg(Color::Rgb(10, 10, 10)))
-        .thumb_symbol(&"┃")
-        .thumb_style(Style::default().bg(Color::Black).fg(Color::Cyan));
+    // Render smooth scrollbar with sub-cell precision
+    let scrollbar = SmoothScrollbar::new()
+        .thumb_color(Color::Cyan)
+        .track_color(Color::Rgb(10, 10, 10));
 
-    // Use max_scroll as content length so scrollbar reaches bottom when fully scrolled
-    let max_scroll = (content_height as usize).saturating_sub(layout.grid_height as usize);
-    let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_offset);
+    let mut scrollbar_state = SmoothScrollbarState::new(
+        content_height as f64,
+        layout.grid_height as f64,
+    )
+    .position(scroll_position);
 
     frame.render_stateful_widget(scrollbar, grid_area, &mut scrollbar_state);
 }

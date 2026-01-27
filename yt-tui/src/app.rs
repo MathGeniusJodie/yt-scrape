@@ -93,6 +93,7 @@ impl App {
             // Only redraw when state has changed
             if self.needs_redraw {
                 let videos_dir = self.storage.videos_dir();
+                let scroll_pos = self.scroll_position;
                 self.terminal.draw(|f| {
                     ui::render(
                         f,
@@ -100,6 +101,7 @@ impl App {
                         &self.layout,
                         &self.thumb_cache,
                         &mut self.scroll_state,
+                        scroll_pos,
                         videos_dir,
                     );
                 })?;
@@ -497,6 +499,7 @@ impl App {
 
                     // Redraw to show progress
                     let videos_dir = self.storage.videos_dir();
+                    let scroll_pos = self.scroll_position;
                     self.terminal.draw(|f| {
                         ui::render(
                             f,
@@ -504,6 +507,7 @@ impl App {
                             &self.layout,
                             &self.thumb_cache,
                             &mut self.scroll_state,
+                            scroll_pos,
                             videos_dir,
                         );
                     })?;
