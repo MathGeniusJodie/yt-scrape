@@ -101,7 +101,7 @@ impl App {
 
             // Use shorter poll timeout when animating
             let poll_timeout = if self.scroll_velocity.abs() > 0.5 {
-                Duration::from_millis(16) // ~60fps during animation
+                Duration::from_millis(32) // ~30fps during animation
             } else {
                 Duration::from_millis(100) // idle
             };
@@ -394,15 +394,16 @@ impl App {
         let card_bottom = card_top + self.layout.card_height as usize;
         let current_scroll = self.scroll_offset();
 
-        // Scroll up if selection is above viewport (smooth scroll with velocity)
+        // Scroll up if selection is above viewport (instant jump, no inertia)
         if card_top < current_scroll {
-            let target = card_top as f64;
-            self.scroll_velocity = (target - self.scroll_position) * 0.5;
+            self.scroll_position = card_top as f64;
+            self.scroll_velocity = 0.0;
         }
         // Scroll down if selection is below viewport
         else if card_bottom > current_scroll + self.layout.grid_height as usize {
-            let target = (card_bottom.saturating_sub(self.layout.grid_height as usize)) as f64;
-            self.scroll_velocity = (target - self.scroll_position) * 0.5;
+            self.scroll_position =
+                (card_bottom.saturating_sub(self.layout.grid_height as usize)) as f64;
+            self.scroll_velocity = 0.0;
         }
         self.needs_redraw = true;
     }
