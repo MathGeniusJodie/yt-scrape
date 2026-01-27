@@ -88,8 +88,9 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         "⓲", "⓳", "⓴", "∞",
     ];
 
+    let watch_later_badge = badges[state.watch_later.len().min(21)];
     let mut watch_later_label = " Watch Later ".to_string();
-    watch_later_label.push_str(badges[state.watch_later.len().min(21)]);
+    watch_later_label.push_str(watch_later_badge);
     watch_later_label.push_str(" ");
 
     let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (&watch_later_label, Tab::WatchLater)];
@@ -98,6 +99,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
     let unselected_style = Style::default().fg(Color::DarkGray);
+    let badge_style = Style::default().fg(Color::Yellow);
     let help_style = Style::default().fg(Color::Cyan);
     let refresh_style = if state.is_refreshing {
         Style::default()
@@ -156,7 +158,41 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     };
 
     let line1 = build_line(|b| &b.top, " ", false);
-    let line2 = build_line(|b| &b.middle, " ", false);
+    // Build line2 separately to style the Watch Later badge differently
+    let line2 = {
+        let mut spans = Vec::new();
+        for (i, (btn, is_selected)) in tab_btns.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" ".to_string()));
+            }
+            let style = if *is_selected {
+                selected_style
+            } else {
+                unselected_style
+            };
+            // Watch Later tab (index 1) - split to style badge separately
+            if i == 1 {
+                // btn.middle is "│ Watch Later ❶ │" - split before the badge
+                let middle = &btn.middle;
+                // Find position just before the badge (after " Watch Later ")
+                let badge_start = "│ Watch Later ".chars().count();
+                let badge_end = badge_start + watch_later_badge.chars().count();
+                let before_badge: String = middle.chars().take(badge_start).collect();
+                let badge_char: String = middle.chars().skip(badge_start).take(watch_later_badge.chars().count()).collect();
+                let after_badge: String = middle.chars().skip(badge_end).collect();
+                spans.push(Span::styled(before_badge, style));
+                spans.push(Span::styled(badge_char, badge_style));
+                spans.push(Span::styled(after_badge, style));
+            } else {
+                spans.push(Span::styled(btn.middle.clone(), style));
+            }
+        }
+        spans.push(Span::raw(" ".repeat(spacing)));
+        spans.push(Span::styled(refresh_btn.middle.clone(), refresh_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(help_btn.middle.clone(), help_style));
+        spans
+    };
     let line3 = build_line(|b| &b.bottom, "─", true);
 
     for (y, spans) in [line1, line2, line3].into_iter().enumerate() {
