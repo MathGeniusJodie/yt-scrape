@@ -2,6 +2,7 @@ mod app;
 mod cache;
 mod data;
 mod feed;
+mod gemini;
 mod player;
 mod ui;
 mod urls;

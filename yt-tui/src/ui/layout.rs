@@ -150,4 +150,59 @@ impl GridLayout {
 
         None
     }
+
+    /// Check if coordinates are on the summary button (✦) within a card
+    /// Returns Some(video_index) if click is on the button, None otherwise
+    pub fn is_summary_button_click(
+        &self,
+        x: u16,
+        y: u16,
+        scroll_offset_lines: usize,
+        total_items: usize,
+    ) -> Option<usize> {
+        // Account for header
+        if y < Self::HEADER_HEIGHT {
+            return None;
+        }
+
+        // Account for horizontal centering offset
+        if x < self.x_offset {
+            return None;
+        }
+        let x = x - self.x_offset;
+
+        let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
+        let col = (x / self.card_width) as usize;
+        let row = y_in_grid / self.card_height as usize;
+
+        if col >= self.cols {
+            return None;
+        }
+
+        let index = row * self.cols + col;
+        if index >= total_items {
+            return None;
+        }
+
+        // Check if click is on the same row as checkbox
+        let y_in_card = y_in_grid % self.card_height as usize;
+        let bottom_border_row = self.card_height as usize - 5;
+
+        if y_in_card != bottom_border_row {
+            return None;
+        }
+
+        // Check if x is in the ✦ button area (to the left of folder icon)
+        // The checkbox_line is: "✦ 🗁  ⊂⬤ " right-aligned
+        // ✦ is at the start of this string, about 10-12 chars from right edge
+        let x_in_card = (x as usize) % self.card_width as usize;
+        let button_start = self.card_width as usize - 12;
+        let button_end = self.card_width as usize - 9;
+
+        if x_in_card >= button_start && x_in_card < button_end {
+            return Some(index);
+        }
+
+        None
+    }
 }

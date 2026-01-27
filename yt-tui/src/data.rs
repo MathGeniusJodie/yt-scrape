@@ -1,3 +1,4 @@
+use crate::gemini::SummaryState;
 use crate::urls;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,10 @@ pub struct AppState {
     pub should_quit: bool,
     pub show_help: bool,
     pub status_message: Option<String>,
+    pub show_summary: bool,
+    pub summary_state: Option<SummaryState>,
+    pub summary_scroll: u16,
+    pub summary_video_title: Option<String>,
 }
 
 impl Default for AppState {
@@ -75,6 +80,10 @@ impl Default for AppState {
             should_quit: false,
             show_help: false,
             status_message: None,
+            show_summary: false,
+            summary_state: None,
+            summary_scroll: 0,
+            summary_video_title: None,
         }
     }
 }

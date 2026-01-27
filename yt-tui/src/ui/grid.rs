@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
+use crate::gemini::SummaryState;
 use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
@@ -46,6 +47,11 @@ pub fn render(
     // Render help overlay if active
     if state.show_help {
         render_help(frame, area);
+    }
+
+    // Render summary modal if active
+    if state.show_summary {
+        render_summary(frame, state, area);
     }
 }
 
@@ -510,9 +516,9 @@ fn render_video_card(
         channel_and_time_style.push_str(&" ");
 
         let checkbox_line = if is_watch_later {
-            format!("{:>width$}", "🗁  ⊂⬤ ", width = thumb_width as usize)
+            format!("{:>width$}", "✦ 🗁  ⊂⬤ ", width = thumb_width as usize)
         } else {
-            format!("{:>width$}", "🗁  ⬤⊃ ", width = thumb_width as usize)
+            format!("{:>width$}", "✦ 🗁  ⬤⊃ ", width = thumb_width as usize)
         };
 
         // Colors for folder (based on download status) and toggle (based on watch later status)
@@ -534,11 +540,13 @@ fn render_video_card(
                 .take(thumb_width as usize)
                 .zip(checkbox_line.chars())
                 .map(|((r, g, b), char)| {
-                    // Folder icon gets folder_color, toggle chars get toggle_color
+                    // Folder icon gets folder_color, toggle chars get toggle_color, ✦ gets cyan
                     let fg_color = if char == '🗁' {
                         folder_color
                     } else if char == '⊂' || char == '⬤' || char == '⊃' {
                         toggle_color
+                    } else if char == '✦' {
+                        Color::Cyan
                     } else {
                         Color::Rgb(128, 128, 128) // Spaces stay grey
                     };
@@ -631,7 +639,7 @@ fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: R
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help_width = 50.min(area.width.saturating_sub(4));
-    let help_height = 14.min(area.height.saturating_sub(4));
+    let help_height = 15.min(area.height.saturating_sub(4));
 
     let help_area = Rect {
         x: (area.width - help_width) / 2,
@@ -650,6 +658,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw("←/h, →/l     Move selection left/right"),
         Line::raw("Enter        Play selected video"),
         Line::raw("w            Toggle Watch Later"),
+        Line::raw("s            Summarize video (Gemini)"),
         Line::raw("Tab          Switch tabs"),
         Line::raw("r            Refresh feeds"),
         Line::raw("?            Toggle this help"),
@@ -670,6 +679,213 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
     let help = Paragraph::new(help_text).block(block);
     frame.render_widget(help, help_area);
+}
+
+fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
+    let modal_width = 70.min(area.width.saturating_sub(4));
+    let modal_height = (area.height - 6).min(area.height.saturating_sub(4));
+
+    let modal_area = Rect {
+        x: (area.width - modal_width) / 2,
+        y: (area.height - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the area first
+    frame.render_widget(Clear, modal_area);
+
+    let title = state
+        .summary_video_title
+        .as_ref()
+        .map(|t| format!(" ✦ {} ", truncate_str(t, modal_width.saturating_sub(6) as usize)))
+        .unwrap_or_else(|| " ✦ Summary ".to_string());
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .border_type(BorderType::Rounded)
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(modal_area);
+
+    match &state.summary_state {
+        Some(SummaryState::Loading) => {
+            let loading_text = vec![
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Loading summary...",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Asking Gemini to analyze the video",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            let paragraph = Paragraph::new(loading_text)
+                .block(block)
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(paragraph, modal_area);
+        }
+        Some(SummaryState::Ready(summary)) => {
+            // Render the block first
+            frame.render_widget(block, modal_area);
+
+            // Word wrap the summary text
+            let wrapped_lines = wrap_text(summary, inner.width.saturating_sub(3) as usize);
+            let total_lines = wrapped_lines.len() as u16;
+            let viewport_height = inner.height;
+
+            // Calculate content height for scroll view
+            let content_height = total_lines.max(viewport_height);
+
+            // Calculate max scroll and clamp current scroll
+            let max_scroll = total_lines.saturating_sub(viewport_height);
+            let scroll_offset = (state.summary_scroll).min(max_scroll);
+
+            // Create scroll view
+            let mut scroll_view = ScrollView::new(Size::new(inner.width.saturating_sub(1), content_height))
+                .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
+                .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
+
+            // Render text into scroll view buffer
+            let text: Vec<Line> = wrapped_lines
+                .into_iter()
+                .map(|s| Line::raw(format!(" {}", s)))
+                .collect();
+
+            Paragraph::new(text)
+                .style(Style::default().bg(Color::Black))
+                .render(
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: inner.width.saturating_sub(1),
+                        height: content_height,
+                    },
+                    scroll_view.buf_mut(),
+                );
+
+            // Create scroll state with current offset
+            let mut scroll_state = ScrollViewState::default();
+            scroll_state.set_offset(ratatui::layout::Position::new(0, scroll_offset));
+
+            // Render the scroll view
+            frame.render_stateful_widget(scroll_view, inner, &mut scroll_state);
+
+            // Render smooth scrollbar if content is scrollable
+            if total_lines > viewport_height {
+                let scrollbar_area = Rect {
+                    x: inner.x + inner.width.saturating_sub(1),
+                    y: inner.y,
+                    width: 1,
+                    height: inner.height,
+                };
+
+                let scrollbar = SmoothScrollbar::new()
+                    .thumb_color(Color::Cyan)
+                    .track_color(Color::Rgb(30, 30, 30));
+
+                let mut scrollbar_state = SmoothScrollbarState::new(
+                    content_height as f64,
+                    viewport_height as f64,
+                )
+                .position(scroll_offset as f64);
+
+                frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+
+                // Show hint at bottom
+                let hint = " ↑/↓ scroll, Esc close ";
+                let hint_area = Rect {
+                    x: modal_area.x + 2,
+                    y: modal_area.y + modal_area.height - 1,
+                    width: hint.len() as u16,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+                    hint_area,
+                );
+            }
+        }
+        Some(SummaryState::Error(err)) => {
+            let error_text = vec![
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Error loading summary",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Press Esc to close",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            let paragraph = Paragraph::new(error_text)
+                .block(block)
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(paragraph, modal_area);
+        }
+        None => {
+            frame.render_widget(block, modal_area);
+        }
+    }
+}
+
+/// Wrap text to fit within a given width
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let words: Vec<&str> = paragraph.split_whitespace().collect();
+        let mut current_line = String::new();
+
+        for word in words {
+            if current_line.is_empty() {
+                if word.len() > width {
+                    // Word is longer than width, split it
+                    let mut remaining = word;
+                    while remaining.len() > width {
+                        lines.push(remaining[..width].to_string());
+                        remaining = &remaining[width..];
+                    }
+                    current_line = remaining.to_string();
+                } else {
+                    current_line = word.to_string();
+                }
+            } else if current_line.len() + 1 + word.len() <= width {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                lines.push(current_line);
+                if word.len() > width {
+                    let mut remaining = word;
+                    while remaining.len() > width {
+                        lines.push(remaining[..width].to_string());
+                        remaining = &remaining[width..];
+                    }
+                    current_line = remaining.to_string();
+                } else {
+                    current_line = word.to_string();
+                }
+            }
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+    }
+
+    lines
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

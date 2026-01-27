@@ -1,8 +1,10 @@
 use crate::cache::{download_video, Storage, ThumbnailCache};
 use crate::data::{AppState, Tab};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
+use crate::gemini::{summarize_video, SummaryState};
 use crate::player;
 use crate::ui::{self, GridLayout};
+use crate::urls;
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
@@ -223,7 +225,42 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: event::KeyEvent) -> Result<bool> {
-        // Handle help overlay first
+        // Handle summary modal first
+        if self.state.show_summary {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.state.show_summary = false;
+                    self.state.summary_state = None;
+                    self.state.summary_scroll = 0;
+                    self.state.summary_video_title = None;
+                    self.needs_redraw = true;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.summary_scroll = self.state.summary_scroll.saturating_sub(1);
+                    self.needs_redraw = true;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.summary_scroll = self.state.summary_scroll.saturating_add(1);
+                    self.needs_redraw = true;
+                }
+                KeyCode::PageUp => {
+                    self.state.summary_scroll = self.state.summary_scroll.saturating_sub(10);
+                    self.needs_redraw = true;
+                }
+                KeyCode::PageDown => {
+                    self.state.summary_scroll = self.state.summary_scroll.saturating_add(10);
+                    self.needs_redraw = true;
+                }
+                KeyCode::Home => {
+                    self.state.summary_scroll = 0;
+                    self.needs_redraw = true;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
+        // Handle help overlay
         if self.state.show_help {
             if matches!(
                 key.code,
@@ -262,6 +299,11 @@ impl App {
             // Actions
             KeyCode::Enter => self.play_selected()?,
             KeyCode::Char('w') => self.toggle_watch_later()?,
+            KeyCode::Char('s') => {
+                if let Some(idx) = self.state.selected_index {
+                    self.show_video_summary(idx).await?;
+                }
+            }
             KeyCode::Char('r') => self.refresh().await?,
             KeyCode::Tab => self.switch_tab(),
             KeyCode::Char('?') => {
@@ -323,8 +365,18 @@ impl App {
                     // Grid click
                     let total = self.state.current_videos().len();
 
+                    // Check if click is on the summary button (✦)
+                    if let Some(idx) = self.layout.is_summary_button_click(
+                        mouse.column,
+                        mouse.row,
+                        self.scroll_offset(),
+                        total,
+                    ) {
+                        self.state.selected_index = Some(idx);
+                        self.show_video_summary(idx).await?;
+                    }
                     // Check if click is on a watch later checkbox
-                    if let Some(idx) = self.layout.is_checkbox_click(
+                    else if let Some(idx) = self.layout.is_checkbox_click(
                         mouse.column,
                         mouse.row,
                         self.scroll_offset(),
@@ -461,6 +513,50 @@ impl App {
                 self.storage.save_watch_later(&self.state.watch_later)?;
                 self.needs_redraw = true;
             }
+        }
+        Ok(())
+    }
+
+    async fn show_video_summary(&mut self, idx: usize) -> Result<()> {
+        let videos = self.state.current_videos();
+        if let Some(video) = videos.get(idx) {
+            let video_id = video.video_id.clone();
+            let video_title = video.title.clone();
+            let channel_name = video.channel_name.clone();
+            let video_url = urls::watch_url(&video_id);
+
+            // Show modal with loading state
+            self.state.show_summary = true;
+            self.state.summary_state = Some(SummaryState::Loading);
+            self.state.summary_scroll = 0;
+            self.state.summary_video_title = Some(video_title.clone());
+            self.needs_redraw = true;
+
+            // Draw loading state
+            let videos_dir = self.storage.videos_dir();
+            let scroll_pos = self.scroll_position;
+            self.terminal.draw(|f| {
+                ui::render(
+                    f,
+                    &self.state,
+                    &self.layout,
+                    &self.thumb_cache,
+                    &mut self.scroll_state,
+                    scroll_pos,
+                    videos_dir,
+                );
+            })?;
+
+            // Call Gemini API
+            match summarize_video(&video_url, &video_title, &channel_name).await {
+                Ok(summary) => {
+                    self.state.summary_state = Some(SummaryState::Ready(summary));
+                }
+                Err(e) => {
+                    self.state.summary_state = Some(SummaryState::Error(e.to_string()));
+                }
+            }
+            self.needs_redraw = true;
         }
         Ok(())
     }
