@@ -282,35 +282,42 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Check header clicks (all 3 rows)
                 if mouse.row < GridLayout::HEADER_HEIGHT {
-                    // Check tab regions
+                    // Check tab regions and refresh icon
+                    let (tab_regions, refresh_region) = ui::header_tab_regions();
                     let mut tab_clicked = false;
-                    for (start, end, tab) in ui::header_tab_regions() {
-                        if mouse.column >= start && mouse.column < end {
-                            self.state.current_tab = tab;
-                            self.set_scroll_offset(0);
-                            self.state.selected_index = None;
-                            self.needs_redraw = true;
-                            tab_clicked = true;
-                            break;
-                        }
-                    }
 
-                    // Check right-side buttons (only on row 0 where they're rendered)
-                    if !tab_clicked
-                        && mouse.row <= 3
-                        && mouse.column >= self.state.terminal_cols.saturating_sub(11)
-                    {
-                        let right_offset = self.state.terminal_cols - mouse.column;
-                        if right_offset > 6 {
-                            // Refresh button area
+                    // Check refresh icon first (it's inside the Feed tab)
+                    if let Some((refresh_start, refresh_end)) = refresh_region {
+                        if mouse.column >= refresh_start && mouse.column < refresh_end {
                             if !self.state.is_refreshing {
                                 self.refresh().await?;
                             }
-                        } else {
-                            // Help button
-                            self.state.show_help = !self.state.show_help;
-                            self.needs_redraw = true;
+                            tab_clicked = true; // Prevent tab switch
                         }
+                    }
+
+                    // Check tab regions
+                    if !tab_clicked {
+                        for (start, end, tab) in tab_regions {
+                            if mouse.column >= start && mouse.column < end {
+                                self.state.current_tab = tab;
+                                self.set_scroll_offset(0);
+                                self.state.selected_index = None;
+                                self.needs_redraw = true;
+                                tab_clicked = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check right-side help button (only on row 0 where they're rendered)
+                    if !tab_clicked
+                        && mouse.row <= 3
+                        && mouse.column >= self.state.terminal_cols.saturating_sub(6)
+                    {
+                        // Help button
+                        self.state.show_help = !self.state.show_help;
+                        self.needs_redraw = true;
                     }
                 } else {
                     // Grid click

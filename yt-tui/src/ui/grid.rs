@@ -88,17 +88,22 @@ impl BoxButton {
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let badges: [&str;_] = [
         "⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱",
-        "⓲", "⓳", "⓴", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉘", "㉙", "㉚", "㉛", "㉜", "㉝", "㉞", "㉟",
-        "㊱", "㊲", "㊳", "㊴", "㊵", "㊶", "㊷", "㊸", "㊹", "㊺", "㊻", "㊼", "㊽", "㊾", "㊿"
+        "⓲", "⓳", "⓴"
     ];
 
     let watch_later_badge = badges[state.watch_later.len().min(badges.len() - 1)];
     let mut watch_later_label = " Watch Later ".to_string();
     watch_later_label.push_str(watch_later_badge);
-    if watch_later_label.len() > 50 {
+    if watch_later_label.len() > 20 {
         watch_later_label.push_str("✚");
     } else {
-        watch_later_label.push_str(" ");
+        watch_later_label.push_str("  ");
+    }
+    if state.watch_later.len() == 50 {
+        watch_later_label = " Watch Later 🅛 ".to_string();
+    }
+    if state.watch_later.len() > 50 {
+        watch_later_label = " Watch Later 🅛✚".to_string();
     }
     if state.watch_later.len() == 100 {
         watch_later_label = " Watch Later 🅒 ".to_string();
@@ -110,7 +115,8 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         watch_later_label = " Watch Later ∞ ".to_string();
     }
 
-    let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (&watch_later_label, Tab::WatchLater)];
+    let feed_label = " Feed ↻ ";
+    let tabs: &[(&str, Tab)] = &[(feed_label, Tab::Feed), (&watch_later_label, Tab::WatchLater)];
 
     let selected_style = Style::default()
         .fg(Color::White)
@@ -127,7 +133,6 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     };
 
     // Build buttons
-    let refresh_btn = BoxButton::new(" ↻ ");
     let help_btn = BoxButton::new(" ? ");
     let tab_btns: Vec<(BoxButton, bool)> = tabs
         .iter()
@@ -140,7 +145,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     // Calculate spacing
     let tabs_width: usize =
         tab_btns.iter().map(|(b, _)| b.width()).sum::<usize>() + tab_btns.len().saturating_sub(1);
-    let right_width = refresh_btn.width() + 1 + help_btn.width();
+    let right_width = help_btn.width();
     let spacing = (area.width as usize).saturating_sub(tabs_width + right_width);
 
     // Build all three lines using a helper closure. The third parameter
@@ -165,11 +170,6 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
             spans.push(Span::styled(get_part(btn).to_string(), style));
         }
         spans.push(Span::raw(separator.repeat(spacing)));
-        spans.push(Span::styled(
-            get_part(&refresh_btn).to_string(),
-            refresh_style,
-        ));
-        spans.push(Span::raw(" "));
         spans.push(Span::styled(get_part(&help_btn).to_string(), help_style));
         spans
     };
@@ -187,8 +187,24 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
             } else {
                 unselected_style
             };
+            // Feed tab (index 0) - split to style refresh icon separately
+            if i == 0 {
+                // btn.middle is "│ Feed ↻ │" - split before the refresh icon
+                let middle = &btn.middle;
+                let refresh_start = "│ Feed ".chars().count();
+                let refresh_end = refresh_start + 1; // ↻ is one char
+                let before_refresh: String = middle.chars().take(refresh_start).collect();
+                let refresh_char: String = middle
+                    .chars()
+                    .skip(refresh_start)
+                    .take(1)
+                    .collect();
+                let after_refresh: String = middle.chars().skip(refresh_end).collect();
+                spans.push(Span::styled(before_refresh, style));
+                spans.push(Span::styled(refresh_char, refresh_style));
+                spans.push(Span::styled(after_refresh, style));
             // Watch Later tab (index 1) - split to style badge separately
-            if i == 1 {
+            } else if i == 1 {
                 // btn.middle is "│ Watch Later ❶ │" - split before the badge
                 let middle = &btn.middle;
                 // Find position just before the badge (after " Watch Later ")
@@ -209,8 +225,6 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
             }
         }
         spans.push(Span::raw(" ".repeat(spacing)));
-        spans.push(Span::styled(refresh_btn.middle.clone(), refresh_style));
-        spans.push(Span::raw(" "));
         spans.push(Span::styled(help_btn.middle.clone(), help_style));
         spans
     };
@@ -228,18 +242,29 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Returns the click regions for header tabs as (start_col, end_col, Tab)
+/// and optionally a refresh icon region
 /// This is used by the click handler in app.rs
-pub fn header_tab_regions() -> Vec<(u16, u16, Tab)> {
-    let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (" Watch Later ", Tab::WatchLater)];
+pub fn header_tab_regions() -> (Vec<(u16, u16, Tab)>, Option<(u16, u16)>) {
+    let feed_label = " Feed ↻ ";
+    let tabs: &[(&str, Tab)] = &[(feed_label, Tab::Feed), (" Watch Later ", Tab::WatchLater)];
 
     let mut regions = Vec::new();
+    let mut refresh_region = None;
     let mut x: u16 = 0;
-    for (label, tab) in tabs {
+    for (i, (label, tab)) in tabs.iter().enumerate() {
         let width = label.chars().count() as u16 + 2; // +2 for borders
         regions.push((x, x + width, *tab));
+
+        // Feed tab (index 0) - calculate refresh icon position
+        // The icon is at position: border(1) + " Feed "(6) = 7 chars from start
+        if i == 0 {
+            let refresh_col = x + 1 + " Feed ".chars().count() as u16; // +1 for left border
+            refresh_region = Some((refresh_col, refresh_col + 2)); // icon + space after
+        }
+
         x += width + 1; // +1 for space between tabs
     }
-    regions
+    (regions, refresh_region)
 }
 
 fn render_grid(
