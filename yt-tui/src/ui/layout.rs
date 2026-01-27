@@ -9,6 +9,8 @@ pub struct GridLayout {
     pub card_height: u16,
     /// Available height for the grid area (excluding header/footer)
     pub grid_height: u16,
+    /// Horizontal offset to center the grid
+    pub x_offset: u16,
 }
 
 impl GridLayout {
@@ -29,11 +31,16 @@ impl GridLayout {
         // Calculate how many fixed-width columns fit
         let cols = (terminal_width / Self::CARD_WIDTH).max(1) as usize;
 
+        // Calculate horizontal offset to center the grid
+        let total_grid_width = cols as u16 * Self::CARD_WIDTH;
+        let x_offset = terminal_width.saturating_sub(total_grid_width) / 2;
+
         Self {
             cols,
             card_width: Self::CARD_WIDTH,
             card_height: Self::CARD_HEIGHT,
             grid_height,
+            x_offset,
         }
     }
 
@@ -50,6 +57,12 @@ impl GridLayout {
             return None;
         }
         let y = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
+
+        // Account for horizontal centering offset
+        if x < self.x_offset {
+            return None;
+        }
+        let x = x - self.x_offset;
 
         let col = (x / self.card_width) as usize;
         let row = y / self.card_height as usize;
@@ -96,6 +109,12 @@ impl GridLayout {
         if y < Self::HEADER_HEIGHT {
             return None;
         }
+
+        // Account for horizontal centering offset
+        if x < self.x_offset {
+            return None;
+        }
+        let x = x - self.x_offset;
 
         let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
         let col = (x / self.card_width) as usize;

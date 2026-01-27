@@ -304,7 +304,7 @@ fn render_grid(
             let col = idx % layout.cols;
 
             let card_area = Rect {
-                x: col as u16 * layout.card_width,
+                x: layout.x_offset + col as u16 * layout.card_width,
                 y: row as u16 * layout.card_height,
                 width: layout.card_width,
                 height: layout.card_height,
