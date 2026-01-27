@@ -3,6 +3,23 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+const MAX_TITLE_LENGTH: usize = 100;
+
+/// Sanitize a string for use in a filename
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_TITLE_LENGTH)
+        .collect()
+}
+
 /// Handles persistence of app data
 pub struct Storage {
     data_dir: PathBuf,
@@ -38,14 +55,25 @@ impl Storage {
         &self.videos_dir
     }
 
-    /// Get the path where a video would be stored
-    pub fn video_path(&self, video_id: &str) -> PathBuf {
-        self.videos_dir.join(format!("{}.mp4", video_id))
+    /// Get the path where a video would be stored (with sanitized title)
+    pub fn video_path(&self, video_id: &str, title: &str) -> PathBuf {
+        let sanitized_title = sanitize_filename(title);
+        self.videos_dir
+            .join(format!("{}_{}.mp4", sanitized_title, video_id))
+    }
+
+    /// Find an existing video file by video_id (regardless of title in filename)
+    pub fn find_video_path(&self, video_id: &str) -> Option<PathBuf> {
+        let pattern = format!("*_{}.mp4", video_id);
+        glob::glob(self.videos_dir.join(&pattern).to_str()?)
+            .ok()?
+            .filter_map(Result::ok)
+            .next()
     }
 
     /// Check if a video is downloaded
     pub fn has_video(&self, video_id: &str) -> bool {
-        self.video_path(video_id).exists()
+        self.find_video_path(video_id).is_some()
     }
 
     /// Load watch later video IDs

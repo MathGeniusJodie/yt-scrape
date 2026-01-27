@@ -357,7 +357,12 @@ fn render_grid(
 
             let is_selected = state.selected_index == Some(idx);
             let is_watch_later = state.watch_later.contains(&video.video_id);
-            let is_downloaded = videos_dir.join(format!("{}.mp4", video.video_id)).exists();
+            let is_downloaded = videos_dir
+                .join(format!("*_{}.mp4", video.video_id))
+                .to_str()
+                .and_then(|p| glob::glob(p).ok())
+                .map(|mut g| g.next().is_some())
+                .unwrap_or(false);
 
             render_video_card(
                 scroll_view.buf_mut(),

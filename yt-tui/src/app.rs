@@ -430,11 +430,11 @@ impl App {
             if let Some(video) = videos.get(idx) {
                 // Check if this video is in watch later and might have a local copy
                 let local_path = if self.state.watch_later.contains(&video.video_id) {
-                    Some(self.storage.video_path(&video.video_id))
+                    self.storage.find_video_path(&video.video_id)
                 } else {
                     None
                 };
-                player::play_video(&video.video_id, local_path.as_deref())?;
+                player::play_video(&video.video_id, &video.title, local_path.as_deref())?;
             }
         }
         Ok(())
@@ -445,13 +445,14 @@ impl App {
             let videos = self.state.current_videos();
             if let Some(video) = videos.get(idx) {
                 let video_id = video.video_id.clone();
+                let video_title = video.title.clone();
                 if self.state.watch_later.contains(&video_id) {
                     self.state.watch_later.remove(&video_id);
                 } else {
                     self.state.watch_later.insert(video_id.clone());
                     // Start background download if not already downloaded
-                    let video_path = self.storage.video_path(&video_id);
-                    if !video_path.exists() {
+                    if !self.storage.has_video(&video_id) {
+                        let video_path = self.storage.video_path(&video_id, &video_title);
                         tokio::spawn(async move {
                             let _ = download_video(&video_id, &video_path).await;
                         });
@@ -563,12 +564,15 @@ impl App {
     fn queue_watch_later_downloads(&self) {
         // Download videos for watch later items that aren't already downloaded
         for video_id in &self.state.watch_later {
-            let video_path = self.storage.video_path(video_id);
-            if !video_path.exists() {
-                let video_id = video_id.clone();
-                tokio::spawn(async move {
-                    let _ = download_video(&video_id, &video_path).await;
-                });
+            if !self.storage.has_video(video_id) {
+                // Find the video to get its title
+                if let Some(video) = self.state.videos.iter().find(|v| &v.video_id == video_id) {
+                    let video_path = self.storage.video_path(video_id, &video.title);
+                    let video_id = video_id.clone();
+                    tokio::spawn(async move {
+                        let _ = download_video(&video_id, &video_path).await;
+                    });
+                }
             }
         }
     }
