@@ -1,11 +1,15 @@
+use std::ops::Add;
+
 use crate::cache::ThumbnailCache;
 use crate::data::{AppState, Tab, Video};
 use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
+use futures::sink::Fanout;
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
+use tokio::sync::watch;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 /// Render the entire UI
@@ -79,9 +83,20 @@ impl BoxButton {
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
-    let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (" Watch Later ", Tab::WatchLater)];
+    let badges: [&str; 22] = [
+        "⓿", "❶", "❷", "❸", "❹", "❺", "❻", "❼", "❽", "❾", "❿", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱",
+        "⓲", "⓳", "⓴", "∞",
+    ];
 
-    let selected_style = Style::default().fg(Color::White);
+    let mut watch_later_label = " Watch Later ".to_string();
+    watch_later_label.push_str(badges[state.watch_later.len().min(21)]);
+    watch_later_label.push_str(" ");
+
+    let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (&watch_later_label, Tab::WatchLater)];
+
+    let selected_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
     let unselected_style = Style::default().fg(Color::DarkGray);
     let help_style = Style::default().fg(Color::Cyan);
     let refresh_style = if state.is_refreshing {
@@ -196,6 +211,42 @@ fn render_grid(
         .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
         .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
 
+    //render colored bakckground for grid area
+    let background_block = Block::default().style(Style::default().bg(Color::Rgb(20, 20, 20)));
+    let background_area = Rect {
+        x: 0,
+        y: 0,
+        width: area.width,
+        height: content_height,
+    };
+    background_block.render(background_area, scroll_view.buf_mut());
+
+    //top shadow
+    Paragraph::new("▀".repeat(area.width as usize))
+        .style(Style::default().fg(Color::Rgb(4, 4, 4)))
+        .bg(Color::Rgb(8, 8, 8))
+        .render(
+            Rect {
+                x: 0,
+                y: scroll_state.offset().y,
+                width: area.width,
+                height: 1,
+            },
+            scroll_view.buf_mut(),
+        );
+    Paragraph::new("▀".repeat(area.width as usize))
+        .style(Style::default().fg(Color::Rgb(12, 12, 12)))
+        .bg(Color::Rgb(16, 16, 16))
+        .render(
+            Rect {
+                x: 0,
+                y: scroll_state.offset().y + 1,
+                width: area.width,
+                height: 1,
+            },
+            scroll_view.buf_mut(),
+        );
+
     // Calculate which rows are visible for performance (don't render off-screen cards)
     let scroll_offset = scroll_state.offset().y as usize;
     let first_visible_row = scroll_offset / layout.card_height as usize;
@@ -237,10 +288,14 @@ fn render_grid(
 
     // Render custom scrollbar (cyan, no arrows, no track)
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(None)
-        .end_symbol(None)
-        .track_symbol(None)
-        .thumb_style(Style::default().fg(Color::Cyan));
+        .begin_symbol(Some(&"╻"))
+        .end_symbol(Some(&"╹"))
+        .track_symbol(Some(&"┃"))
+        .begin_style(Style::default().bg(Color::Black).fg(Color::Rgb(10, 10, 10)))
+        .end_style(Style::default().bg(Color::Black).fg(Color::Rgb(10, 10, 10)))
+        .track_style(Style::default().bg(Color::Black).fg(Color::Rgb(10, 10, 10)))
+        .thumb_symbol(&"┃")
+        .thumb_style(Style::default().bg(Color::Black).fg(Color::Cyan));
 
     let mut scrollbar_state = ScrollbarState::new(content_height as usize).position(scroll_offset);
 
@@ -260,13 +315,29 @@ fn render_video_card(
     let border_style = if is_selected {
         Style::default().fg(Color::Yellow)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Black)
+    };
+
+    let border_set = if is_selected {
+        BorderType::Rounded.to_border_set()
+    } else {
+        ratatui_core::symbols::border::Set {
+            vertical_left: "⢸",
+            vertical_right: "🮐",
+            horizontal_top: "⣀",
+            horizontal_bottom: "🮎", //"▀",//"⠻",
+            top_left: " ",
+            top_right: "⣀",
+            bottom_left: "⠘",
+            bottom_right: "⠛",
+        }
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border_style);
+        //.border_type(border_type)
+        .border_style(border_style)
+        .border_set(border_set);
 
     let inner = block.inner(area);
     block.render(area, buf);
@@ -279,6 +350,8 @@ fn render_video_card(
     let thumb_width = layout.thumbnail_width();
     let thumb_height = layout.thumbnail_height();
 
+    let mut fancy_bg: Vec<(u8, u8, u8)> = Vec::new();
+
     if let Some(rendered) = thumb_cache.get_rendered(&video.video_id, thumb_width, thumb_height) {
         let thumb_area = Rect {
             x: inner.x,
@@ -287,7 +360,11 @@ fn render_video_card(
             height: thumb_height.min(inner.height),
         };
 
-        if let Ok(text) = rendered.into_text() {
+        let image = rendered.0;
+
+        fancy_bg = rendered.1;
+
+        if let Ok(text) = image.into_text() {
             Paragraph::new(text).render(thumb_area, buf);
         }
     } else {
@@ -306,59 +383,112 @@ fn render_video_card(
     // Text area below thumbnail
     let text_area = Rect {
         x: inner.x,
-        y: inner.y + thumb_height,
+        y: inner.y + thumb_height.saturating_sub(2),
         width: inner.width,
-        height: inner.height.saturating_sub(thumb_height),
+        height: inner.height.saturating_sub(thumb_height).add(2),
     };
 
     if text_area.height > 0 {
         // Title (always exactly 2 lines)
-        let (title_line1, title_line2) = wrap_title_two_lines(&video.title, inner.width as usize);
-        let channel = truncate_str(&video.channel_name, inner.width as usize);
-        let time_ago = format_time_ago(&video.published);
+        let (title_line1, title_line2) =
+            wrap_title_two_lines(&video.title, inner.width.saturating_sub(2) as usize);
 
-        let title_style = Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD);
+        let title_line1 = format!(" {} ", title_line1);
+        let title_line2 = format!(" {} ", title_line2);
+
+        let channel = truncate_str(&video.channel_name, inner.width.saturating_sub(2) as usize);
+        let time_ago = format_time_ago(&video.published);
 
         // Calculate padding to right-align timestamp
         let channel_len = channel.chars().count();
         let time_len = time_ago.chars().count();
-        let padding = (inner.width as usize).saturating_sub(channel_len + time_len);
+        let padding =
+            (inner.width.saturating_sub(2) as usize).saturating_sub(channel_len + time_len);
+
+        let mut channel_and_time_style = String::new();
+        channel_and_time_style.push_str(&" ");
+        channel_and_time_style.push_str(&channel);
+        channel_and_time_style.push_str(&" ".repeat(padding));
+        channel_and_time_style.push_str(&time_ago);
+        channel_and_time_style.push_str(&" ");
+
+        let checkbox_line = if is_watch_later {
+            format!("{:>width$}", "🗁  ⊂⬤ ", width = thumb_width as usize)
+        } else {
+            format!("{:>width$}", "🗁  ⬤⊃ ", width = thumb_width as usize)
+        };
 
         let text_lines = vec![
-            Line::from(" "),
-            Line::from(Span::styled(title_line1, title_style)),
-            Line::from(Span::styled(title_line2, title_style)),
-            Line::from(vec![
-                Span::styled(channel, Style::default().fg(Color::Gray)),
-                Span::raw(" ".repeat(padding)),
-                Span::styled(time_ago, Style::default().fg(Color::DarkGray)),
-            ]),
+            //Line::from(" "),
+            fancy_bg
+                .iter()
+                .take(thumb_width as usize)
+                .zip(checkbox_line.chars())
+                .map(|((r, g, b), char)| {
+                    Span::styled(
+                        char.to_string(),
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .bg(Color::Rgb(*r, *g, *b))
+                            .fg(if is_watch_later {
+                                Color::Rgb(255, 165, 0)
+                            } else {
+                                Color::Rgb(128, 128, 128)
+                            }),
+                    )
+                })
+                .collect(),
+            fancy_bg
+                .iter()
+                .skip(thumb_width as usize)
+                .take(thumb_width as usize)
+                .zip(title_line1.chars())
+                .map(|((r, g, b), char)| {
+                    Span::styled(
+                        char.to_string(),
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .bg(Color::Rgb(*r, *g, *b)),
+                    )
+                })
+                .collect(),
+            fancy_bg
+                .iter()
+                .skip(thumb_width as usize * 2)
+                .take(thumb_width as usize)
+                .zip(title_line2.chars())
+                .map(|((r, g, b), char)| {
+                    Span::styled(
+                        char.to_string(),
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .bg(Color::Rgb(*r, *g, *b)),
+                    )
+                })
+                .collect(),
+            fancy_bg
+                .iter()
+                .skip(thumb_width as usize * 3)
+                .take(thumb_width as usize)
+                .zip(channel_and_time_style.chars())
+                .map(|((r, g, b), char)| {
+                    Span::styled(
+                        char.to_string(),
+                        Style::default().bg(Color::Rgb(*r, *g, *b)),
+                    )
+                })
+                .collect(),
+            //Line::from(Span::styled(title_line1, title_style)),
+            //Line::from(Span::styled(title_line2, title_style)),
+            //Line::from(vec![
+            //    Span::styled(channel, Style::default().fg(Color::Gray)),
+            //    Span::raw(" ".repeat(padding)),
+            //    Span::styled(time_ago, Style::default().fg(Color::DarkGray)),
+            //]),
         ];
 
         Paragraph::new(text_lines).render(text_area, buf);
     }
-
-    // Render watch later checkbox on bottom border
-    let (checkbox_text, checkbox_style) = if is_watch_later {
-        (" W:☑ ", Style::default().fg(Color::Rgb(255, 165, 0)))
-    } else {
-        (" W:☐ ", Style::default().fg(Color::Rgb(128, 128, 128)))
-    };
-
-    let checkbox_len = checkbox_text.chars().count() as u16;
-    let checkbox_x = area.x + area.width.saturating_sub(checkbox_len + 2);
-    let checkbox_area = Rect {
-        x: checkbox_x,
-        y: area.y + area.height - 1,
-        width: checkbox_len,
-        height: 1,
-    };
-
-    Paragraph::new(checkbox_text)
-        .style(checkbox_style)
-        .render(checkbox_area, buf);
 }
 
 fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: Rect) {
@@ -377,18 +507,11 @@ fn render_footer(frame: &mut Frame, state: &AppState, videos: &[&Video], area: R
             .map(|t| format!(" | Last refresh: {}", format_time_ago(&t)))
             .unwrap_or_default();
 
-        format!(
-            " {} videos{} | ↑↓ scroll, ⏎ play, w watch later, r refresh, ? help, q quit",
-            videos.len(),
-            refresh_info
-        )
+        format!(" {} videos{} ", videos.len(), refresh_info)
     };
 
-    let footer = Paragraph::new(status).style(
-        Style::default()
-            .fg(Color::LightCyan)
-            .bg(Color::Rgb(20, 20, 20)),
-    );
+    let footer =
+        Paragraph::new(status).style(Style::default().fg(Color::LightCyan).bg(Color::Black));
 
     frame.render_widget(footer, footer_area);
 }
@@ -455,7 +578,12 @@ fn wrap_title_two_lines(s: &str, line_width: usize) -> (String, String) {
 
     if chars.len() <= line_width {
         // Fits in one line - use em dash on second line
-        return (s.to_string(), "—".to_string());
+        return (
+            //s.to_string(),
+            format!("{:<width$}", s, width = line_width),
+            //"—".to_string()
+            format!("{:<width$}", "—", width = line_width),
+        );
     }
 
     // Find a good break point for first line (prefer breaking at space)
@@ -483,6 +611,9 @@ fn wrap_title_two_lines(s: &str, line_width: usize) -> (String, String) {
                 .collect::<String>()
         )
     };
+    // pad lines to line_width
+    let line1 = format!("{:<width$}", line1, width = line_width);
+    let line2 = format!("{:<width$}", line2, width = line_width);
 
     (line1, line2)
 }

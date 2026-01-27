@@ -18,7 +18,7 @@ impl GridLayout {
     const BORDER_WIDTH: u16 = 2; // left + right border
     const CARD_WIDTH: u16 = Self::THUMBNAIL_WIDTH + Self::BORDER_WIDTH;
     const TEXT_LINES: u16 = 4; // pad + title (2) + channel and time
-    const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + 2; // +2 for top/bottom border
+    const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + 2 - 2; // +2 for top/bottom border, -2 for thumbnail cut by title
 
     pub const HEADER_HEIGHT: u16 = 3;
     pub const FOOTER_HEIGHT: u16 = 1;
@@ -113,7 +113,7 @@ impl GridLayout {
         // Check if click is on the bottom border row where checkbox is rendered
         // Card height is 15, so bottom border is at row 14 (0-indexed)
         let y_in_card = y_in_grid % self.card_height as usize;
-        let bottom_border_row = self.card_height as usize - 1;
+        let bottom_border_row = self.card_height as usize - 5;
 
         if y_in_card != bottom_border_row {
             return None;

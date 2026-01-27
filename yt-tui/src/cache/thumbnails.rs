@@ -2,6 +2,7 @@ use crate::data::Video;
 use crate::urls;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -9,7 +10,7 @@ use std::process::Command;
 pub struct ThumbnailCache {
     cache_dir: PathBuf,
     /// In-memory cache of rendered thumbnails (video_id_WxH -> ANSI string)
-    rendered: HashMap<String, String>,
+    rendered: HashMap<String, (String, Vec<(u8, u8, u8)>)>,
 }
 
 impl ThumbnailCache {
@@ -36,7 +37,12 @@ impl ThumbnailCache {
     }
 
     /// Get rendered thumbnail from cache, or render it if needed
-    pub fn get_rendered(&mut self, video_id: &str, width: u16, height: u16) -> Option<String> {
+    pub fn get_rendered(
+        &mut self,
+        video_id: &str,
+        width: u16,
+        height: u16,
+    ) -> Option<(String, Vec<(u8, u8, u8)>)> {
         let cache_key = format!("{}_{}x{}", video_id, width, height);
 
         // Check memory cache
@@ -77,7 +83,12 @@ impl ThumbnailCache {
     }
 
     /// Render an image with chafa, cropping to 16:9 first
-    fn render_with_chafa(&self, path: &Path, width: u16, height: u16) -> Option<String> {
+    fn render_with_chafa(
+        &self,
+        path: &Path,
+        width: u16,
+        height: u16,
+    ) -> Option<(String, Vec<(u8, u8, u8)>)> {
         use std::process::Stdio;
 
         // Use ImageMagick to crop to 16:9 centered, then pipe to chafa
@@ -95,6 +106,53 @@ impl ThumbnailCache {
             .spawn()
             .ok()?;
 
+        let bytes = Command::new("convert")
+            .args(&[
+                path.to_str()?,
+                "-gravity",
+                "center",
+                "-crop",
+                "16:9",
+                "+repage",
+                "-resize",
+                &format!("{}x{}!", width, height as u32 * 2),
+                "-depth",
+                "8",
+                "-colorspace",
+                "RGB",
+                "RGB:-",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .ok()?
+            .stdout?
+            .bytes();
+        let mut vec = Vec::with_capacity((width * height * 2 * 3).into());
+
+        let curve = |v: u8| -> u8 {
+            let x = v as f32;
+            (x * (0.625 - 0.0012207 * x)).round() as u8
+        };
+
+        for chunk in bytes
+            .into_iter()
+            .collect::<Result<Vec<u8>, _>>()
+            .ok()?
+            .chunks(3)
+        {
+            vec.push((curve(chunk[0]), curve(chunk[1]), curve(chunk[2])));
+        }
+        // get last width*4 tuples
+        // the 4 is for 4 rows, not channels
+        let fancy_bg = vec
+            .into_iter()
+            .rev()
+            .take((width as usize) * 4)
+            .collect::<Vec<(u8, u8, u8)>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<(u8, u8, u8)>>();
+
         let output = Command::new("chafa")
             .args([
                 "--size",
@@ -109,8 +167,17 @@ impl ThumbnailCache {
             .output()
             .ok()?;
 
-        if output.status.success() {
-            String::from_utf8(output.stdout).ok()
+        let success = output.status.success();
+        // remove last line from image
+        let output = String::from_utf8(output.stdout)
+            .ok()?
+            .lines()
+            .take(height.saturating_sub(2) as usize)
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        if success {
+            Some((output, fancy_bg))
         } else {
             None
         }

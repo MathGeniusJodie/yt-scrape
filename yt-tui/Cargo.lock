@@ -2931,6 +2931,7 @@ dependencies = [
  "futures",
  "quick-xml",
  "ratatui",
+ "ratatui-core",
  "reqwest",
  "serde",
  "serde_json",
