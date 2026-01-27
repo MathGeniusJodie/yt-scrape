@@ -249,13 +249,9 @@ impl App {
                         self.scroll_offset(),
                         total,
                     ) {
-                        if self.state.selected_index == Some(idx) {
-                            // Double-click effect: play if already selected
-                            self.play_selected()?;
-                        } else {
-                            self.state.selected_index = Some(idx);
-                            self.needs_redraw = true;
-                        }
+                        self.state.selected_index = Some(idx);
+                        self.needs_redraw = true;
+                        self.play_selected()?;
                     }
                 }
             }
