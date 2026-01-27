@@ -296,9 +296,9 @@ fn render_grid(
         height: layout.grid_height,
     };
 
-    // Calculate total content height
+    // Calculate total content height (cards overlap by 1 row, so use stride)
     let total_rows = videos.len().div_ceil(layout.cols);
-    let content_height = (total_rows as u16 * layout.card_height).max(layout.grid_height);
+    let content_height = (total_rows as u16 * layout.card_stride()).max(layout.grid_height);
 
     // Create scroll view with full content size (disable built-in scrollbars)
     let mut scroll_view = ScrollView::new(Size::new(area.width, content_height))
@@ -343,9 +343,9 @@ fn render_grid(
 
     // Calculate which rows are visible for performance (don't render off-screen cards)
     let scroll_offset = scroll_state.offset().y as usize;
-    let first_visible_row = scroll_offset / layout.card_height as usize;
-    let last_visible_row =
-        (scroll_offset + layout.grid_height as usize) / layout.card_height as usize + 1;
+    let stride = layout.card_stride() as usize;
+    let first_visible_row = scroll_offset / stride;
+    let last_visible_row = (scroll_offset + layout.grid_height as usize) / stride + 1;
     let first_video = first_visible_row * layout.cols;
     let last_video = ((last_visible_row + 1) * layout.cols).min(videos.len());
 
@@ -362,12 +362,11 @@ fn render_grid(
     // Render cards into scroll view at their natural positions
     for idx in vec_items.into_iter().rev() {
         if let Some(video) = videos.get(idx) {
-            let row = idx / layout.cols;
-            let col = idx % layout.cols;
+            let (card_x, card_y) = layout.card_rect(idx);
 
             let card_area = Rect {
-                x: layout.x_offset + col as u16 * layout.card_width,
-                y: row as u16 * (layout.card_height - 1),
+                x: card_x,
+                y: card_y,
                 width: layout.card_width,
                 height: layout.card_height,
             };

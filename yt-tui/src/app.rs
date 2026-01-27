@@ -469,7 +469,8 @@ impl App {
 
         // Adjust scroll to keep selection visible (line-based)
         let selected_row = new_idx / self.layout.cols;
-        let card_top = selected_row * self.layout.card_height as usize;
+        let stride = self.layout.card_stride() as usize;
+        let card_top = selected_row * stride;
         let card_bottom = card_top + self.layout.card_height as usize;
         let current_scroll = self.scroll_offset();
 

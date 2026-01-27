@@ -3,9 +3,9 @@
 pub struct GridLayout {
     /// Number of video cards per row
     pub cols: usize,
-    /// Width of each card in terminal columns (fixed)
+    /// Width of each card in terminal columns
     pub card_width: u16,
-    /// Height of each card in terminal rows (fixed)
+    /// Height of each card in terminal rows
     pub card_height: u16,
     /// Available height for the grid area (excluding header/footer)
     pub grid_height: u16,
@@ -13,25 +13,71 @@ pub struct GridLayout {
     pub x_offset: u16,
 }
 
+/// Position within the grid, returned by hit-testing
+#[derive(Debug, Clone, Copy)]
+pub struct CardHit {
+    /// Index in the videos list
+    pub index: usize,
+    /// Y position within the card (0 = top border)
+    pub y_in_card: usize,
+    /// X position within the card (0 = left border)
+    pub x_in_card: usize,
+}
+
 impl GridLayout {
-    /// Fixed card dimensions - CARD_WIDTH is the single source of truth
-    const THUMBNAIL_HEIGHT: u16 = 12; // 16:9 aspect
-    const THUMBNAIL_WIDTH: u16 = (Self::THUMBNAIL_HEIGHT as f32 * 16.0 / 9.0 * 2.0).round() as u16;
-    const BORDER_WIDTH: u16 = 2; // left + right border
-    const CARD_WIDTH: u16 = Self::THUMBNAIL_WIDTH + Self::BORDER_WIDTH;
-    const TEXT_LINES: u16 = 4; // pad + title (2) + channel and time
-    const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_LINES + 2 - 2; // +2 for top/bottom border, -2 for thumbnail cut by title
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Card dimensions - all derived from thumbnail size
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Thumbnail height in terminal rows (half-block pixels)
+    pub const THUMBNAIL_HEIGHT: u16 = 12;
+
+    /// Thumbnail width: 16:9 aspect ratio, doubled for half-block chars
+    pub const THUMBNAIL_WIDTH: u16 = (Self::THUMBNAIL_HEIGHT as f32 * 16.0 / 9.0 * 2.0) as u16;
+
+    /// Card width = thumbnail + left/right borders
+    const CARD_WIDTH: u16 = Self::THUMBNAIL_WIDTH + 2;
+
+    /// Text overlay: checkbox row + 2 title lines + channel/time line
+    const TEXT_OVERLAY_ROWS: u16 = 4;
+
+    /// How many rows the text overlaps the thumbnail (gradient blend area)
+    const TEXT_OVERLAP: u16 = 2;
+
+    /// Card height = top border + thumbnail + text rows (minus overlap) + bottom border
+    /// But adjacent cards share their border row, so effective height in grid is card_height - 1
+    const CARD_HEIGHT: u16 = 1 + Self::THUMBNAIL_HEIGHT + Self::TEXT_OVERLAY_ROWS - Self::TEXT_OVERLAP + 1;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Fixed layout regions
+    // ═══════════════════════════════════════════════════════════════════════════
 
     pub const HEADER_HEIGHT: u16 = 3;
     pub const FOOTER_HEIGHT: u16 = 1;
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Card-relative positions (y from top of card, x from left of card)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Y position of the buttons row (checkbox, folder, sparkle) within a card
+    /// This is the first row of the text overlay area
+    const BUTTONS_ROW: u16 = 1 + Self::THUMBNAIL_HEIGHT - Self::TEXT_OVERLAP;
+
+    /// X range for the watch later toggle (⊂⬤ or ⬤⊃), from right edge
+    const TOGGLE_X_END: u16 = Self::CARD_WIDTH - 1; // before right border
+    const TOGGLE_X_START: u16 = Self::TOGGLE_X_END - 4; // "⊂⬤ " is ~4 chars
+
+    /// X range for the sparkle button (✨), from right edge
+    const SPARKLE_X_END: u16 = Self::TOGGLE_X_START;
+    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 3; // "✨ " is ~3 chars
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Construction
+    // ═══════════════════════════════════════════════════════════════════════════
+
     pub fn calculate(terminal_width: u16, terminal_height: u16) -> Self {
         let grid_height = terminal_height.saturating_sub(Self::HEADER_HEIGHT + Self::FOOTER_HEIGHT);
-
-        // Calculate how many fixed-width columns fit
         let cols = (terminal_width / Self::CARD_WIDTH).max(1) as usize;
-
-        // Calculate horizontal offset to center the grid
         let total_grid_width = cols as u16 * Self::CARD_WIDTH;
         let x_offset = terminal_width.saturating_sub(total_grid_width) / 2;
 
@@ -44,165 +90,149 @@ impl GridLayout {
         }
     }
 
-    /// Convert terminal coordinates to video index (scroll_offset is in lines)
-    pub fn coords_to_index(
-        &self,
-        x: u16,
-        y: u16,
-        scroll_offset_lines: usize,
-        total_items: usize,
-    ) -> Option<usize> {
-        // Account for header
-        if y < Self::HEADER_HEIGHT {
-            return None;
-        }
-        let y = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Grid layout helpers - used by both drawing and hit-testing
+    // ═══════════════════════════════════════════════════════════════════════════
 
-        // Account for horizontal centering offset
-        if x < self.x_offset {
-            return None;
-        }
-        let x = x - self.x_offset;
+    /// Vertical stride between card origins (cards overlap by 1 row for shared borders)
+    #[inline]
+    pub fn card_stride(&self) -> u16 {
+        self.card_height - 1
+    }
 
-        let col = (x / self.card_width) as usize;
-        let row = y / (self.card_height-1) as usize;
+    /// Calculate the screen position for a card at the given index
+    #[inline]
+    pub fn card_rect(&self, index: usize) -> (u16, u16) {
+        let row = index / self.cols;
+        let col = index % self.cols;
+        let x = self.x_offset + col as u16 * self.card_width;
+        let y = row as u16 * self.card_stride();
+        (x, y)
+    }
 
-        if col >= self.cols {
-            return None;
-        }
+    /// Width available for thumbnail inside card (card_width minus borders)
+    #[inline]
+    pub fn thumbnail_width(&self) -> u16 {
+        Self::THUMBNAIL_WIDTH
+    }
 
-        let index = row * self.cols + col;
-        if index < total_items {
-            Some(index)
-        } else {
-            None
-        }
+    /// Height for thumbnail
+    #[inline]
+    pub fn thumbnail_height(&self) -> u16 {
+        Self::THUMBNAIL_HEIGHT
     }
 
     /// Maximum scroll offset in lines
     pub fn max_scroll(&self, total_items: usize) -> usize {
         let total_rows = total_items.div_ceil(self.cols);
-        let total_height = total_rows * self.card_height as usize;
+        let total_height = total_rows * self.card_stride() as usize;
         total_height.saturating_sub(self.grid_height as usize)
     }
 
-    /// Width available for thumbnail inside card (fixed)
-    pub fn thumbnail_width(&self) -> u16 {
-        Self::THUMBNAIL_WIDTH
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Hit testing - single source of truth for coordinate conversion
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Convert screen coordinates to card position, if the click is on a valid card
+    pub fn hit_test(
+        &self,
+        x: u16,
+        y: u16,
+        scroll_offset: usize,
+        total_items: usize,
+    ) -> Option<CardHit> {
+        // Must be below header
+        if y < Self::HEADER_HEIGHT {
+            return None;
+        }
+
+        // Must be within horizontally centered grid
+        if x < self.x_offset {
+            return None;
+        }
+        let x_in_grid = x - self.x_offset;
+
+        // Column bounds check
+        let col = (x_in_grid / self.card_width) as usize;
+        if col >= self.cols {
+            return None;
+        }
+
+        // Row calculation with scroll offset
+        let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset;
+        let stride = self.card_stride() as usize;
+        let row = y_in_grid / stride;
+
+        // Index bounds check
+        let index = row * self.cols + col;
+        if index >= total_items {
+            return None;
+        }
+
+        // Position within card
+        let y_in_card = y_in_grid % stride;
+        let x_in_card = (x_in_grid % self.card_width) as usize;
+
+        Some(CardHit {
+            index,
+            y_in_card,
+            x_in_card,
+        })
     }
 
-    /// Height for thumbnail (fixed)
-    pub fn thumbnail_height(&self) -> u16 {
-        Self::THUMBNAIL_HEIGHT
+    /// Convert terminal coordinates to video index
+    pub fn coords_to_index(
+        &self,
+        x: u16,
+        y: u16,
+        scroll_offset: usize,
+        total_items: usize,
+    ) -> Option<usize> {
+        self.hit_test(x, y, scroll_offset, total_items)
+            .map(|hit| hit.index)
     }
 
-    /// Check if coordinates are on the watch later checkbox within a card
-    /// Returns Some(video_index) if click is on a checkbox, None otherwise
+    /// Check if coordinates are on the watch later toggle
     pub fn is_checkbox_click(
         &self,
         x: u16,
         y: u16,
-        scroll_offset_lines: usize,
+        scroll_offset: usize,
         total_items: usize,
     ) -> Option<usize> {
-        // Account for header
-        if y < Self::HEADER_HEIGHT {
+        let hit = self.hit_test(x, y, scroll_offset, total_items)?;
+
+        if hit.y_in_card != Self::BUTTONS_ROW as usize {
             return None;
         }
 
-        // Account for horizontal centering offset
-        if x < self.x_offset {
-            return None;
+        let x = hit.x_in_card as u16;
+        if x >= Self::TOGGLE_X_START && x < Self::TOGGLE_X_END {
+            Some(hit.index)
+        } else {
+            None
         }
-        let x = x - self.x_offset;
-
-        let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
-        let col = (x / self.card_width) as usize;
-        let row = y_in_grid / (self.card_height-1) as usize;
-
-        if col >= self.cols {
-            return None;
-        }
-
-        let index = row * self.cols + col;
-        if index >= total_items {
-            return None;
-        }
-
-        // Check if click is on the bottom border row where checkbox is rendered
-        // Card height is 15, so bottom border is at row 14 (0-indexed)
-        let y_in_card = y_in_grid % (self.card_height-1) as usize;
-        let bottom_border_row = self.card_height as usize - 5;
-
-        if y_in_card != bottom_border_row {
-            return None;
-        }
-
-        // Check if x is in the checkbox area (right side of bottom border)
-        // Checkbox " W:☑ " is 5 chars, positioned 2 chars from right edge
-        let x_in_card = (x as usize) % self.card_width as usize;
-        let checkbox_start = self.card_width as usize - 6; // 5 chars + 1 offset from edge
-        let checkbox_end = self.card_width as usize;
-
-        if x_in_card >= checkbox_start && x_in_card < checkbox_end {
-            return Some(index);
-        }
-
-        None
     }
 
-    /// Check if coordinates are on the summary button (✦) within a card
-    /// Returns Some(video_index) if click is on the button, None otherwise
+    /// Check if coordinates are on the summary button (✨)
     pub fn is_summary_button_click(
         &self,
         x: u16,
         y: u16,
-        scroll_offset_lines: usize,
+        scroll_offset: usize,
         total_items: usize,
     ) -> Option<usize> {
-        // Account for header
-        if y < Self::HEADER_HEIGHT {
+        let hit = self.hit_test(x, y, scroll_offset, total_items)?;
+
+        if hit.y_in_card != Self::BUTTONS_ROW as usize {
             return None;
         }
 
-        // Account for horizontal centering offset
-        if x < self.x_offset {
-            return None;
+        let x = hit.x_in_card as u16;
+        if x >= Self::SPARKLE_X_START && x < Self::SPARKLE_X_END {
+            Some(hit.index)
+        } else {
+            None
         }
-        let x = x - self.x_offset;
-
-        let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset_lines;
-        let col = (x / self.card_width) as usize;
-        let row = y_in_grid / (self.card_height-1) as usize;
-
-        if col >= self.cols {
-            return None;
-        }
-
-        let index = row * self.cols + col;
-        if index >= total_items {
-            return None;
-        }
-
-        // Check if click is on the same row as checkbox
-        let y_in_card = y_in_grid % (self.card_height-1) as usize;
-        let bottom_border_row = self.card_height as usize - 5;
-
-        if y_in_card != bottom_border_row {
-            return None;
-        }
-
-        // Check if x is in the ✦ button area (to the left of folder icon)
-        // The checkbox_line is: "✦ 🗁  ⊂⬤ " right-aligned
-        // ✦ is at the start of this string, about 10-12 chars from right edge
-        let x_in_card = (x as usize) % self.card_width as usize;
-        let button_start = self.card_width as usize - 8;
-        let button_end = self.card_width as usize - 6;
-
-        if x_in_card >= button_start && x_in_card < button_end {
-            return Some(index);
-        }
-
-        None
     }
 }
