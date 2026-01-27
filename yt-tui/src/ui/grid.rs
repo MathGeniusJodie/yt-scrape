@@ -8,6 +8,7 @@ use crate::ui::GridLayout;
 use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use termimad::MadSkin;
 
 use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
@@ -733,9 +734,19 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
             // Render the block first
             frame.render_widget(block, modal_area);
 
-            // Word wrap the summary text
-            let wrapped_lines = wrap_text(summary, inner.width.saturating_sub(3) as usize);
-            let total_lines = wrapped_lines.len() as u16;
+            // Use termimad to format markdown with ANSI codes
+            let mut skin = MadSkin::default_dark();
+            skin.set_headers_fg(termimad::crossterm::style::Color::Cyan);
+            skin.bold.set_fg(termimad::crossterm::style::Color::White);
+            skin.italic.set_fg(termimad::crossterm::style::Color::Rgb { r: 180, g: 180, b: 220 });
+
+            let text_width = inner.width.saturating_sub(3) as usize;
+            let formatted = skin.text(summary, Some(text_width));
+            let ansi_string = format!("{}", formatted);
+
+            // Convert ANSI to ratatui Text
+            let text: Text = ansi_string.into_text().unwrap_or_else(|_| Text::raw(summary));
+            let total_lines = text.lines.len() as u16;
             let viewport_height = inner.height;
 
             // Calculate content height for scroll view
@@ -750,10 +761,14 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
                 .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
                 .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
 
-            // Render text into scroll view buffer
-            let text: Vec<Line> = wrapped_lines
+            // Add left padding to each line
+            let text: Vec<Line> = text.lines
                 .into_iter()
-                .map(|s| Line::raw(format!(" {}", s)))
+                .map(|line| {
+                    let mut spans = vec![Span::raw(" ")];
+                    spans.extend(line.spans);
+                    Line::from(spans)
+                })
                 .collect();
 
             Paragraph::new(text)
@@ -837,57 +852,6 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Wrap text to fit within a given width
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    for paragraph in text.split('\n') {
-        if paragraph.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-
-        let words: Vec<&str> = paragraph.split_whitespace().collect();
-        let mut current_line = String::new();
-
-        for word in words {
-            if current_line.is_empty() {
-                if word.len() > width {
-                    // Word is longer than width, split it
-                    let mut remaining = word;
-                    while remaining.len() > width {
-                        lines.push(remaining[..width].to_string());
-                        remaining = &remaining[width..];
-                    }
-                    current_line = remaining.to_string();
-                } else {
-                    current_line = word.to_string();
-                }
-            } else if current_line.len() + 1 + word.len() <= width {
-                current_line.push(' ');
-                current_line.push_str(word);
-            } else {
-                lines.push(current_line);
-                if word.len() > width {
-                    let mut remaining = word;
-                    while remaining.len() > width {
-                        lines.push(remaining[..width].to_string());
-                        remaining = &remaining[width..];
-                    }
-                    current_line = remaining.to_string();
-                } else {
-                    current_line = word.to_string();
-                }
-            }
-        }
-
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
-    }
-
-    lines
-}
-
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()

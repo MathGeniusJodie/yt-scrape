@@ -99,7 +99,7 @@ pub async fn summarize_video(video_url: &str, _video_title: &str, _channel_name:
         .map_err(|_| anyhow::anyhow!("GEMINI_API_KEY environment variable not set"))?;
 
     let prompt = format!(
-        "Summarize this YouTube video",
+        "Summarize this YouTube video with all the relevant information so I don't have to watch it",
         //video_title, channel_name
     );
 

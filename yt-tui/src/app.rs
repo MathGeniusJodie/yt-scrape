@@ -397,38 +397,49 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                const SCROLL_IMPULSE: f64 = 2.5;
-
-                // Drain all pending scroll events and accumulate impulse
-                let mut impulse: f64 = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                    SCROLL_IMPULSE
-                } else {
-                    -SCROLL_IMPULSE
-                };
-
-                // Consume any additional queued scroll events
-                while event::poll(Duration::ZERO).unwrap_or(false) {
-                    if let Ok(Event::Mouse(m)) = event::read() {
-                        match m.kind {
-                            MouseEventKind::ScrollDown => impulse += SCROLL_IMPULSE,
-                            MouseEventKind::ScrollUp => impulse -= SCROLL_IMPULSE,
-                            _ => break,
-                        }
+                // If summary modal is open, scroll it instead of the grid
+                if self.state.show_summary {
+                    const SCROLL_LINES: u16 = 3;
+                    if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                        self.state.summary_scroll = self.state.summary_scroll.saturating_add(SCROLL_LINES);
                     } else {
-                        break;
+                        self.state.summary_scroll = self.state.summary_scroll.saturating_sub(SCROLL_LINES);
                     }
-                }
-
-                // Add to velocity (with some resistance if already moving opposite direction)
-                if self.scroll_velocity.signum() != impulse.signum() {
-                    self.scroll_velocity = impulse; // Override if changing direction
+                    self.needs_redraw = true;
                 } else {
-                    self.scroll_velocity += impulse * 0.5; // Diminishing returns when scrolling same direction
-                }
+                    const SCROLL_IMPULSE: f64 = 2.5;
 
-                // Cap maximum velocity
-                const MAX_VELOCITY: f64 = 25.0;
-                self.scroll_velocity = self.scroll_velocity.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+                    // Drain all pending scroll events and accumulate impulse
+                    let mut impulse: f64 = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                        SCROLL_IMPULSE
+                    } else {
+                        -SCROLL_IMPULSE
+                    };
+
+                    // Consume any additional queued scroll events
+                    while event::poll(Duration::ZERO).unwrap_or(false) {
+                        if let Ok(Event::Mouse(m)) = event::read() {
+                            match m.kind {
+                                MouseEventKind::ScrollDown => impulse += SCROLL_IMPULSE,
+                                MouseEventKind::ScrollUp => impulse -= SCROLL_IMPULSE,
+                                _ => break,
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Add to velocity (with some resistance if already moving opposite direction)
+                    if self.scroll_velocity.signum() != impulse.signum() {
+                        self.scroll_velocity = impulse; // Override if changing direction
+                    } else {
+                        self.scroll_velocity += impulse * 0.5; // Diminishing returns when scrolling same direction
+                    }
+
+                    // Cap maximum velocity
+                    const MAX_VELOCITY: f64 = 25.0;
+                    self.scroll_velocity = self.scroll_velocity.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+                }
             }
             _ => {}
         }

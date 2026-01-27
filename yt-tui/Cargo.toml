@@ -19,6 +19,7 @@ anyhow = "1"
 futures = "0.3"
 tui-scrollview = "0.6"
 ratatui-core = "0.1.0"
+termimad = "0.30"
 
 [profile.release]
 lto = true
