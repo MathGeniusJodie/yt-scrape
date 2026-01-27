@@ -341,7 +341,9 @@ fn render_grid(
         .thumb_symbol(&"┃")
         .thumb_style(Style::default().bg(Color::Black).fg(Color::Cyan));
 
-    let mut scrollbar_state = ScrollbarState::new(content_height as usize).position(scroll_offset);
+    // Use max_scroll as content length so scrollbar reaches bottom when fully scrolled
+    let max_scroll = (content_height as usize).saturating_sub(layout.grid_height as usize);
+    let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_offset);
 
     frame.render_stateful_widget(scrollbar, grid_area, &mut scrollbar_state);
 }

@@ -100,7 +100,7 @@ impl App {
             }
 
             // Use shorter poll timeout when animating
-            let poll_timeout = if self.scroll_velocity.abs() > 0.5 || self.is_overscrolled() {
+            let poll_timeout = if self.scroll_velocity.abs() > 0.5 {
                 Duration::from_millis(16) // ~60fps during animation
             } else {
                 Duration::from_millis(100) // idle
@@ -163,22 +163,14 @@ impl App {
         self.layout.max_scroll(total) as f64
     }
 
-    /// Check if we're past scroll bounds
-    fn is_overscrolled(&self) -> bool {
-        self.scroll_position < 0.0 || self.scroll_position > self.max_scroll()
-    }
-
     /// Sync the integer scroll state from floating point position
     fn sync_scroll_state(&mut self) {
-        // Clamp to valid display range (0 to max)
-        let max = self.max_scroll();
-        let clamped = self.scroll_position.clamp(0.0, max);
-        let quantized = clamped.round() as usize;
+        let quantized = self.scroll_position.round() as usize;
         self.scroll_state
             .set_offset(ratatui::layout::Position::new(0, quantized as u16));
     }
 
-    /// Update scroll physics (inertia and bounce)
+    /// Update scroll physics (inertia only, no overscroll)
     fn update_scroll_physics(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f64();
@@ -188,65 +180,35 @@ impl App {
         let dt = dt.min(0.1);
 
         let max_scroll = self.max_scroll();
-        const MAX_OVERSCROLL: f64 = 15.0;
 
-        // Check if overscrolled
-        let overscroll_top = self.scroll_position < 0.0;
-        let overscroll_bottom = self.scroll_position > max_scroll && max_scroll >= 0.0;
-
-        if overscroll_top || overscroll_bottom {
-            // Overdamped spring for smooth return without oscillation
-            // Using simple exponential decay toward target
-            let target = if overscroll_top { 0.0 } else { max_scroll };
-            let displacement = self.scroll_position - target;
-
-            // Exponential ease-out toward target
-            const RETURN_SPEED: f64 = 8.0;
-            self.scroll_position = target + displacement * (-RETURN_SPEED * dt).exp();
-
-            // Also decay velocity quickly when overscrolled
-            self.scroll_velocity *= 0.8_f64.powf(dt * 60.0);
-
-            // Snap when very close
-            if (self.scroll_position - target).abs() < 0.1 {
-                self.scroll_position = target;
-                self.scroll_velocity = 0.0;
-            }
-
-            // Hard limit how far you can overscroll
-            self.scroll_position = self
-                .scroll_position
-                .clamp(-MAX_OVERSCROLL, max_scroll + MAX_OVERSCROLL);
-        } else {
-            // Normal scrolling - apply friction
-            const FRICTION: f64 = 0.93;
-            self.scroll_velocity *= FRICTION.powf(dt * 60.0);
-        }
+        // Apply friction
+        const FRICTION: f64 = 0.93;
+        self.scroll_velocity *= FRICTION.powf(dt * 60.0);
 
         // Apply velocity
         if self.scroll_velocity.abs() > 0.01 {
             self.scroll_position += self.scroll_velocity * dt * 60.0;
+        }
 
-            // Resistance when pushing into overscroll
-            if self.scroll_position < 0.0 {
-                self.scroll_position *= 0.4; // Rubber band effect
-            } else if self.scroll_position > max_scroll {
-                let over = self.scroll_position - max_scroll;
-                self.scroll_position = max_scroll + over * 0.4;
-            }
+        // Clamp to bounds and kill velocity at edges
+        if self.scroll_position < 0.0 {
+            self.scroll_position = 0.0;
+            self.scroll_velocity = 0.0;
+        } else if self.scroll_position > max_scroll {
+            self.scroll_position = max_scroll.max(0.0);
+            self.scroll_velocity = 0.0;
         }
 
         // Update display if quantized position changed
-        let display_pos = self.scroll_position.clamp(0.0, max_scroll.max(0.0));
-        let quantized = display_pos.round() as usize;
-        if quantized != self.last_rendered_scroll || self.is_overscrolled() {
+        let quantized = self.scroll_position.round() as usize;
+        if quantized != self.last_rendered_scroll {
             self.last_rendered_scroll = quantized;
             self.sync_scroll_state();
             self.needs_redraw = true;
         }
 
-        // Stop if velocity is negligible and we're in bounds
-        if self.scroll_velocity.abs() < 0.2 && !self.is_overscrolled() {
+        // Stop if velocity is negligible
+        if self.scroll_velocity.abs() < 0.2 {
             self.scroll_velocity = 0.0;
         }
     }
