@@ -87,13 +87,26 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let badges: [&str;_] = [
         "⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱",
         "⓲", "⓳", "⓴", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉘", "㉙", "㉚", "㉛", "㉜", "㉝", "㉞", "㉟",
-        "㊱", "㊲", "㊳", "㊴", "㊵", "㊶", "㊷", "㊸", "㊹", "㊺", "㊻", "㊼", "㊽", "㊾", "㊿", "∞"
+        "㊱", "㊲", "㊳", "㊴", "㊵", "㊶", "㊷", "㊸", "㊹", "㊺", "㊻", "㊼", "㊽", "㊾", "㊿"
     ];
 
     let watch_later_badge = badges[state.watch_later.len().min(badges.len() - 1)];
     let mut watch_later_label = " Watch Later ".to_string();
     watch_later_label.push_str(watch_later_badge);
-    watch_later_label.push_str(" ");
+    if watch_later_label.len() > 50 {
+        watch_later_label.push_str("✚");
+    } else {
+        watch_later_label.push_str(" ");
+    }
+    if state.watch_later.len() == 100 {
+        watch_later_label = " Watch Later 🅒 ".to_string();
+    }
+    if state.watch_later.len() > 100 {
+        watch_later_label = " Watch Later 🅒✚".to_string();
+    }
+    if  state.watch_later.len() >= 200 {
+        watch_later_label = " Watch Later ∞ ".to_string();
+    }
 
     let tabs: &[(&str, Tab)] = &[(" Feed ", Tab::Feed), (&watch_later_label, Tab::WatchLater)];
 
