@@ -91,7 +91,10 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         "⓲", "⓳", "⓴"
     ];
 
-    let watch_later_badge = badges[state.watch_later.len().min(badges.len() - 1)];
+    let watch_later_count = state.videos.iter()
+        .filter(|v| state.watch_later.contains(&v.video_id))
+        .count();
+    let watch_later_badge = badges[watch_later_count.min(badges.len() - 1)];
     let mut watch_later_label = " Watch Later ".to_string();
     watch_later_label.push_str(watch_later_badge);
     if watch_later_label.len() > 20 {
@@ -99,19 +102,19 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         watch_later_label.push_str("  ");
     }
-    if state.watch_later.len() == 50 {
+    if watch_later_count == 50 {
         watch_later_label = " Watch Later 🅛 ".to_string();
     }
-    if state.watch_later.len() > 50 {
+    if watch_later_count > 50 {
         watch_later_label = " Watch Later 🅛✚".to_string();
     }
-    if state.watch_later.len() == 100 {
+    if watch_later_count == 100 {
         watch_later_label = " Watch Later 🅒 ".to_string();
     }
-    if state.watch_later.len() > 100 {
+    if watch_later_count > 100 {
         watch_later_label = " Watch Later 🅒✚".to_string();
     }
-    if  state.watch_later.len() >= 200 {
+    if watch_later_count >= 200 {
         watch_later_label = " Watch Later ∞ ".to_string();
     }
 
