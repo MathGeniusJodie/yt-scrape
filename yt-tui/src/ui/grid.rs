@@ -178,7 +178,11 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
                 let badge_start = "│ Watch Later ".chars().count();
                 let badge_end = badge_start + watch_later_badge.chars().count();
                 let before_badge: String = middle.chars().take(badge_start).collect();
-                let badge_char: String = middle.chars().skip(badge_start).take(watch_later_badge.chars().count()).collect();
+                let badge_char: String = middle
+                    .chars()
+                    .skip(badge_start)
+                    .take(watch_later_badge.chars().count())
+                    .collect();
                 let after_badge: String = middle.chars().skip(badge_end).collect();
                 spans.push(Span::styled(before_badge, style));
                 spans.push(Span::styled(badge_char, badge_style));
