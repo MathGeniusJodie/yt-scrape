@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 use std::io::{stdout, Stdout};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tui_scrollview::ScrollViewState;
 
@@ -27,6 +27,11 @@ pub struct App {
     layout: GridLayout,
     needs_redraw: bool,
     scroll_state: ScrollViewState,
+    // Inertial scrolling state
+    scroll_position: f64,
+    scroll_velocity: f64,
+    last_rendered_scroll: usize,
+    last_frame: Instant,
 }
 
 impl App {
@@ -61,6 +66,10 @@ impl App {
             layout,
             needs_redraw: true,
             scroll_state: ScrollViewState::default(),
+            scroll_position: 0.0,
+            scroll_velocity: 0.0,
+            last_rendered_scroll: 0,
+            last_frame: Instant::now(),
         })
     }
 
@@ -71,6 +80,9 @@ impl App {
         self.queue_watch_later_downloads();
 
         loop {
+            // Update scroll physics
+            self.update_scroll_physics();
+
             // Only redraw when state has changed
             if self.needs_redraw {
                 let videos_dir = self.storage.videos_dir();
@@ -87,8 +99,14 @@ impl App {
                 self.needs_redraw = false;
             }
 
-            // Handle events with a short timeout
-            if event::poll(Duration::from_millis(100))? {
+            // Use shorter poll timeout when animating
+            let poll_timeout = if self.scroll_velocity.abs() > 0.5 || self.is_overscrolled() {
+                Duration::from_millis(16) // ~60fps during animation
+            } else {
+                Duration::from_millis(100) // idle
+            };
+
+            if event::poll(poll_timeout)? {
                 match event::read()? {
                     Event::Key(key) => {
                         if self.handle_key(key).await? {
@@ -113,23 +131,123 @@ impl App {
         Ok(())
     }
 
-    /// Get current scroll offset in lines
+    /// Get current scroll offset in lines (quantized)
     fn scroll_offset(&self) -> usize {
-        self.scroll_state.offset().y as usize
+        self.scroll_position.round().max(0.0) as usize
     }
 
-    /// Set scroll offset in lines
+    /// Set scroll offset in lines (stops any animation)
     fn set_scroll_offset(&mut self, offset: usize) {
-        self.scroll_state
-            .set_offset(ratatui::layout::Position::new(0, offset as u16));
+        self.scroll_position = offset as f64;
+        self.scroll_velocity = 0.0;
+        self.last_rendered_scroll = offset;
+        self.sync_scroll_state();
     }
 
-    /// Clamp scroll offset to valid range
+    /// Clamp scroll offset to valid range (hard clamp, no bounce)
     fn clamp_scroll(&mut self) {
         let total = self.state.current_videos().len();
-        let max = self.layout.max_scroll(total);
-        if self.scroll_offset() > max {
-            self.set_scroll_offset(max);
+        let max = self.layout.max_scroll(total) as f64;
+        if self.scroll_position > max {
+            self.scroll_position = max;
+        }
+        if self.scroll_position < 0.0 {
+            self.scroll_position = 0.0;
+        }
+        self.sync_scroll_state();
+    }
+
+    /// Get max scroll position
+    fn max_scroll(&self) -> f64 {
+        let total = self.state.current_videos().len();
+        self.layout.max_scroll(total) as f64
+    }
+
+    /// Check if we're past scroll bounds
+    fn is_overscrolled(&self) -> bool {
+        self.scroll_position < 0.0 || self.scroll_position > self.max_scroll()
+    }
+
+    /// Sync the integer scroll state from floating point position
+    fn sync_scroll_state(&mut self) {
+        // Clamp to valid display range (0 to max)
+        let max = self.max_scroll();
+        let clamped = self.scroll_position.clamp(0.0, max);
+        let quantized = clamped.round() as usize;
+        self.scroll_state
+            .set_offset(ratatui::layout::Position::new(0, quantized as u16));
+    }
+
+    /// Update scroll physics (inertia and bounce)
+    fn update_scroll_physics(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f64();
+        self.last_frame = now;
+
+        // Cap dt to avoid huge jumps if the app was suspended
+        let dt = dt.min(0.1);
+
+        let max_scroll = self.max_scroll();
+        const MAX_OVERSCROLL: f64 = 15.0;
+
+        // Check if overscrolled
+        let overscroll_top = self.scroll_position < 0.0;
+        let overscroll_bottom = self.scroll_position > max_scroll && max_scroll >= 0.0;
+
+        if overscroll_top || overscroll_bottom {
+            // Overdamped spring for smooth return without oscillation
+            // Using simple exponential decay toward target
+            let target = if overscroll_top { 0.0 } else { max_scroll };
+            let displacement = self.scroll_position - target;
+
+            // Exponential ease-out toward target
+            const RETURN_SPEED: f64 = 8.0;
+            self.scroll_position = target + displacement * (-RETURN_SPEED * dt).exp();
+
+            // Also decay velocity quickly when overscrolled
+            self.scroll_velocity *= 0.8_f64.powf(dt * 60.0);
+
+            // Snap when very close
+            if (self.scroll_position - target).abs() < 0.1 {
+                self.scroll_position = target;
+                self.scroll_velocity = 0.0;
+            }
+
+            // Hard limit how far you can overscroll
+            self.scroll_position = self
+                .scroll_position
+                .clamp(-MAX_OVERSCROLL, max_scroll + MAX_OVERSCROLL);
+        } else {
+            // Normal scrolling - apply friction
+            const FRICTION: f64 = 0.93;
+            self.scroll_velocity *= FRICTION.powf(dt * 60.0);
+        }
+
+        // Apply velocity
+        if self.scroll_velocity.abs() > 0.01 {
+            self.scroll_position += self.scroll_velocity * dt * 60.0;
+
+            // Resistance when pushing into overscroll
+            if self.scroll_position < 0.0 {
+                self.scroll_position *= 0.4; // Rubber band effect
+            } else if self.scroll_position > max_scroll {
+                let over = self.scroll_position - max_scroll;
+                self.scroll_position = max_scroll + over * 0.4;
+            }
+        }
+
+        // Update display if quantized position changed
+        let display_pos = self.scroll_position.clamp(0.0, max_scroll.max(0.0));
+        let quantized = display_pos.round() as usize;
+        if quantized != self.last_rendered_scroll || self.is_overscrolled() {
+            self.last_rendered_scroll = quantized;
+            self.sync_scroll_state();
+            self.needs_redraw = true;
+        }
+
+        // Stop if velocity is negligible and we're in bounds
+        if self.scroll_velocity.abs() < 0.2 && !self.is_overscrolled() {
+            self.scroll_velocity = 0.0;
         }
     }
 
@@ -153,20 +271,13 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') => self.move_selection(1),
             KeyCode::PageUp => {
-                for _ in 0..self.layout.grid_height {
-                    self.scroll_state.scroll_up();
-                }
-                self.needs_redraw = true;
+                self.scroll_velocity = -(self.layout.grid_height as f64 * 1.5);
             }
             KeyCode::PageDown => {
-                for _ in 0..self.layout.grid_height {
-                    self.scroll_state.scroll_down();
-                }
-                self.clamp_scroll();
-                self.needs_redraw = true;
+                self.scroll_velocity = self.layout.grid_height as f64 * 1.5;
             }
             KeyCode::Home => {
-                self.scroll_state.scroll_to_top();
+                self.set_scroll_offset(0);
                 self.state.selected_index = Some(0);
                 self.needs_redraw = true;
             }
@@ -205,7 +316,7 @@ impl App {
                     for (start, end, tab) in ui::header_tab_regions() {
                         if mouse.column >= start && mouse.column < end {
                             self.state.current_tab = tab;
-                            self.scroll_state.scroll_to_top();
+                            self.set_scroll_offset(0);
                             self.state.selected_index = None;
                             self.needs_redraw = true;
                             tab_clicked = true;
@@ -255,18 +366,39 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::ScrollDown => {
-                for _ in 0..3 {
-                    self.scroll_state.scroll_down();
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                const SCROLL_IMPULSE: f64 = 2.5;
+
+                // Drain all pending scroll events and accumulate impulse
+                let mut impulse: f64 = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                    SCROLL_IMPULSE
+                } else {
+                    -SCROLL_IMPULSE
+                };
+
+                // Consume any additional queued scroll events
+                while event::poll(Duration::ZERO).unwrap_or(false) {
+                    if let Ok(Event::Mouse(m)) = event::read() {
+                        match m.kind {
+                            MouseEventKind::ScrollDown => impulse += SCROLL_IMPULSE,
+                            MouseEventKind::ScrollUp => impulse -= SCROLL_IMPULSE,
+                            _ => break,
+                        }
+                    } else {
+                        break;
+                    }
                 }
-                self.clamp_scroll();
-                self.needs_redraw = true;
-            }
-            MouseEventKind::ScrollUp => {
-                for _ in 0..3 {
-                    self.scroll_state.scroll_up();
+
+                // Add to velocity (with some resistance if already moving opposite direction)
+                if self.scroll_velocity.signum() != impulse.signum() {
+                    self.scroll_velocity = impulse; // Override if changing direction
+                } else {
+                    self.scroll_velocity += impulse * 0.5; // Diminishing returns when scrolling same direction
                 }
-                self.needs_redraw = true;
+
+                // Cap maximum velocity
+                const MAX_VELOCITY: f64 = 25.0;
+                self.scroll_velocity = self.scroll_velocity.clamp(-MAX_VELOCITY, MAX_VELOCITY);
             }
             _ => {}
         }
@@ -279,6 +411,7 @@ impl App {
         self.state.terminal_rows = rows;
         self.layout = GridLayout::calculate(cols, rows);
         self.thumb_cache.clear_rendered_cache(); // Re-render thumbnails at new size
+        self.scroll_velocity = 0.0; // Stop any animation
         self.clamp_scroll();
         self.needs_redraw = true;
     }
@@ -299,13 +432,15 @@ impl App {
         let card_bottom = card_top + self.layout.card_height as usize;
         let current_scroll = self.scroll_offset();
 
-        // Scroll up if selection is above viewport
+        // Scroll up if selection is above viewport (smooth scroll with velocity)
         if card_top < current_scroll {
-            self.set_scroll_offset(card_top);
+            let target = card_top as f64;
+            self.scroll_velocity = (target - self.scroll_position) * 0.5;
         }
         // Scroll down if selection is below viewport
         else if card_bottom > current_scroll + self.layout.grid_height as usize {
-            self.set_scroll_offset(card_bottom.saturating_sub(self.layout.grid_height as usize));
+            let target = (card_bottom.saturating_sub(self.layout.grid_height as usize)) as f64;
+            self.scroll_velocity = (target - self.scroll_position) * 0.5;
         }
         self.needs_redraw = true;
     }
@@ -355,7 +490,7 @@ impl App {
             Tab::Feed => Tab::WatchLater,
             Tab::WatchLater => Tab::Feed,
         };
-        self.scroll_state.scroll_to_top();
+        self.set_scroll_offset(0);
         self.state.selected_index = None;
         self.needs_redraw = true;
     }
