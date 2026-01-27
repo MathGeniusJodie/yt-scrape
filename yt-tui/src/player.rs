@@ -22,8 +22,8 @@ pub fn play_video(video_id: &str, local_path: Option<&Path>) -> anyhow::Result<(
     // Fallback: stream from YouTube
     let url = urls::watch_url(video_id);
     Command::new("mpv")
+        .arg("--ytdl-format=bestvideo[height<=720]+bestaudio/best[height<=720]/best")
         .arg(&url)
-        .arg("--ytdl-format=best[height<=720]")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
