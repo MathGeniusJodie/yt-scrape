@@ -54,11 +54,14 @@ impl App {
         let size = terminal.size()?;
         let layout = GridLayout::calculate(size.width, size.height);
 
+        let videos = storage.load_videos();
+        let selected_index = if videos.is_empty() { None } else { Some(0) };
         let state = AppState {
             terminal_cols: size.width,
             terminal_rows: size.height,
-            videos: storage.load_videos(),
+            videos,
             watch_later: storage.load_watch_later(),
+            selected_index,
             ..Default::default()
         };
 
@@ -85,6 +88,8 @@ impl App {
         self.queue_thumbnail_downloads().await;
         // Start video downloads for watch later items
         self.queue_watch_later_downloads();
+        // Initialize selection indicator for the first video
+        self.sync_selection_indicator();
 
         loop {
             // Update scroll physics and selection animation

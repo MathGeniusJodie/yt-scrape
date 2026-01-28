@@ -527,12 +527,12 @@ fn render_video_card(
         let folder_color = if is_downloaded {
             Color::Rgb(255, 165, 0) // Orange when downloaded
         } else {
-            Color::Rgb(128, 128, 128) // Grey when not downloaded
+            Color::White // White when not downloaded
         };
         let toggle_color = if is_watch_later {
             Color::Rgb(255, 165, 0) // Orange when watch later
         } else {
-            Color::Rgb(128, 128, 128) // Grey when not watch later
+            Color::White // white when not watch later
         };
 
         let text_lines = vec![
@@ -594,11 +594,19 @@ fn render_video_card(
                 .skip(thumb_width as usize * 3)
                 .take(thumb_width as usize)
                 .zip(channel_and_time_style.chars())
-                .map(|((r, g, b), char)| {
-                    Span::styled(
-                        char.to_string(),
-                        Style::default().bg(Color::Rgb(*r, *g, *b)),
-                    )
+                .enumerate()
+                .map(|(i,((r, g, b), char))| {
+                    if i <= channel_len {
+                        Span::styled(
+                            char.to_string(),
+                            Style::default().bg(Color::Rgb(*r, *g, *b)).add_modifier(Modifier::ITALIC),
+                        )
+                    } else {
+                        Span::styled(
+                            char.to_string(),
+                            Style::default().bg(Color::Rgb(*r, *g, *b)),
+                        )
+                    }
                 })
                 .collect(),
             //Line::from(Span::styled(title_line1, title_style)),
