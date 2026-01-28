@@ -46,7 +46,8 @@ impl GridLayout {
 
     /// Card height = thumbnail + text rows (minus overlap) + bottom border
     /// No top border on cards - the selection indicator provides the top border when selected
-    const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_OVERLAY_ROWS - Self::TEXT_OVERLAP + 1;
+    const CARD_HEIGHT: u16 =
+        Self::THUMBNAIL_HEIGHT + Self::TEXT_OVERLAY_ROWS - Self::TEXT_OVERLAP + 1;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Fixed layout regions
@@ -127,7 +128,8 @@ impl GridLayout {
     /// Maximum scroll offset in lines
     pub fn max_scroll(&self, total_items: usize) -> usize {
         let total_rows = total_items.div_ceil(self.cols);
-        let total_height = Self::CONTENT_TOP_PADDING as usize + total_rows * self.card_stride() as usize;
+        let total_height =
+            Self::CONTENT_TOP_PADDING as usize + total_rows * self.card_stride() as usize;
         total_height.saturating_sub(self.grid_height as usize)
     }
 

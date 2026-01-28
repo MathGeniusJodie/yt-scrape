@@ -121,11 +121,12 @@ impl App {
             }
 
             // Use shorter poll timeout when animating
-            let poll_timeout = if self.scroll_velocity.abs() > 0.5 || self.selection_indicator.is_animating() {
-                Duration::from_millis(16) // ~60fps during animation
-            } else {
-                Duration::from_millis(100) // idle
-            };
+            let poll_timeout =
+                if self.scroll_velocity.abs() > 0.5 || self.selection_indicator.is_animating() {
+                    Duration::from_millis(16) // ~60fps during animation
+                } else {
+                    Duration::from_millis(100) // idle
+                };
 
             if event::poll(poll_timeout)? {
                 match event::read()? {
@@ -420,9 +421,11 @@ impl App {
                 if self.state.show_summary {
                     const SCROLL_LINES: u16 = 3;
                     if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                        self.state.summary_scroll = self.state.summary_scroll.saturating_add(SCROLL_LINES);
+                        self.state.summary_scroll =
+                            self.state.summary_scroll.saturating_add(SCROLL_LINES);
                     } else {
-                        self.state.summary_scroll = self.state.summary_scroll.saturating_sub(SCROLL_LINES);
+                        self.state.summary_scroll =
+                            self.state.summary_scroll.saturating_sub(SCROLL_LINES);
                     }
                     self.needs_redraw = true;
                 } else {

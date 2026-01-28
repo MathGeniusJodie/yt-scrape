@@ -96,12 +96,14 @@ impl BoxButton {
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
-    let badges: [&str;_] = [
+    let badges: [&str; _] = [
         "⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱",
-        "⓲", "⓳", "⓴"
+        "⓲", "⓳", "⓴",
     ];
 
-    let watch_later_count = state.videos.iter()
+    let watch_later_count = state
+        .videos
+        .iter()
         .filter(|v| state.watch_later.contains(&v.video_id))
         .count();
     let watch_later_badge = badges[watch_later_count.min(badges.len() - 1)];
@@ -129,7 +131,10 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     let feed_label = " Feed ↻ ";
-    let tabs: &[(&str, Tab)] = &[(feed_label, Tab::Feed), (&watch_later_label, Tab::WatchLater)];
+    let tabs: &[(&str, Tab)] = &[
+        (feed_label, Tab::Feed),
+        (&watch_later_label, Tab::WatchLater),
+    ];
 
     let selected_style = Style::default()
         .fg(Color::White)
@@ -207,11 +212,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
                 let refresh_start = "│ Feed ".chars().count();
                 let refresh_end = refresh_start + 1; // ↻ is one char
                 let before_refresh: String = middle.chars().take(refresh_start).collect();
-                let refresh_char: String = middle
-                    .chars()
-                    .skip(refresh_start)
-                    .take(1)
-                    .collect();
+                let refresh_char: String = middle.chars().skip(refresh_start).take(1).collect();
                 let after_refresh: String = middle.chars().skip(refresh_end).collect();
                 spans.push(Span::styled(before_refresh, style));
                 spans.push(Span::styled(refresh_char, refresh_style));
@@ -302,7 +303,9 @@ fn render_grid(
 
     // Calculate total content height (includes top padding for selection indicator)
     let total_rows = videos.len().div_ceil(layout.cols);
-    let content_height = (GridLayout::CONTENT_TOP_PADDING + total_rows as u16 * layout.card_stride()).max(layout.grid_height);
+    let content_height = (GridLayout::CONTENT_TOP_PADDING
+        + total_rows as u16 * layout.card_stride())
+    .max(layout.grid_height);
 
     // Create scroll view with full content size (disable built-in scrollbars)
     let mut scroll_view = ScrollView::new(Size::new(area.width, content_height))
@@ -399,11 +402,9 @@ fn render_grid(
         .thumb_color(Color::Cyan)
         .track_color(Color::Rgb(10, 10, 10));
 
-    let mut scrollbar_state = SmoothScrollbarState::new(
-        content_height as f64,
-        layout.grid_height as f64,
-    )
-    .position(scroll_position);
+    let mut scrollbar_state =
+        SmoothScrollbarState::new(content_height as f64, layout.grid_height as f64)
+            .position(scroll_position);
 
     frame.render_stateful_widget(scrollbar, grid_area, &mut scrollbar_state);
 }
@@ -595,11 +596,13 @@ fn render_video_card(
                 .take(thumb_width as usize)
                 .zip(channel_and_time_style.chars())
                 .enumerate()
-                .map(|(i,((r, g, b), char))| {
+                .map(|(i, ((r, g, b), char))| {
                     if i <= channel_len {
                         Span::styled(
                             char.to_string(),
-                            Style::default().bg(Color::Rgb(*r, *g, *b)).add_modifier(Modifier::ITALIC),
+                            Style::default()
+                                .bg(Color::Rgb(*r, *g, *b))
+                                .add_modifier(Modifier::ITALIC),
                         )
                     } else {
                         Span::styled(
@@ -708,7 +711,12 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
     let title = state
         .summary_video_title
         .as_ref()
-        .map(|t| format!(" ✨ {} ", truncate_str(t, modal_width.saturating_sub(6) as usize)))
+        .map(|t| {
+            format!(
+                " ✨ {} ",
+                truncate_str(t, modal_width.saturating_sub(6) as usize)
+            )
+        })
         .unwrap_or_else(|| " ✨ Summary ".to_string());
 
     let block = Block::default()
@@ -716,7 +724,11 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .border_type(BorderType::Rounded)
-        .style(Style::default().bg(Color::Black).add_modifier(Modifier::BOLD));
+        .style(
+            Style::default()
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let inner = block.inner(modal_area);
 
@@ -747,26 +759,21 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
             let mut skin = MadSkin::default_dark();
 
             // Polished unicode typography
-            skin.bullet = StyledChar::from_fg_char(
-                termimad::crossterm::style::Color::White,
-                '•',
-            );
-            skin.quote_mark = StyledChar::from_fg_char(
-                termimad::crossterm::style::Color::Grey,
-                '▌'
-            );
+            skin.bullet = StyledChar::from_fg_char(termimad::crossterm::style::Color::White, '•');
+            skin.quote_mark =
+                StyledChar::from_fg_char(termimad::crossterm::style::Color::Grey, '▌');
 
             let mut header_style = termimad::LineStyle::default();
             header_style.add_attr(crossterm::style::Attribute::Bold);
             skin.headers = [
-               header_style.clone(),
-               header_style.clone(),
-               header_style.clone(),
-               header_style.clone(),
-               header_style.clone(),
-               header_style.clone(),
-               header_style.clone(),
-               header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
+                header_style.clone(),
             ];
 
             skin.list_items_indentation_mode = termimad::ListItemsIndentationMode::Block;
@@ -776,7 +783,9 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
             let ansi_string = format!("{}", formatted);
 
             // Convert ANSI to ratatui Text
-            let text: Text = ansi_string.into_text().unwrap_or_else(|_| Text::raw(summary));
+            let text: Text = ansi_string
+                .into_text()
+                .unwrap_or_else(|_| Text::raw(summary));
 
             // Add left padding to each line, plus empty lines at top and bottom
             let mut text_lines: Vec<Line> = vec![Line::raw("")]; // top padding
@@ -798,9 +807,10 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
             let scroll_offset = (state.summary_scroll).min(max_scroll);
 
             // Create scroll view
-            let mut scroll_view = ScrollView::new(Size::new(inner.width.saturating_sub(1), content_height))
-                .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
-                .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
+            let mut scroll_view =
+                ScrollView::new(Size::new(inner.width.saturating_sub(1), content_height))
+                    .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
+                    .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
 
             let text = text_lines;
 
@@ -836,11 +846,9 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
                     .thumb_color(Color::Cyan)
                     .track_color(Color::Rgb(30, 30, 30));
 
-                let mut scrollbar_state = SmoothScrollbarState::new(
-                    content_height as f64,
-                    viewport_height as f64,
-                )
-                .position(scroll_offset as f64);
+                let mut scrollbar_state =
+                    SmoothScrollbarState::new(content_height as f64, viewport_height as f64)
+                        .position(scroll_offset as f64);
 
                 frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
 

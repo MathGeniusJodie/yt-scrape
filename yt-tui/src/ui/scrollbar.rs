@@ -167,13 +167,18 @@ impl StatefulWidget for SmoothScrollbar {
                 (CHAR_FULL, thumb_rgb)
             } else {
                 // Partial coverage - determine character and blend color
-                self.render_partial_cell(cell_top, thumb_top, thumb_bottom, coverage, thumb_rgb, track_rgb)
+                self.render_partial_cell(
+                    cell_top,
+                    thumb_top,
+                    thumb_bottom,
+                    coverage,
+                    thumb_rgb,
+                    track_rgb,
+                )
             };
 
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(symbol)
-                    .set_fg(color)
-                    .set_bg(Color::Black);
+                cell.set_symbol(symbol).set_fg(color).set_bg(Color::Black);
             }
         }
     }
@@ -210,9 +215,9 @@ impl SmoothScrollbar {
                 // Use half char based on where thumb is positioned in cell
                 let thumb_center = (thumb_top + thumb_bottom) / 2.0;
                 let symbol = if thumb_center < cell_mid {
-                    CHAR_TOP_HALF     // Thumb in top half of cell
+                    CHAR_TOP_HALF // Thumb in top half of cell
                 } else {
-                    CHAR_BOTTOM_HALF  // Thumb in bottom half of cell
+                    CHAR_BOTTOM_HALF // Thumb in bottom half of cell
                 };
                 // Blend: 0 → 0%, 0.5 → 100% (scaled to half-cell)
                 let blend = coverage * 2.0;
@@ -242,7 +247,10 @@ impl SmoothScrollbar {
                 // Ends in top half - use ╹ to cap the bottom of the thumb
                 // Blend: cell_top → 0%, cell_mid → 100%
                 let blend = (thumb_bottom - cell_top) * 2.0;
-                (CHAR_BOTTOM_HALF, Self::lerp_rgb(track_rgb, thumb_rgb, blend))
+                (
+                    CHAR_BOTTOM_HALF,
+                    Self::lerp_rgb(track_rgb, thumb_rgb, blend),
+                )
             } else {
                 // Ends in bottom half - more than half covered, use full char
                 // coverage is 0.5-1.0, blend proportionally: 0.5 → 50%, 1.0 → 100%

@@ -94,7 +94,11 @@ struct GeminiError {
     status: Option<String>,
 }
 
-pub async fn summarize_video(video_url: &str, _video_title: &str, _channel_name: &str) -> Result<String> {
+pub async fn summarize_video(
+    video_url: &str,
+    _video_title: &str,
+    _channel_name: &str,
+) -> Result<String> {
     let api_key = std::env::var("GEMINI_API_KEY")
         .map_err(|_| anyhow::anyhow!("GEMINI_API_KEY environment variable not set"))?;
 
@@ -109,7 +113,10 @@ pub async fn summarize_video(video_url: &str, _video_title: &str, _channel_name:
         Err(e) => {
             let error_str = e.to_string();
             // Check for rate limit (429) or quota exceeded
-            if error_str.contains("429") || error_str.contains("RESOURCE_EXHAUSTED") || error_str.contains("quota") {
+            if error_str.contains("429")
+                || error_str.contains("RESOURCE_EXHAUSTED")
+                || error_str.contains("quota")
+            {
                 // Fall back to flash model
                 call_gemini(&api_key, GEMINI_FLASH_MODEL, video_url, &prompt).await
             } else {
@@ -201,18 +208,14 @@ fn smartify_quotes(text: &str) -> String {
 
     for c in text.chars() {
         match c {
-            '"' => {
-                match decide_quote_after(prev_char) {
-                    Decision::Open => result.push(OPEN_DOUBLE),
-                    Decision::Close => result.push(CLOSE_DOUBLE),
-                }
-            }
-            '\'' => {
-                match decide_quote_after(prev_char) {
-                    Decision::Open => result.push(OPEN_SINGLE),
-                    Decision::Close => result.push(CLOSE_SINGLE),
-                }
-            }
+            '"' => match decide_quote_after(prev_char) {
+                Decision::Open => result.push(OPEN_DOUBLE),
+                Decision::Close => result.push(CLOSE_DOUBLE),
+            },
+            '\'' => match decide_quote_after(prev_char) {
+                Decision::Open => result.push(OPEN_SINGLE),
+                Decision::Close => result.push(CLOSE_SINGLE),
+            },
             _ => result.push(c),
         }
         prev_char = Some(c);
