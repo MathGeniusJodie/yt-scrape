@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use termimad::{MadSkin, StyledChar};
 
 use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
+use super::selection::SelectionIndicator;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 /// Render the entire UI
@@ -22,6 +23,7 @@ pub fn render(
     scroll_state: &mut ScrollViewState,
     scroll_position: f64,
     videos_dir: &Path,
+    selection_indicator: &SelectionIndicator,
 ) {
     let area = frame.area();
 
@@ -40,6 +42,7 @@ pub fn render(
         scroll_state,
         scroll_position,
         videos_dir,
+        selection_indicator,
     );
 
     // Render footer (status bar)
@@ -287,6 +290,7 @@ fn render_grid(
     scroll_state: &mut ScrollViewState,
     scroll_position: f64,
     videos_dir: &Path,
+    selection_indicator: &SelectionIndicator,
 ) {
     // Grid area (between header and footer)
     let grid_area = Rect {
@@ -296,9 +300,9 @@ fn render_grid(
         height: layout.grid_height,
     };
 
-    // Calculate total content height (cards overlap by 1 row, so use stride)
+    // Calculate total content height (includes top padding for selection indicator)
     let total_rows = videos.len().div_ceil(layout.cols);
-    let content_height = (total_rows as u16 * layout.card_stride()).max(layout.grid_height);
+    let content_height = (GridLayout::CONTENT_TOP_PADDING + total_rows as u16 * layout.card_stride()).max(layout.grid_height);
 
     // Create scroll view with full content size (disable built-in scrollbars)
     let mut scroll_view = ScrollView::new(Size::new(area.width, content_height))
@@ -344,23 +348,16 @@ fn render_grid(
     // Calculate which rows are visible for performance (don't render off-screen cards)
     let scroll_offset = scroll_state.offset().y as usize;
     let stride = layout.card_stride() as usize;
-    let first_visible_row = scroll_offset / stride;
-    let last_visible_row = (scroll_offset + layout.grid_height as usize) / stride + 1;
+    let top_padding = GridLayout::CONTENT_TOP_PADDING as usize;
+    let content_offset = scroll_offset.saturating_sub(top_padding);
+    let first_visible_row = content_offset / stride;
+    let last_visible_row = (content_offset + layout.grid_height as usize) / stride + 1;
     let first_video = first_visible_row * layout.cols;
     let last_video = ((last_visible_row + 1) * layout.cols).min(videos.len());
 
-    let mut vec_items: Vec<usize> = (first_video..last_video).collect();
-    if state.selected_index.is_some() {
-        // Ensure selected index is rendered last (on top)
-        let index = vec_items.iter().position(|&idx| Some(idx) == state.selected_index);
-        if let Some(idx) = index {
-            let selected = vec_items.remove(idx);
-            vec_items.insert(0, selected);
-        }
-    }
-
     // Render cards into scroll view at their natural positions
-    for idx in vec_items.into_iter().rev() {
+    // No need to sort - selection indicator is rendered separately on top
+    for idx in first_video..last_video {
         if let Some(video) = videos.get(idx) {
             let (card_x, card_y) = layout.card_rect(idx);
 
@@ -370,8 +367,6 @@ fn render_grid(
                 width: layout.card_width,
                 height: layout.card_height,
             };
-
-            let is_selected = state.selected_index == Some(idx);
 
             let is_watch_later = state.watch_later.contains(&video.video_id);
             let is_downloaded = videos_dir
@@ -385,7 +380,6 @@ fn render_grid(
                 scroll_view.buf_mut(),
                 video,
                 card_area,
-                is_selected,
                 is_watch_later,
                 is_downloaded,
                 layout,
@@ -393,6 +387,9 @@ fn render_grid(
             );
         }
     }
+
+    // Render selection indicator on top of all cards
+    selection_indicator.render(scroll_view.buf_mut(), layout);
 
     // Render the scroll view to the frame
     frame.render_stateful_widget(scroll_view, grid_area, scroll_state);
@@ -415,43 +412,37 @@ fn render_video_card(
     buf: &mut Buffer,
     video: &Video,
     area: Rect,
-    is_selected: bool,
     is_watch_later: bool,
     is_downloaded: bool,
     layout: &GridLayout,
     thumb_cache: &ThumbnailCache,
 ) {
-    // Card border
-    let border_style = if is_selected {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Black)
-    };
+    // Card border - no top border, selection indicator provides that when selected
+    let border_style = Style::default().fg(Color::Black);
 
-    let border_set = if is_selected {
-        BorderType::Rounded.to_border_set()
-    } else {
-        ratatui_core::symbols::border::Set {
-            vertical_left: "⢸",
-            vertical_right: "🮐",
-            horizontal_top: "⣀",
-            horizontal_bottom: "🮎", //"▀",//"⠻",
-            top_left: " ",
-            top_right: "⣀",
-            bottom_left: "⠘",
-            bottom_right: "⠛",
-        }
+    let border_set = ratatui_core::symbols::border::Set {
+        vertical_left: "⢸",
+        vertical_right: "🮐",
+        horizontal_top: " ", // No top border
+        horizontal_bottom: "🮎",
+        top_left: " ",
+        top_right: " ",
+        bottom_left: "⠘",
+        bottom_right: "⠛",
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
-        //.border_type(border_type)
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
         .border_style(border_style)
         .border_set(border_set);
 
-    let inner = block.inner(area);
+    // Calculate inner area manually since we have no top border
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(1),
+    };
     block.render(area, buf);
 
     if inner.height == 0 || inner.width == 0 {

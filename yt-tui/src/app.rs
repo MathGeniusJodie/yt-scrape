@@ -3,7 +3,7 @@ use crate::data::{AppState, Tab};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use crate::gemini::{summarize_video, SummaryState};
 use crate::player;
-use crate::ui::{self, GridLayout};
+use crate::ui::{self, GridLayout, SelectionIndicator};
 use crate::urls;
 use anyhow::Result;
 use crossterm::event::{
@@ -35,6 +35,8 @@ pub struct App {
     scroll_velocity: f64,
     last_rendered_scroll: usize,
     last_frame: Instant,
+    // Animated selection indicator
+    selection_indicator: SelectionIndicator,
 }
 
 impl App {
@@ -74,6 +76,7 @@ impl App {
             scroll_velocity: 0.0,
             last_rendered_scroll: 0,
             last_frame: Instant::now(),
+            selection_indicator: SelectionIndicator::new(),
         })
     }
 
@@ -84,8 +87,8 @@ impl App {
         self.queue_watch_later_downloads();
 
         loop {
-            // Update scroll physics
-            self.update_scroll_physics();
+            // Update scroll physics and selection animation
+            self.update_physics();
 
             // Check for completed thumbnail renders
             while self.thumb_render_rx.try_recv().is_ok() {
@@ -96,6 +99,7 @@ impl App {
             if self.needs_redraw {
                 let videos_dir = self.storage.videos_dir();
                 let scroll_pos = self.scroll_position;
+                let selection_indicator = &self.selection_indicator;
                 self.terminal.draw(|f| {
                     ui::render(
                         f,
@@ -105,14 +109,15 @@ impl App {
                         &mut self.scroll_state,
                         scroll_pos,
                         videos_dir,
+                        selection_indicator,
                     );
                 })?;
                 self.needs_redraw = false;
             }
 
             // Use shorter poll timeout when animating
-            let poll_timeout = if self.scroll_velocity.abs() > 0.5 {
-                Duration::from_millis(32) // ~30fps during animation
+            let poll_timeout = if self.scroll_velocity.abs() > 0.5 || self.selection_indicator.is_animating() {
+                Duration::from_millis(16) // ~60fps during animation
             } else {
                 Duration::from_millis(100) // idle
             };
@@ -181,8 +186,8 @@ impl App {
             .set_offset(ratatui::layout::Position::new(0, quantized as u16));
     }
 
-    /// Update scroll physics (inertia only, no overscroll)
-    fn update_scroll_physics(&mut self) {
+    /// Update scroll physics and selection animation
+    fn update_physics(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f64();
         self.last_frame = now;
@@ -221,6 +226,11 @@ impl App {
         // Stop if velocity is negligible
         if self.scroll_velocity.abs() < 0.2 {
             self.scroll_velocity = 0.0;
+        }
+
+        // Animate selection indicator
+        if self.selection_indicator.animate(dt) {
+            self.needs_redraw = true;
         }
     }
 
@@ -286,13 +296,16 @@ impl App {
             }
             KeyCode::Home => {
                 self.set_scroll_offset(0);
-                self.state.selected_index = Some(0);
+                self.set_selection(0);
+                self.sync_selection_indicator(); // Jump, don't animate
                 self.needs_redraw = true;
             }
             KeyCode::End => {
                 let total = self.state.current_videos().len();
                 self.set_scroll_offset(self.layout.max_scroll(total));
-                self.state.selected_index = Some(total.saturating_sub(1));
+                let last_idx = total.saturating_sub(1);
+                self.set_selection(last_idx);
+                self.sync_selection_indicator(); // Jump, don't animate
                 self.needs_redraw = true;
             }
 
@@ -345,6 +358,7 @@ impl App {
                                 self.state.current_tab = tab;
                                 self.set_scroll_offset(0);
                                 self.state.selected_index = None;
+                                self.selection_indicator.hide();
                                 self.needs_redraw = true;
                                 tab_clicked = true;
                                 break;
@@ -372,7 +386,7 @@ impl App {
                         self.scroll_offset(),
                         total,
                     ) {
-                        self.state.selected_index = Some(idx);
+                        self.set_selection(idx);
                         self.show_video_summary(idx).await?;
                     }
                     // Check if click is on a watch later checkbox
@@ -382,7 +396,7 @@ impl App {
                         self.scroll_offset(),
                         total,
                     ) {
-                        self.state.selected_index = Some(idx);
+                        self.set_selection(idx);
                         self.toggle_watch_later()?;
                     } else if let Some(idx) = self.layout.coords_to_index(
                         mouse.column,
@@ -390,7 +404,7 @@ impl App {
                         self.scroll_offset(),
                         total,
                     ) {
-                        self.state.selected_index = Some(idx);
+                        self.set_selection(idx);
                         self.needs_redraw = true;
                         self.play_selected()?;
                     }
@@ -467,6 +481,10 @@ impl App {
         let new_idx = (current + delta).clamp(0, total as i32 - 1) as usize;
         self.state.selected_index = Some(new_idx);
 
+        // Update selection indicator target
+        let (card_x, card_y) = self.layout.card_rect(new_idx);
+        self.selection_indicator.set_target(card_x, card_y);
+
         // Adjust scroll to keep selection visible (line-based)
         let selected_row = new_idx / self.layout.cols;
         let stride = self.layout.card_stride() as usize;
@@ -486,6 +504,31 @@ impl App {
             self.scroll_velocity = 0.0;
         }
         self.needs_redraw = true;
+    }
+
+    /// Update selection indicator to match current selection (jump, no animation)
+    fn sync_selection_indicator(&mut self) {
+        if let Some(idx) = self.state.selected_index {
+            let (card_x, card_y) = self.layout.card_rect(idx);
+            self.selection_indicator.jump_to(card_x, card_y);
+        } else {
+            self.selection_indicator.hide();
+        }
+    }
+
+    /// Set selection to a specific index (used by mouse clicks)
+    fn set_selection(&mut self, idx: usize) {
+        let was_selected = self.state.selected_index;
+        self.state.selected_index = Some(idx);
+
+        let (card_x, card_y) = self.layout.card_rect(idx);
+
+        // If this is the first selection or a distant jump, just jump to the position
+        if was_selected.is_none() {
+            self.selection_indicator.jump_to(card_x, card_y);
+        } else {
+            self.selection_indicator.set_target(card_x, card_y);
+        }
     }
 
     fn play_selected(&self) -> Result<()> {
@@ -547,6 +590,7 @@ impl App {
             // Draw loading state
             let videos_dir = self.storage.videos_dir();
             let scroll_pos = self.scroll_position;
+            let selection_indicator = &self.selection_indicator;
             self.terminal.draw(|f| {
                 ui::render(
                     f,
@@ -556,6 +600,7 @@ impl App {
                     &mut self.scroll_state,
                     scroll_pos,
                     videos_dir,
+                    selection_indicator,
                 );
             })?;
 
@@ -580,6 +625,7 @@ impl App {
         };
         self.set_scroll_offset(0);
         self.state.selected_index = None;
+        self.selection_indicator.hide();
         self.needs_redraw = true;
     }
 
@@ -616,6 +662,7 @@ impl App {
                     // Redraw to show progress
                     let videos_dir = self.storage.videos_dir();
                     let scroll_pos = self.scroll_position;
+                    let selection_indicator = &self.selection_indicator;
                     self.terminal.draw(|f| {
                         ui::render(
                             f,
@@ -625,6 +672,7 @@ impl App {
                             &mut self.scroll_state,
                             scroll_pos,
                             videos_dir,
+                            selection_indicator,
                         );
                     })?;
                 }

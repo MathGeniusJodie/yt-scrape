@@ -44,9 +44,9 @@ impl GridLayout {
     /// How many rows the text overlaps the thumbnail (gradient blend area)
     const TEXT_OVERLAP: u16 = 2;
 
-    /// Card height = top border + thumbnail + text rows (minus overlap) + bottom border
-    /// But adjacent cards share their border row, so effective height in grid is card_height - 1
-    const CARD_HEIGHT: u16 = 1 + Self::THUMBNAIL_HEIGHT + Self::TEXT_OVERLAY_ROWS - Self::TEXT_OVERLAP + 1;
+    /// Card height = thumbnail + text rows (minus overlap) + bottom border
+    /// No top border on cards - the selection indicator provides the top border when selected
+    const CARD_HEIGHT: u16 = Self::THUMBNAIL_HEIGHT + Self::TEXT_OVERLAY_ROWS - Self::TEXT_OVERLAP + 1;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Fixed layout regions
@@ -54,14 +54,16 @@ impl GridLayout {
 
     pub const HEADER_HEIGHT: u16 = 3;
     pub const FOOTER_HEIGHT: u16 = 1;
+    /// Top padding in the grid content area to allow selection indicator top border
+    pub const CONTENT_TOP_PADDING: u16 = 1;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Card-relative positions (y from top of card, x from left of card)
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Y position of the buttons row (checkbox, folder, sparkle) within a card
-    /// This is the first row of the text overlay area
-    const BUTTONS_ROW: u16 = 1 + Self::THUMBNAIL_HEIGHT - Self::TEXT_OVERLAP;
+    /// This is the first row of the text overlay area (no top border, so no +1)
+    const BUTTONS_ROW: u16 = Self::THUMBNAIL_HEIGHT - Self::TEXT_OVERLAP;
 
     /// X range for the watch later toggle (⊂⬤ or ⬤⊃), from right edge
     const TOGGLE_X_END: u16 = Self::CARD_WIDTH - 1; // before right border
@@ -94,10 +96,10 @@ impl GridLayout {
     // Grid layout helpers - used by both drawing and hit-testing
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Vertical stride between card origins (cards overlap by 1 row for shared borders)
+    /// Vertical stride between card origins (no overlap, cards are stacked)
     #[inline]
     pub fn card_stride(&self) -> u16 {
-        self.card_height - 1
+        self.card_height
     }
 
     /// Calculate the screen position for a card at the given index
@@ -106,7 +108,7 @@ impl GridLayout {
         let row = index / self.cols;
         let col = index % self.cols;
         let x = self.x_offset + col as u16 * self.card_width;
-        let y = row as u16 * self.card_stride();
+        let y = Self::CONTENT_TOP_PADDING + row as u16 * self.card_stride();
         (x, y)
     }
 
@@ -125,7 +127,7 @@ impl GridLayout {
     /// Maximum scroll offset in lines
     pub fn max_scroll(&self, total_items: usize) -> usize {
         let total_rows = total_items.div_ceil(self.cols);
-        let total_height = total_rows * self.card_stride() as usize;
+        let total_height = Self::CONTENT_TOP_PADDING as usize + total_rows * self.card_stride() as usize;
         total_height.saturating_sub(self.grid_height as usize)
     }
 
@@ -158,10 +160,17 @@ impl GridLayout {
             return None;
         }
 
-        // Row calculation with scroll offset
+        // Row calculation with scroll offset (account for top padding)
         let y_in_grid = (y - Self::HEADER_HEIGHT) as usize + scroll_offset;
+
+        // Must be past the top padding area
+        if y_in_grid < Self::CONTENT_TOP_PADDING as usize {
+            return None;
+        }
+
+        let y_in_content = y_in_grid - Self::CONTENT_TOP_PADDING as usize;
         let stride = self.card_stride() as usize;
-        let row = y_in_grid / stride;
+        let row = y_in_content / stride;
 
         // Index bounds check
         let index = row * self.cols + col;
@@ -170,7 +179,7 @@ impl GridLayout {
         }
 
         // Position within card
-        let y_in_card = y_in_grid % stride;
+        let y_in_card = y_in_content % stride;
         let x_in_card = (x_in_grid % self.card_width) as usize;
 
         Some(CardHit {
