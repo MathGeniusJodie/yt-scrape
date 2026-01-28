@@ -60,28 +60,30 @@ impl SelectionIndicator {
             return false;
         }
 
-        const SPEED: f64 = 12.0; // Movement speed factor
-        const SNAP_DIST: f64 = 3.0; // Snap when this close
+        const SPEED: f64 = 4.0; // Movement speed factor
+        const SNAP_DIST: f64 = 1.0; // Snap when this close
 
-        let dx = self.target_x - self.current_x;
-        let dy = self.target_y - self.current_y;
-        let dist = (dx * dx + dy * dy).sqrt();
+        for _ in 0..8 {
+            let dx = self.target_x - self.current_x;
+            let dy = self.target_y - self.current_y;
+            let dist = (dx * dx + dy * dy).sqrt();
 
-        // Already at target
-        if dist < 0.001 {
-            return false;
+            // Already at target
+            if dist < 0.001 {
+                return false;
+            }
+
+            // Snap if close enough (return true so final position gets drawn)
+            if dist < SNAP_DIST {
+                self.current_x = self.target_x;
+                self.current_y = self.target_y;
+                return true;
+            }
+
+            // Proportional movement
+            self.current_x += dx * SPEED * dt;
+            self.current_y += dy * SPEED * dt;
         }
-
-        // Snap if close enough (return true so final position gets drawn)
-        if dist < SNAP_DIST {
-            self.current_x = self.target_x;
-            self.current_y = self.target_y;
-            return true;
-        }
-
-        // Proportional movement
-        self.current_x += dx * SPEED * dt;
-        self.current_y += dy * SPEED * dt;
 
         true
     }
