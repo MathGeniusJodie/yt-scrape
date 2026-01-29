@@ -68,19 +68,19 @@ impl GridLayout {
 
     /// X range for the watch later toggle (⊂⬤ or ⬤⊃), from right edge
     const TOGGLE_X_END: u16 = Self::CARD_WIDTH - 1; // before right border
-    const TOGGLE_X_START: u16 = Self::TOGGLE_X_END - 4; // "⊂⬤ " is ~4 chars
+    const TOGGLE_X_START: u16 = Self::TOGGLE_X_END - 4; // " ⊂⬤ " is 4 chars
 
     /// X range for the folder icon (🖬), from right edge
     const FOLDER_X_END: u16 = Self::TOGGLE_X_START;
-    const FOLDER_X_START: u16 = Self::FOLDER_X_END - 4; // "🖬  " is ~4 chars
+    const FOLDER_X_START: u16 = Self::FOLDER_X_END - 3; // " 🖬 " is 3 chars
 
     /// X range for the transcript button (🗏), from right edge
     const TRANSCRIPT_X_END: u16 = Self::FOLDER_X_START;
-    const TRANSCRIPT_X_START: u16 = Self::TRANSCRIPT_X_END - 3; // "🗏 " is ~3 chars
+    const TRANSCRIPT_X_START: u16 = Self::TRANSCRIPT_X_END - 3; // " 🗏 " is 3 chars
 
     /// X range for the sparkle button (✨), from right edge
     const SPARKLE_X_END: u16 = Self::TRANSCRIPT_X_START;
-    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 3; // "✨ " is ~3 chars
+    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 3; // " ✨ " is 3 chars
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Construction

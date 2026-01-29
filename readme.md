@@ -6,6 +6,7 @@ use with alacritty or another similarly fast terminal emulator for best results.
 
 ## Todos:
 * bugfixes
+* close button on modals
 * code cleanup and compartmentalization
 * faster ai summarization using cached transcript and cerebras api.
 * interface to add channels to subscriptions list
