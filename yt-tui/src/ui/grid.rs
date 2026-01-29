@@ -529,9 +529,17 @@ fn render_video_card(
         channel_and_time_style.push_str(&" ");
 
         let checkbox_line = if is_watch_later {
-            format!("{:>width$}", " ✨  🗏  🖬  ⊂⬤ ", width = thumb_width as usize)
+            format!(
+                "{:>width$}",
+                " ✨  🗏  🖬  ⊂⬤  ",
+                width = thumb_width as usize
+            )
         } else {
-            format!("{:>width$}", " ✨  🗏  🖬  ⬤⊃ ", width = thumb_width as usize)
+            format!(
+                "{:>width$}",
+                " ✨  🗏  🖬  ⬤⊃  ",
+                width = thumb_width as usize
+            )
         };
 
         // Colors for folder (based on download status), toggle (based on watch later status),

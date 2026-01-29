@@ -80,7 +80,7 @@ impl GridLayout {
 
     /// X range for the sparkle button (✨), from right edge
     const SPARKLE_X_END: u16 = Self::TRANSCRIPT_X_START;
-    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 3; // " ✨ " is 3 chars
+    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 4; // " ✨ " is 3 chars 4?
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Construction
