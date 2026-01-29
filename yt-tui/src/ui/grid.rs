@@ -407,7 +407,9 @@ fn render_video_card(
     thumb_cache: &ThumbnailCache,
 ) {
     // Card border - no top border, selection indicator provides that when selected
-    let border_style = Style::default().fg(Color::Rgb(0,0,0)).add_modifier(Modifier::BOLD);
+    let border_style = Style::default()
+        .fg(Color::Rgb(0, 0, 0))
+        .add_modifier(Modifier::BOLD);
 
     let border_set = ratatui_core::symbols::border::Set {
         vertical_left: "⢐",

@@ -138,7 +138,10 @@ pub async fn summarize_video_streaming(
     let prompt = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections".to_string();
 
     // Try pro model first, fall back to flash on rate limit
-    debug_log(&format!("Starting streaming request to {}", GEMINI_PRO_MODEL));
+    debug_log(&format!(
+        "Starting streaming request to {}",
+        GEMINI_PRO_MODEL
+    ));
     match call_gemini_streaming(&api_key, GEMINI_PRO_MODEL, video_url, &prompt, tx.clone()).await {
         Ok(()) => {
             debug_log(&format!("Streaming completed successfully"));
@@ -153,8 +156,14 @@ pub async fn summarize_video_streaming(
             {
                 debug_log(&format!("Falling back to flash model"));
                 // Fall back to flash model
-                if let Err(e) =
-                    call_gemini_streaming(&api_key, GEMINI_FLASH_MODEL, video_url, &prompt, tx.clone()).await
+                if let Err(e) = call_gemini_streaming(
+                    &api_key,
+                    GEMINI_FLASH_MODEL,
+                    video_url,
+                    &prompt,
+                    tx.clone(),
+                )
+                .await
                 {
                     let _ = tx.send(StreamingMessage::Error(e.to_string()));
                 }
@@ -261,7 +270,11 @@ async fn call_gemini_streaming(
                         }
                     }
                     Err(e) => {
-                        debug_log(&format!("JSON parse error: {} for data: {}", e, &data[..data.len().min(200)]));
+                        debug_log(&format!(
+                            "JSON parse error: {} for data: {}",
+                            e,
+                            &data[..data.len().min(200)]
+                        ));
                     }
                 }
             }

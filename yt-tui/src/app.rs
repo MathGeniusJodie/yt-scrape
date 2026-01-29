@@ -115,8 +115,7 @@ impl App {
                                 }
                                 Some(SummaryState::Loading) => {
                                     // First chunk - switch to streaming state
-                                    self.state.summary_state =
-                                        Some(SummaryState::Streaming(text));
+                                    self.state.summary_state = Some(SummaryState::Streaming(text));
                                 }
                                 _ => {}
                             }
@@ -428,10 +427,8 @@ impl App {
         // When help modal is visible, click-outside-to-close
         if self.state.show_help {
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                let bounds = ui::help_modal_bounds(
-                    self.state.terminal_cols,
-                    self.state.terminal_rows,
-                );
+                let bounds =
+                    ui::help_modal_bounds(self.state.terminal_cols, self.state.terminal_rows);
                 if !point_in_rect(mouse.column, mouse.row, bounds) {
                     self.state.show_help = false;
                     self.needs_redraw = true;
