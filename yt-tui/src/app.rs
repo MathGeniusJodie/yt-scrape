@@ -6,6 +6,7 @@ use crate::player;
 use crate::ui::{self, GridLayout, SelectionIndicator};
 use crate::urls;
 use anyhow::Result;
+use arboard::Clipboard;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
     MouseEventKind,
@@ -245,16 +246,15 @@ impl App {
         if self.state.show_summary {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    self.state.show_summary = false;
-                    self.state.summary_state = None;
-                    self.state.summary_scroll = 0;
-                    self.state.summary_video_title = None;
-                    // Re-enable mouse capture
-                    crossterm::execute!(
-                        self.terminal.backend_mut(),
-                        EnableMouseCapture
-                    )?;
-                    self.needs_redraw = true;
+                    self.close_summary_modal();
+                }
+                KeyCode::Char('y') => {
+                    // Copy summary to clipboard
+                    if let Some(SummaryState::Ready(summary)) = &self.state.summary_state {
+                        if let Ok(mut clipboard) = Clipboard::new() {
+                            let _ = clipboard.set_text(summary.clone());
+                        }
+                    }
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.state.summary_scroll = self.state.summary_scroll.saturating_sub(1);
@@ -344,19 +344,53 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: event::MouseEvent) -> Result<()> {
-        // When summary modal is visible, only handle scroll events
-        // This allows the terminal to handle text selection natively
+        // Helper to check if a point is inside a rect
+        let point_in_rect = |col: u16, row: u16, rect: Rect| {
+            col >= rect.x
+                && col < rect.x + rect.width
+                && row >= rect.y
+                && row < rect.y + rect.height
+        };
+
+        // When summary modal is visible, handle scroll and click-outside-to-close
         if self.state.show_summary {
-            if let MouseEventKind::ScrollDown | MouseEventKind::ScrollUp = mouse.kind {
-                const SCROLL_LINES: u16 = 3;
-                if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                    self.state.summary_scroll =
-                        self.state.summary_scroll.saturating_add(SCROLL_LINES);
-                } else {
-                    self.state.summary_scroll =
-                        self.state.summary_scroll.saturating_sub(SCROLL_LINES);
+            match mouse.kind {
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                    const SCROLL_LINES: u16 = 3;
+                    if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                        self.state.summary_scroll =
+                            self.state.summary_scroll.saturating_add(SCROLL_LINES);
+                    } else {
+                        self.state.summary_scroll =
+                            self.state.summary_scroll.saturating_sub(SCROLL_LINES);
+                    }
+                    self.needs_redraw = true;
                 }
-                self.needs_redraw = true;
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let bounds = ui::summary_modal_bounds(
+                        self.state.terminal_cols,
+                        self.state.terminal_rows,
+                    );
+                    if !point_in_rect(mouse.column, mouse.row, bounds) {
+                        self.close_summary_modal();
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // When help modal is visible, click-outside-to-close
+        if self.state.show_help {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                let bounds = ui::help_modal_bounds(
+                    self.state.terminal_cols,
+                    self.state.terminal_rows,
+                );
+                if !point_in_rect(mouse.column, mouse.row, bounds) {
+                    self.state.show_help = false;
+                    self.needs_redraw = true;
+                }
             }
             return Ok(());
         }
@@ -539,6 +573,15 @@ impl App {
         }
     }
 
+    /// Close the summary modal
+    fn close_summary_modal(&mut self) {
+        self.state.show_summary = false;
+        self.state.summary_state = None;
+        self.state.summary_scroll = 0;
+        self.state.summary_video_title = None;
+        self.needs_redraw = true;
+    }
+
     /// Set selection to a specific index (used by mouse clicks)
     fn set_selection(&mut self, idx: usize) {
         let was_selected = self.state.selected_index;
@@ -608,8 +651,6 @@ impl App {
             self.state.summary_state = Some(SummaryState::Loading);
             self.state.summary_scroll = 0;
             self.state.summary_video_title = Some(video_title.clone());
-            // Disable mouse capture to allow text selection in modal
-            crossterm::execute!(self.terminal.backend_mut(), DisableMouseCapture)?;
             self.needs_redraw = true;
 
             // Draw loading state

@@ -14,6 +14,30 @@ use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
 use super::selection::SelectionIndicator;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
+/// Calculate the summary modal bounds for a given terminal size
+pub fn summary_modal_bounds(terminal_cols: u16, terminal_rows: u16) -> Rect {
+    let modal_width = 70.min(terminal_cols.saturating_sub(4));
+    let modal_height = (terminal_rows - 6).min(terminal_rows.saturating_sub(4));
+    Rect {
+        x: (terminal_cols - modal_width) / 2,
+        y: (terminal_rows - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    }
+}
+
+/// Calculate the help modal bounds for a given terminal size
+pub fn help_modal_bounds(terminal_cols: u16, terminal_rows: u16) -> Rect {
+    let help_width = 50.min(terminal_cols.saturating_sub(4));
+    let help_height = 15.min(terminal_rows.saturating_sub(4));
+    Rect {
+        x: (terminal_cols - help_width) / 2,
+        y: (terminal_rows - help_height) / 2,
+        width: help_width,
+        height: help_height,
+    }
+}
+
 /// Render the entire UI
 pub fn render(
     frame: &mut Frame,
