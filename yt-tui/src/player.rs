@@ -25,6 +25,7 @@ pub fn play_video(video_id: &str, title: &str, local_path: Option<&Path>) -> any
     Command::new("mpv")
         .arg(format!("--title={}", title))
         .arg("--ytdl-format=bestvideo[height<=720]+bestaudio/best[height<=720]/best")
+        .arg("--ytdl-raw-options=extractor-args=\"youtube:player_client=default,ios,-android_sdkless\"")
         .arg(&url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

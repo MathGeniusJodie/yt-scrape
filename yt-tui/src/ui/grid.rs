@@ -312,42 +312,6 @@ fn render_grid(
         .horizontal_scrollbar_visibility(ScrollbarVisibility::Never)
         .vertical_scrollbar_visibility(ScrollbarVisibility::Never);
 
-    //render colored bakckground for grid area
-    let background_block = Block::default().style(Style::default().bg(Color::Rgb(20, 20, 20)));
-    let background_area = Rect {
-        x: 0,
-        y: 0,
-        width: area.width,
-        height: content_height,
-    };
-    background_block.render(background_area, scroll_view.buf_mut());
-
-    //top shadow
-    Paragraph::new("▀".repeat(area.width as usize))
-        .style(Style::default().fg(Color::Rgb(4, 4, 4)))
-        .bg(Color::Rgb(8, 8, 8))
-        .render(
-            Rect {
-                x: 0,
-                y: scroll_state.offset().y,
-                width: area.width,
-                height: 1,
-            },
-            scroll_view.buf_mut(),
-        );
-    Paragraph::new("▀".repeat(area.width as usize))
-        .style(Style::default().fg(Color::Rgb(12, 12, 12)))
-        .bg(Color::Rgb(16, 16, 16))
-        .render(
-            Rect {
-                x: 0,
-                y: scroll_state.offset().y + 1,
-                width: area.width,
-                height: 1,
-            },
-            scroll_view.buf_mut(),
-        );
-
     // Calculate which rows are visible for performance (don't render off-screen cards)
     let scroll_offset = scroll_state.offset().y as usize;
     let stride = layout.card_stride() as usize;
@@ -419,17 +383,17 @@ fn render_video_card(
     thumb_cache: &ThumbnailCache,
 ) {
     // Card border - no top border, selection indicator provides that when selected
-    let border_style = Style::default().fg(Color::Black);
+    let border_style = Style::default().fg(Color::Rgb(0,0,0)).add_modifier(Modifier::BOLD);
 
     let border_set = ratatui_core::symbols::border::Set {
-        vertical_left: "⢸",
-        vertical_right: "🮐",
+        vertical_left: "⢐",
+        vertical_right: "⣗",
         horizontal_top: " ", // No top border
-        horizontal_bottom: "🮎",
+        horizontal_bottom: "⠙",
         top_left: " ",
         top_right: " ",
-        bottom_left: "⠘",
-        bottom_right: "⠛",
+        bottom_left: "⠈",
+        bottom_right: "⠁",
     };
 
     let block = Block::default()
@@ -526,12 +490,12 @@ fn render_video_card(
 
         // Colors for folder (based on download status) and toggle (based on watch later status)
         let folder_color = if is_downloaded {
-            Color::Rgb(255, 165, 0) // Orange when downloaded
+            Color::Yellow
         } else {
             Color::White // White when not downloaded
         };
         let toggle_color = if is_watch_later {
-            Color::Rgb(255, 165, 0) // Orange when watch later
+            Color::Yellow
         } else {
             Color::White // white when not watch later
         };

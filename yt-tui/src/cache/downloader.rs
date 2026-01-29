@@ -10,6 +10,7 @@ pub async fn download_video(video_id: &str, output_path: &PathBuf) -> anyhow::Re
     // Use yt-dlp to download the video
     // Format: best quality up to 720p, merge to mp4
     let status = Command::new("yt-dlp")
+        .arg("--extractor-args=youtube:player_client=default,ios,-android_sdkless")
         .arg("-f")
         .arg("bestvideo[height<=720]+bestaudio/best[height<=720]")
         .arg("--merge-output-format")
