@@ -1,5 +1,18 @@
 use anyhow::Result;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use tokio::sync::mpsc;
+
+fn debug_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/yt-tui-debug.log")
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
 
 const GEMINI_PRO_MODEL: &str = "gemini-3-pro-preview";
 const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
@@ -7,6 +20,7 @@ const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
 #[derive(Debug, Clone)]
 pub enum SummaryState {
     Loading,
+    Streaming(String),
     Ready(String),
     Error(String),
 }
@@ -84,7 +98,7 @@ struct CandidateContent {
 
 #[derive(Deserialize)]
 struct ResponsePart {
-    text: String,
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -94,45 +108,76 @@ struct GeminiError {
     status: Option<String>,
 }
 
-pub async fn summarize_video(
+/// Message sent through the streaming channel
+#[derive(Debug)]
+pub enum StreamingMessage {
+    /// Partial text chunk received
+    Chunk(String),
+    /// Stream completed successfully
+    Done,
+    /// Error occurred
+    Error(String),
+}
+
+pub async fn summarize_video_streaming(
     video_url: &str,
     _video_title: &str,
     _channel_name: &str,
-) -> Result<String> {
-    let api_key = std::env::var("GEMINI_API_KEY")
-        .map_err(|_| anyhow::anyhow!("GEMINI_API_KEY environment variable not set"))?;
+    tx: mpsc::UnboundedSender<StreamingMessage>,
+) {
+    let api_key = match std::env::var("GEMINI_API_KEY") {
+        Ok(key) => key,
+        Err(_) => {
+            let _ = tx.send(StreamingMessage::Error(
+                "GEMINI_API_KEY environment variable not set".to_string(),
+            ));
+            return;
+        }
+    };
 
-    let prompt = format!(
-        "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections",
-        //video_title, channel_name
-    );
+    let prompt = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections".to_string();
 
     // Try pro model first, fall back to flash on rate limit
-    match call_gemini(&api_key, GEMINI_PRO_MODEL, video_url, &prompt).await {
-        Ok(summary) => Ok(summary),
+    debug_log(&format!("Starting streaming request to {}", GEMINI_PRO_MODEL));
+    match call_gemini_streaming(&api_key, GEMINI_PRO_MODEL, video_url, &prompt, tx.clone()).await {
+        Ok(()) => {
+            debug_log(&format!("Streaming completed successfully"));
+        }
         Err(e) => {
             let error_str = e.to_string();
+            debug_log(&format!("Streaming error: {}", error_str));
             // Check for rate limit (429) or quota exceeded
             if error_str.contains("429")
                 || error_str.contains("RESOURCE_EXHAUSTED")
                 || error_str.contains("quota")
             {
+                debug_log(&format!("Falling back to flash model"));
                 // Fall back to flash model
-                call_gemini(&api_key, GEMINI_FLASH_MODEL, video_url, &prompt).await
+                if let Err(e) =
+                    call_gemini_streaming(&api_key, GEMINI_FLASH_MODEL, video_url, &prompt, tx.clone()).await
+                {
+                    let _ = tx.send(StreamingMessage::Error(e.to_string()));
+                }
             } else {
-                Err(e)
+                let _ = tx.send(StreamingMessage::Error(error_str));
             }
         }
     }
 }
 
-async fn call_gemini(api_key: &str, model: &str, video_url: &str, prompt: &str) -> Result<String> {
+async fn call_gemini_streaming(
+    api_key: &str,
+    model: &str,
+    video_url: &str,
+    prompt: &str,
+    tx: mpsc::UnboundedSender<StreamingMessage>,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
         model, api_key
     );
 
@@ -169,10 +214,8 @@ async fn call_gemini(api_key: &str, model: &str, video_url: &str, prompt: &str) 
         .await?;
 
     let status = response.status();
-    let body = response.text().await?;
-
     if !status.is_success() {
-        // Try to parse error message
+        let body = response.text().await?;
         if let Ok(error_response) = serde_json::from_str::<GeminiResponse>(&body) {
             if let Some(error) = error_response.error {
                 return Err(anyhow::anyhow!("{}: {}", status, error.message));
@@ -181,17 +224,52 @@ async fn call_gemini(api_key: &str, model: &str, video_url: &str, prompt: &str) 
         return Err(anyhow::anyhow!("{}: {}", status, body));
     }
 
-    let response: GeminiResponse = serde_json::from_str(&body)?;
+    // Process the SSE stream
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
 
-    if let Some(candidates) = response.candidates {
-        if let Some(candidate) = candidates.first() {
-            if let Some(part) = candidate.content.parts.first() {
-                return Ok(smartify_quotes(&part.text));
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let text = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&text);
+
+        // Process complete SSE events - normalize line endings first
+        let normalized = buffer.replace("\r\n", "\n");
+        buffer = normalized;
+
+        // Process complete SSE events (data: {...}\n\n)
+        while let Some(event_end) = buffer.find("\n\n") {
+            let event = buffer[..event_end].to_string();
+            buffer = buffer[event_end + 2..].to_string();
+
+            // Parse the SSE event - handle potential leading newlines
+            let event = event.trim_start_matches('\n');
+            if let Some(data) = event.strip_prefix("data: ") {
+                match serde_json::from_str::<GeminiResponse>(data) {
+                    Ok(response) => {
+                        if let Some(candidates) = response.candidates {
+                            if let Some(candidate) = candidates.first() {
+                                for part in &candidate.content.parts {
+                                    if let Some(ref text) = part.text {
+                                        let text = smartify_quotes(text);
+                                        if !text.is_empty() {
+                                            let _ = tx.send(StreamingMessage::Chunk(text));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug_log(&format!("JSON parse error: {} for data: {}", e, &data[..data.len().min(200)]));
+                    }
+                }
             }
         }
     }
 
-    Err(anyhow::anyhow!("No response content from Gemini"))
+    let _ = tx.send(StreamingMessage::Done);
+    Ok(())
 }
 
 /// Convert straight quotes to curly/smart quotes using the smart_quotes crate heuristic

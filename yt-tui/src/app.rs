@@ -1,7 +1,7 @@
 use crate::cache::{download_video, Storage, ThumbnailCache};
 use crate::data::{AppState, Tab};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
-use crate::gemini::{summarize_video, SummaryState};
+use crate::gemini::{summarize_video_streaming, StreamingMessage, SummaryState};
 use crate::player;
 use crate::ui::{self, GridLayout, SelectionIndicator};
 use crate::urls;
@@ -27,6 +27,7 @@ pub struct App {
     storage: Storage,
     thumb_cache: ThumbnailCache,
     thumb_render_rx: mpsc::UnboundedReceiver<()>,
+    summary_stream_rx: Option<mpsc::UnboundedReceiver<StreamingMessage>>,
     subs_file: PathBuf,
     layout: GridLayout,
     needs_redraw: bool,
@@ -72,6 +73,7 @@ impl App {
             storage,
             thumb_cache,
             thumb_render_rx,
+            summary_stream_rx: None,
             subs_file,
             layout,
             needs_redraw: true,
@@ -101,6 +103,46 @@ impl App {
                 self.needs_redraw = true;
             }
 
+            // Check for streaming summary updates
+            if let Some(ref mut rx) = self.summary_stream_rx {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        StreamingMessage::Chunk(text) => {
+                            // Append to existing streaming content
+                            match &mut self.state.summary_state {
+                                Some(SummaryState::Streaming(content)) => {
+                                    content.push_str(&text);
+                                }
+                                Some(SummaryState::Loading) => {
+                                    // First chunk - switch to streaming state
+                                    self.state.summary_state =
+                                        Some(SummaryState::Streaming(text));
+                                }
+                                _ => {}
+                            }
+                            self.needs_redraw = true;
+                        }
+                        StreamingMessage::Done => {
+                            // Finalize the summary
+                            if let Some(SummaryState::Streaming(content)) =
+                                self.state.summary_state.take()
+                            {
+                                self.state.summary_state = Some(SummaryState::Ready(content));
+                            }
+                            self.summary_stream_rx = None;
+                            self.needs_redraw = true;
+                            break;
+                        }
+                        StreamingMessage::Error(e) => {
+                            self.state.summary_state = Some(SummaryState::Error(e));
+                            self.summary_stream_rx = None;
+                            self.needs_redraw = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
             // Only redraw when state has changed
             if self.needs_redraw {
                 let videos_dir = self.storage.videos_dir();
@@ -121,13 +163,16 @@ impl App {
                 self.needs_redraw = false;
             }
 
-            // Use shorter poll timeout when animating
-            let poll_timeout =
-                if self.scroll_velocity.abs() > 0.5 || self.selection_indicator.is_animating() {
-                    Duration::from_millis(16) // ~60fps during animation
-                } else {
-                    Duration::from_millis(100) // idle
-                };
+            // Use shorter poll timeout when animating or streaming
+            let is_streaming = self.summary_stream_rx.is_some();
+            let poll_timeout = if self.scroll_velocity.abs() > 0.5
+                || self.selection_indicator.is_animating()
+                || is_streaming
+            {
+                Duration::from_millis(16) // ~60fps during animation/streaming
+            } else {
+                Duration::from_millis(100) // idle
+            };
 
             if event::poll(poll_timeout)? {
                 match event::read()? {
@@ -325,7 +370,7 @@ impl App {
             KeyCode::Char('w') => self.toggle_watch_later()?,
             KeyCode::Char('s') => {
                 if let Some(idx) = self.state.selected_index {
-                    self.show_video_summary(idx).await?;
+                    self.show_video_summary(idx)?;
                 }
             }
             KeyCode::Char('r') => self.refresh().await?,
@@ -455,7 +500,7 @@ impl App {
                         total,
                     ) {
                         self.set_selection(idx);
-                        self.show_video_summary(idx).await?;
+                        self.show_video_summary(idx)?;
                     }
                     // Check if click is on a watch later checkbox
                     else if let Some(idx) = self.layout.is_checkbox_click(
@@ -579,6 +624,7 @@ impl App {
         self.state.summary_state = None;
         self.state.summary_scroll = 0;
         self.state.summary_video_title = None;
+        self.summary_stream_rx = None; // Stop processing streaming updates
         self.needs_redraw = true;
     }
 
@@ -638,13 +684,12 @@ impl App {
         Ok(())
     }
 
-    async fn show_video_summary(&mut self, idx: usize) -> Result<()> {
+    fn show_video_summary(&mut self, idx: usize) -> Result<()> {
         let videos = self.state.current_videos();
         if let Some(video) = videos.get(idx) {
-            let video_id = video.video_id.clone();
             let video_title = video.title.clone();
             let channel_name = video.channel_name.clone();
-            let video_url = urls::watch_url(&video_id);
+            let video_url = urls::watch_url(&video.video_id);
 
             // Show modal with loading state
             self.state.show_summary = true;
@@ -653,33 +698,14 @@ impl App {
             self.state.summary_video_title = Some(video_title.clone());
             self.needs_redraw = true;
 
-            // Draw loading state
-            let videos_dir = self.storage.videos_dir();
-            let scroll_pos = self.scroll_position;
-            let selection_indicator = &self.selection_indicator;
-            self.terminal.draw(|f| {
-                ui::render(
-                    f,
-                    &self.state,
-                    &self.layout,
-                    &self.thumb_cache,
-                    &mut self.scroll_state,
-                    scroll_pos,
-                    videos_dir,
-                    selection_indicator,
-                );
-            })?;
+            // Create channel for streaming updates
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.summary_stream_rx = Some(rx);
 
-            // Call Gemini API
-            match summarize_video(&video_url, &video_title, &channel_name).await {
-                Ok(summary) => {
-                    self.state.summary_state = Some(SummaryState::Ready(summary));
-                }
-                Err(e) => {
-                    self.state.summary_state = Some(SummaryState::Error(e.to_string()));
-                }
-            }
-            self.needs_redraw = true;
+            // Spawn streaming task in background
+            tokio::spawn(async move {
+                summarize_video_streaming(&video_url, &video_title, &channel_name, tx).await;
+            });
         }
         Ok(())
     }

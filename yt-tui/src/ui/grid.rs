@@ -739,7 +739,9 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
                 .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(paragraph, modal_area);
         }
-        Some(SummaryState::Ready(summary)) => {
+        Some(SummaryState::Streaming(summary)) | Some(SummaryState::Ready(summary)) => {
+            let is_streaming = matches!(&state.summary_state, Some(SummaryState::Streaming(_)));
+
             // Render the block first
             frame.render_widget(block, modal_area);
 
@@ -839,20 +841,29 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
                         .position(scroll_offset as f64);
 
                 frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
-
-                // Show hint at bottom
-                let hint = " ↑/↓ scroll, Esc close ";
-                let hint_area = Rect {
-                    x: modal_area.x + 2,
-                    y: modal_area.y + modal_area.height - 1,
-                    width: hint.len() as u16,
-                    height: 1,
-                };
-                frame.render_widget(
-                    Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
-                    hint_area,
-                );
             }
+
+            // Show hint at bottom (with streaming indicator if applicable)
+            let hint = if is_streaming {
+                " ● streaming... "
+            } else {
+                " ↑/↓ scroll, Esc close "
+            };
+            let hint_color = if is_streaming {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            let hint_area = Rect {
+                x: modal_area.x + 2,
+                y: modal_area.y + modal_area.height - 1,
+                width: hint.len() as u16,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(hint).style(Style::default().fg(hint_color)),
+                hint_area,
+            );
         }
         Some(SummaryState::Error(err)) => {
             let error_text = vec![
