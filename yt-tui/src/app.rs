@@ -1,4 +1,4 @@
-use crate::cache::{download_video, Storage, ThumbnailCache};
+use crate::cache::{download_video, fetch_transcript, Storage, ThumbnailCache};
 use crate::data::{AppState, Tab};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use crate::gemini::{summarize_video_streaming, StreamingMessage, SummaryState};
@@ -28,6 +28,8 @@ pub struct App {
     thumb_cache: ThumbnailCache,
     thumb_render_rx: mpsc::UnboundedReceiver<()>,
     summary_stream_rx: Option<mpsc::UnboundedReceiver<StreamingMessage>>,
+    transcript_rx: mpsc::UnboundedReceiver<(String, String)>, // (video_id, transcript)
+    transcript_tx: mpsc::UnboundedSender<(String, String)>,
     subs_file: PathBuf,
     layout: GridLayout,
     needs_redraw: bool,
@@ -52,6 +54,7 @@ impl App {
 
         let storage = Storage::new()?;
         let (thumb_cache, thumb_render_rx) = ThumbnailCache::new(storage.cache_dir().clone())?;
+        let (transcript_tx, transcript_rx) = mpsc::unbounded_channel();
 
         let size = terminal.size()?;
         let layout = GridLayout::calculate(size.width, size.height);
@@ -74,6 +77,8 @@ impl App {
             thumb_cache,
             thumb_render_rx,
             summary_stream_rx: None,
+            transcript_rx,
+            transcript_tx,
             subs_file,
             layout,
             needs_redraw: true,
@@ -91,6 +96,8 @@ impl App {
         self.queue_thumbnail_downloads().await;
         // Start video downloads for watch later items
         self.queue_watch_later_downloads();
+        // Start transcript downloads for videos without transcripts
+        self.queue_transcript_downloads();
         // Initialize selection indicator for the first video
         self.sync_selection_indicator();
 
@@ -101,6 +108,20 @@ impl App {
             // Check for completed thumbnail renders
             while self.thumb_render_rx.try_recv().is_ok() {
                 self.needs_redraw = true;
+            }
+
+            // Check for completed transcript downloads
+            while let Ok((video_id, transcript)) = self.transcript_rx.try_recv() {
+                if let Some(video) = self
+                    .state
+                    .videos
+                    .iter_mut()
+                    .find(|v| v.video_id == video_id)
+                {
+                    video.transcript = Some(transcript);
+                    let _ = self.storage.save_videos(&self.state.videos);
+                    self.needs_redraw = true;
+                }
             }
 
             // Check for streaming summary updates
@@ -286,7 +307,46 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: event::KeyEvent) -> Result<bool> {
-        // Handle summary modal first
+        // Handle transcript modal first
+        if self.state.show_transcript {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.close_transcript_modal();
+                }
+                KeyCode::Char('y') => {
+                    // Copy transcript to clipboard
+                    if let Some(transcript) = &self.state.transcript_content {
+                        if let Ok(mut clipboard) = Clipboard::new() {
+                            let _ = clipboard.set_text(transcript.clone());
+                        }
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.transcript_scroll = self.state.transcript_scroll.saturating_sub(1);
+                    self.needs_redraw = true;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.transcript_scroll = self.state.transcript_scroll.saturating_add(1);
+                    self.needs_redraw = true;
+                }
+                KeyCode::PageUp => {
+                    self.state.transcript_scroll = self.state.transcript_scroll.saturating_sub(10);
+                    self.needs_redraw = true;
+                }
+                KeyCode::PageDown => {
+                    self.state.transcript_scroll = self.state.transcript_scroll.saturating_add(10);
+                    self.needs_redraw = true;
+                }
+                KeyCode::Home => {
+                    self.state.transcript_scroll = 0;
+                    self.needs_redraw = true;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
+        // Handle summary modal
         if self.state.show_summary {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
@@ -396,6 +456,34 @@ impl App {
                 && row < rect.y + rect.height
         };
 
+        // When transcript modal is visible, handle scroll and click-outside-to-close
+        if self.state.show_transcript {
+            match mouse.kind {
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                    const SCROLL_LINES: u16 = 3;
+                    if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                        self.state.transcript_scroll =
+                            self.state.transcript_scroll.saturating_add(SCROLL_LINES);
+                    } else {
+                        self.state.transcript_scroll =
+                            self.state.transcript_scroll.saturating_sub(SCROLL_LINES);
+                    }
+                    self.needs_redraw = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let bounds = ui::transcript_modal_bounds(
+                        self.state.terminal_cols,
+                        self.state.terminal_rows,
+                    );
+                    if !point_in_rect(mouse.column, mouse.row, bounds) {
+                        self.close_transcript_modal();
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // When summary modal is visible, handle scroll and click-outside-to-close
         if self.state.show_summary {
             match mouse.kind {
@@ -489,7 +577,7 @@ impl App {
                     // Grid click
                     let total = self.state.current_videos().len();
 
-                    // Check if click is on the summary button (✦)
+                    // Check if click is on the summary button (✨)
                     if let Some(idx) = self.layout.is_summary_button_click(
                         mouse.column,
                         mouse.row,
@@ -498,6 +586,16 @@ impl App {
                     ) {
                         self.set_selection(idx);
                         self.show_video_summary(idx)?;
+                    }
+                    // Check if click is on the transcript button (🗏)
+                    else if let Some(idx) = self.layout.is_transcript_button_click(
+                        mouse.column,
+                        mouse.row,
+                        self.scroll_offset(),
+                        total,
+                    ) {
+                        self.set_selection(idx);
+                        self.show_video_transcript(idx)?;
                     }
                     // Check if click is on a watch later checkbox
                     else if let Some(idx) = self.layout.is_checkbox_click(
@@ -625,6 +723,15 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Close the transcript modal
+    fn close_transcript_modal(&mut self) {
+        self.state.show_transcript = false;
+        self.state.transcript_content = None;
+        self.state.transcript_scroll = 0;
+        self.state.transcript_video_title = None;
+        self.needs_redraw = true;
+    }
+
     /// Set selection to a specific index (used by mouse clicks)
     fn set_selection(&mut self, idx: usize) {
         let was_selected = self.state.selected_index;
@@ -703,6 +810,22 @@ impl App {
             tokio::spawn(async move {
                 summarize_video_streaming(&video_url, &video_title, &channel_name, tx).await;
             });
+        }
+        Ok(())
+    }
+
+    fn show_video_transcript(&mut self, idx: usize) -> Result<()> {
+        let videos = self.state.current_videos();
+        if let Some(video) = videos.get(idx) {
+            let video_title = video.title.clone();
+            let transcript = video.transcript.clone();
+
+            // Show modal with transcript content (or message if not available)
+            self.state.show_transcript = true;
+            self.state.transcript_scroll = 0;
+            self.state.transcript_video_title = Some(video_title);
+            self.state.transcript_content = transcript;
+            self.needs_redraw = true;
         }
         Ok(())
     }
@@ -824,6 +947,27 @@ impl App {
                         let _ = download_video(&video_id, &video_path).await;
                     });
                 }
+            }
+        }
+    }
+
+    fn queue_transcript_downloads(&self) {
+        // Download transcripts for videos that don't have them yet
+        // Start with the most recent videos (they're already sorted by published date)
+        let work_dir = self.storage.transcripts_work_dir().clone();
+        let tx = self.transcript_tx.clone();
+
+        for video in &self.state.videos {
+            if video.transcript.is_none() {
+                let video_id = video.video_id.clone();
+                let work_dir = work_dir.clone();
+                let tx = tx.clone();
+
+                tokio::spawn(async move {
+                    if let Ok(transcript) = fetch_transcript(&video_id, &work_dir).await {
+                        let _ = tx.send((video_id, transcript));
+                    }
+                });
             }
         }
     }

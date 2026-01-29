@@ -25,6 +25,7 @@ pub struct Storage {
     data_dir: PathBuf,
     cache_dir: PathBuf,
     videos_dir: PathBuf,
+    transcripts_work_dir: PathBuf,
 }
 
 impl Storage {
@@ -35,15 +36,18 @@ impl Storage {
         let data_dir = project_dirs.data_dir().to_path_buf();
         let cache_dir = project_dirs.cache_dir().to_path_buf();
         let videos_dir = cache_dir.join("videos");
+        let transcripts_work_dir = cache_dir.join("transcripts_work");
 
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&cache_dir)?;
         std::fs::create_dir_all(&videos_dir)?;
+        std::fs::create_dir_all(&transcripts_work_dir)?;
 
         Ok(Self {
             data_dir,
             cache_dir,
             videos_dir,
+            transcripts_work_dir,
         })
     }
 
@@ -53,6 +57,10 @@ impl Storage {
 
     pub fn videos_dir(&self) -> &PathBuf {
         &self.videos_dir
+    }
+
+    pub fn transcripts_work_dir(&self) -> &PathBuf {
+        &self.transcripts_work_dir
     }
 
     /// Get the path where a video would be stored (with sanitized title)
@@ -112,5 +120,30 @@ impl Storage {
         let json = serde_json::to_string_pretty(videos)?;
         std::fs::write(&path, json)?;
         Ok(())
+    }
+
+    /// Update a video's transcript and save to disk
+    #[allow(dead_code)]
+    pub fn save_transcript(
+        &self,
+        videos: &mut [Video],
+        video_id: &str,
+        transcript: String,
+    ) -> Result<()> {
+        if let Some(video) = videos.iter_mut().find(|v| v.video_id == video_id) {
+            video.transcript = Some(transcript);
+            self.save_videos(videos)?;
+        }
+        Ok(())
+    }
+
+    /// Check if a video has a transcript
+    #[allow(dead_code)]
+    pub fn has_transcript(&self, videos: &[Video], video_id: &str) -> bool {
+        videos
+            .iter()
+            .find(|v| v.video_id == video_id)
+            .map(|v| v.transcript.is_some())
+            .unwrap_or(false)
     }
 }

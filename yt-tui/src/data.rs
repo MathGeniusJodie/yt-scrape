@@ -14,6 +14,8 @@ pub struct Video {
     pub title: String,
     pub published: DateTime<Utc>,
     pub thumbnail_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
 }
 
 impl Video {
@@ -64,6 +66,11 @@ pub struct AppState {
     pub summary_state: Option<SummaryState>,
     pub summary_scroll: u16,
     pub summary_video_title: Option<String>,
+    // Transcript modal
+    pub show_transcript: bool,
+    pub transcript_content: Option<String>,
+    pub transcript_scroll: u16,
+    pub transcript_video_title: Option<String>,
 }
 
 impl Default for AppState {
@@ -84,6 +91,10 @@ impl Default for AppState {
             summary_state: None,
             summary_scroll: 0,
             summary_video_title: None,
+            show_transcript: false,
+            transcript_content: None,
+            transcript_scroll: 0,
+            transcript_video_title: None,
         }
     }
 }

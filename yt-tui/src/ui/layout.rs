@@ -70,9 +70,17 @@ impl GridLayout {
     const TOGGLE_X_END: u16 = Self::CARD_WIDTH - 1; // before right border
     const TOGGLE_X_START: u16 = Self::TOGGLE_X_END - 4; // "⊂⬤ " is ~4 chars
 
+    /// X range for the folder icon (🖬), from right edge
+    const FOLDER_X_END: u16 = Self::TOGGLE_X_START;
+    const FOLDER_X_START: u16 = Self::FOLDER_X_END - 4; // "🖬  " is ~4 chars
+
+    /// X range for the transcript button (🗏), from right edge
+    const TRANSCRIPT_X_END: u16 = Self::FOLDER_X_START;
+    const TRANSCRIPT_X_START: u16 = Self::TRANSCRIPT_X_END - 3; // "🗏 " is ~3 chars
+
     /// X range for the sparkle button (✨), from right edge
-    const SPARKLE_X_END: u16 = Self::TOGGLE_X_START;
-    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 5; // "✨ " is ~5 chars
+    const SPARKLE_X_END: u16 = Self::TRANSCRIPT_X_START;
+    const SPARKLE_X_START: u16 = Self::SPARKLE_X_END - 3; // "✨ " is ~3 chars
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Construction
@@ -241,6 +249,28 @@ impl GridLayout {
 
         let x = hit.x_in_card as u16;
         if x >= Self::SPARKLE_X_START && x < Self::SPARKLE_X_END {
+            Some(hit.index)
+        } else {
+            None
+        }
+    }
+
+    /// Check if coordinates are on the transcript button (🗏)
+    pub fn is_transcript_button_click(
+        &self,
+        x: u16,
+        y: u16,
+        scroll_offset: usize,
+        total_items: usize,
+    ) -> Option<usize> {
+        let hit = self.hit_test(x, y, scroll_offset, total_items)?;
+
+        if hit.y_in_card != Self::BUTTONS_ROW as usize {
+            return None;
+        }
+
+        let x = hit.x_in_card as u16;
+        if x >= Self::TRANSCRIPT_X_START && x < Self::TRANSCRIPT_X_END {
             Some(hit.index)
         } else {
             None

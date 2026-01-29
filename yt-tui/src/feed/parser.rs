@@ -117,6 +117,7 @@ pub fn parse_feed(xml: &str, channel_id: &str) -> Vec<Video> {
                             title: title.clone(),
                             published: *published,
                             thumbnail_url,
+                            transcript: None,
                         });
                     }
                     in_entry = false;
