@@ -249,6 +249,11 @@ impl App {
                     self.state.summary_state = None;
                     self.state.summary_scroll = 0;
                     self.state.summary_video_title = None;
+                    // Re-enable mouse capture
+                    crossterm::execute!(
+                        self.terminal.backend_mut(),
+                        EnableMouseCapture
+                    )?;
                     self.needs_redraw = true;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -339,6 +344,23 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: event::MouseEvent) -> Result<()> {
+        // When summary modal is visible, only handle scroll events
+        // This allows the terminal to handle text selection natively
+        if self.state.show_summary {
+            if let MouseEventKind::ScrollDown | MouseEventKind::ScrollUp = mouse.kind {
+                const SCROLL_LINES: u16 = 3;
+                if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                    self.state.summary_scroll =
+                        self.state.summary_scroll.saturating_add(SCROLL_LINES);
+                } else {
+                    self.state.summary_scroll =
+                        self.state.summary_scroll.saturating_sub(SCROLL_LINES);
+                }
+                self.needs_redraw = true;
+            }
+            return Ok(());
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Check header clicks (all 3 rows)
@@ -423,51 +445,38 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                // If summary modal is open, scroll it instead of the grid
-                if self.state.show_summary {
-                    const SCROLL_LINES: u16 = 3;
-                    if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                        self.state.summary_scroll =
-                            self.state.summary_scroll.saturating_add(SCROLL_LINES);
-                    } else {
-                        self.state.summary_scroll =
-                            self.state.summary_scroll.saturating_sub(SCROLL_LINES);
-                    }
-                    self.needs_redraw = true;
+                const SCROLL_IMPULSE: f64 = 2.5;
+
+                // Drain all pending scroll events and accumulate impulse
+                let mut impulse: f64 = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                    SCROLL_IMPULSE
                 } else {
-                    const SCROLL_IMPULSE: f64 = 2.5;
+                    -SCROLL_IMPULSE
+                };
 
-                    // Drain all pending scroll events and accumulate impulse
-                    let mut impulse: f64 = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                        SCROLL_IMPULSE
-                    } else {
-                        -SCROLL_IMPULSE
-                    };
-
-                    // Consume any additional queued scroll events
-                    while event::poll(Duration::ZERO).unwrap_or(false) {
-                        if let Ok(Event::Mouse(m)) = event::read() {
-                            match m.kind {
-                                MouseEventKind::ScrollDown => impulse += SCROLL_IMPULSE,
-                                MouseEventKind::ScrollUp => impulse -= SCROLL_IMPULSE,
-                                _ => break,
-                            }
-                        } else {
-                            break;
+                // Consume any additional queued scroll events
+                while event::poll(Duration::ZERO).unwrap_or(false) {
+                    if let Ok(Event::Mouse(m)) = event::read() {
+                        match m.kind {
+                            MouseEventKind::ScrollDown => impulse += SCROLL_IMPULSE,
+                            MouseEventKind::ScrollUp => impulse -= SCROLL_IMPULSE,
+                            _ => break,
                         }
-                    }
-
-                    // Add to velocity (with some resistance if already moving opposite direction)
-                    if self.scroll_velocity.signum() != impulse.signum() {
-                        self.scroll_velocity = impulse; // Override if changing direction
                     } else {
-                        self.scroll_velocity += impulse * 0.5; // Diminishing returns when scrolling same direction
+                        break;
                     }
-
-                    // Cap maximum velocity
-                    const MAX_VELOCITY: f64 = 25.0;
-                    self.scroll_velocity = self.scroll_velocity.clamp(-MAX_VELOCITY, MAX_VELOCITY);
                 }
+
+                // Add to velocity (with some resistance if already moving opposite direction)
+                if self.scroll_velocity.signum() != impulse.signum() {
+                    self.scroll_velocity = impulse; // Override if changing direction
+                } else {
+                    self.scroll_velocity += impulse * 0.5; // Diminishing returns when scrolling same direction
+                }
+
+                // Cap maximum velocity
+                const MAX_VELOCITY: f64 = 25.0;
+                self.scroll_velocity = self.scroll_velocity.clamp(-MAX_VELOCITY, MAX_VELOCITY);
             }
             _ => {}
         }
@@ -599,6 +608,8 @@ impl App {
             self.state.summary_state = Some(SummaryState::Loading);
             self.state.summary_scroll = 0;
             self.state.summary_video_title = Some(video_title.clone());
+            // Disable mouse capture to allow text selection in modal
+            crossterm::execute!(self.terminal.backend_mut(), DisableMouseCapture)?;
             self.needs_redraw = true;
 
             // Draw loading state
