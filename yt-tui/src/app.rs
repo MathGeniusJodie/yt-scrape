@@ -363,8 +363,14 @@ impl App {
                             if mouse.column >= start && mouse.column < end {
                                 self.state.current_tab = tab;
                                 self.set_scroll_offset(0);
-                                self.state.selected_index = None;
-                                self.selection_indicator.hide();
+                                // Select first video in new tab, or hide selection if empty
+                                if self.state.current_videos().is_empty() {
+                                    self.state.selected_index = None;
+                                    self.selection_indicator.hide();
+                                } else {
+                                    self.state.selected_index = Some(0);
+                                    self.sync_selection_indicator();
+                                }
                                 self.needs_redraw = true;
                                 tab_clicked = true;
                                 break;
@@ -632,8 +638,14 @@ impl App {
             Tab::WatchLater => Tab::Feed,
         };
         self.set_scroll_offset(0);
-        self.state.selected_index = None;
-        self.selection_indicator.hide();
+        // Select first video in new tab, or hide selection if empty
+        if self.state.current_videos().is_empty() {
+            self.state.selected_index = None;
+            self.selection_indicator.hide();
+        } else {
+            self.state.selected_index = Some(0);
+            self.sync_selection_indicator();
+        }
         self.needs_redraw = true;
     }
 
