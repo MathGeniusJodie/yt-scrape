@@ -150,7 +150,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let watch_later_badge = badges[watch_later_count.min(badges.len() - 1)];
     let mut watch_later_label = " Watch Later ".to_string();
     watch_later_label.push_str(watch_later_badge);
-    if watch_later_label.len() > 20 {
+    if watch_later_count > 20 {
         watch_later_label.push_str("✚");
     } else {
         watch_later_label.push_str("  ");
