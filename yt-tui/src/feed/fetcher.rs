@@ -37,7 +37,7 @@ pub async fn fetch_all_feeds(
         .build()?;
 
     // Limit concurrent requests
-    let semaphore = Arc::new(Semaphore::new(10));
+    let semaphore = Arc::new(Semaphore::new(100));
     let mut handles = Vec::new();
 
     for channel_id in channel_ids {
