@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use termimad::{MadSkin, StyledChar};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
-use crate::data::AppState;
+use crate::data::{AppState, TranscriptState};
 use crate::gemini::SummaryState;
 
 use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
@@ -333,8 +333,26 @@ pub fn render_transcript(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let inner = block.inner(modal_area);
 
-    match &state.transcript_content {
-        Some(transcript) => {
+    match &state.transcript_state {
+        Some(TranscriptState::Loading) => {
+            let loading_text = vec![
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Loading transcript...",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Downloading transcript from YouTube",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            let paragraph = Paragraph::new(loading_text)
+                .block(block)
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(paragraph, modal_area);
+        }
+        Some(TranscriptState::Ready(transcript)) => {
             // Render the block first
             frame.render_widget(block, modal_area);
 
@@ -419,29 +437,28 @@ pub fn render_transcript(frame: &mut Frame, state: &AppState, area: Rect) {
                 hint_area,
             );
         }
-        None => {
-            // No transcript available
-            let no_transcript_text = vec![
+        Some(TranscriptState::Error(err)) => {
+            let error_text = vec![
                 Line::raw(""),
                 Line::from(Span::styled(
-                    "No transcript available",
-                    Style::default().fg(Color::Yellow),
+                    "Error loading transcript",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )),
                 Line::raw(""),
-                Line::from(Span::styled(
-                    "Transcript is still downloading or not available for this video",
-                    Style::default().fg(Color::DarkGray),
-                )),
+                Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))),
                 Line::raw(""),
                 Line::from(Span::styled(
                     "Press Esc to close",
                     Style::default().fg(Color::DarkGray),
                 )),
             ];
-            let paragraph = Paragraph::new(no_transcript_text)
+            let paragraph = Paragraph::new(error_text)
                 .block(block)
                 .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(paragraph, modal_area);
+        }
+        None => {
+            frame.render_widget(block, modal_area);
         }
     }
 }

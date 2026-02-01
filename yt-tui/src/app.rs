@@ -1,5 +1,5 @@
 use crate::cache::{download_video, fetch_transcript, Storage, ThumbnailCache};
-use crate::data::{AppState, Tab};
+use crate::data::{AppState, Tab, TranscriptState};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use crate::gemini::{summarize_video_streaming, StreamingMessage, SummaryState};
 use crate::player;
@@ -96,8 +96,7 @@ impl App {
         self.queue_thumbnail_downloads().await;
         // Start video downloads for watch later items
         self.queue_watch_later_downloads();
-        // Start transcript downloads for videos without transcripts
-        self.queue_transcript_downloads();
+        // Transcripts are downloaded on-demand when the user clicks the transcript button
         // Initialize selection indicator for the first video
         self.sync_selection_indicator();
 
@@ -112,14 +111,38 @@ impl App {
 
             // Check for completed transcript downloads
             while let Ok((video_id, transcript)) = self.transcript_rx.try_recv() {
-                if let Some(video) = self
-                    .state
-                    .videos
-                    .iter_mut()
-                    .find(|v| v.video_id == video_id)
-                {
-                    video.transcript = Some(transcript);
-                    let _ = self.storage.save_videos(&self.state.videos);
+                // Check if this is an error message
+                let is_error = transcript.starts_with("__ERROR__:");
+
+                if is_error {
+                    // If the modal is open for this video, show the error
+                    if self.state.show_transcript
+                        && self.state.transcript_video_id.as_ref() == Some(&video_id)
+                    {
+                        let error_msg = transcript.strip_prefix("__ERROR__:").unwrap_or(&transcript);
+                        self.state.transcript_state =
+                            Some(TranscriptState::Error(error_msg.to_string()));
+                        self.needs_redraw = true;
+                    }
+                } else {
+                    // Store transcript in video
+                    if let Some(video) = self
+                        .state
+                        .videos
+                        .iter_mut()
+                        .find(|v| v.video_id == video_id)
+                    {
+                        video.transcript = Some(transcript.clone());
+                        let _ = self.storage.save_videos(&self.state.videos);
+                    }
+
+                    // If the modal is open for this video, update the content
+                    if self.state.show_transcript
+                        && self.state.transcript_video_id.as_ref() == Some(&video_id)
+                    {
+                        self.state.transcript_state = Some(TranscriptState::Ready(transcript));
+                    }
+
                     self.needs_redraw = true;
                 }
             }
@@ -183,13 +206,18 @@ impl App {
                 self.needs_redraw = false;
             }
 
-            // Use shorter poll timeout when animating or streaming
+            // Use shorter poll timeout when animating, streaming, or loading transcript
             let is_streaming = self.summary_stream_rx.is_some();
+            let is_loading_transcript = matches!(
+                self.state.transcript_state,
+                Some(TranscriptState::Loading)
+            );
             let poll_timeout = if self.scroll_velocity.abs() > 0.5
                 || self.selection_indicator.is_animating()
                 || is_streaming
+                || is_loading_transcript
             {
-                Duration::from_millis(16) // ~60fps during animation/streaming
+                Duration::from_millis(16) // ~60fps during animation/streaming/loading
             } else {
                 Duration::from_millis(100) // idle
             };
@@ -315,7 +343,7 @@ impl App {
                 }
                 KeyCode::Char('y') => {
                     // Copy transcript to clipboard
-                    if let Some(transcript) = &self.state.transcript_content {
+                    if let Some(TranscriptState::Ready(transcript)) = &self.state.transcript_state {
                         if let Ok(mut clipboard) = Clipboard::new() {
                             let _ = clipboard.set_text(transcript.clone());
                         }
@@ -726,9 +754,10 @@ impl App {
     /// Close the transcript modal
     fn close_transcript_modal(&mut self) {
         self.state.show_transcript = false;
-        self.state.transcript_content = None;
+        self.state.transcript_state = None;
         self.state.transcript_scroll = 0;
         self.state.transcript_video_title = None;
+        self.state.transcript_video_id = None;
         self.needs_redraw = true;
     }
 
@@ -815,16 +844,47 @@ impl App {
     }
 
     fn show_video_transcript(&mut self, idx: usize) -> Result<()> {
-        let videos = self.state.current_videos();
-        if let Some(video) = videos.get(idx) {
-            let video_title = video.title.clone();
-            let transcript = video.transcript.clone();
+        // Extract data we need before modifying state
+        let video_data = {
+            let videos = self.state.current_videos();
+            videos.get(idx).map(|v| {
+                (
+                    v.video_id.clone(),
+                    v.title.clone(),
+                    v.transcript.clone(),
+                )
+            })
+        };
 
-            // Show modal with transcript content (or message if not available)
+        if let Some((video_id, video_title, transcript)) = video_data {
+            // Show modal
             self.state.show_transcript = true;
             self.state.transcript_scroll = 0;
             self.state.transcript_video_title = Some(video_title);
-            self.state.transcript_content = transcript;
+            self.state.transcript_video_id = Some(video_id.clone());
+
+            // Check if transcript already exists
+            if let Some(transcript) = transcript {
+                self.state.transcript_state = Some(TranscriptState::Ready(transcript));
+            } else {
+                // Show loading state and start download
+                self.state.transcript_state = Some(TranscriptState::Loading);
+
+                // Start transcript download in background
+                let work_dir = self.storage.transcripts_work_dir().clone();
+                let tx = self.transcript_tx.clone();
+                tokio::spawn(async move {
+                    match fetch_transcript(&video_id, &work_dir).await {
+                        Ok(transcript) => {
+                            let _ = tx.send((video_id, transcript));
+                        }
+                        Err(e) => {
+                            // Send error through the channel
+                            let _ = tx.send((video_id, format!("__ERROR__:{}", e)));
+                        }
+                    }
+                });
+            }
             self.needs_redraw = true;
         }
         Ok(())
@@ -951,26 +1011,6 @@ impl App {
         }
     }
 
-    fn queue_transcript_downloads(&self) {
-        // Download transcripts for videos that don't have them yet
-        // Start with the most recent videos (they're already sorted by published date)
-        let work_dir = self.storage.transcripts_work_dir().clone();
-        let tx = self.transcript_tx.clone();
-
-        for video in &self.state.videos {
-            if video.transcript.is_none() {
-                let video_id = video.video_id.clone();
-                let work_dir = work_dir.clone();
-                let tx = tx.clone();
-
-                tokio::spawn(async move {
-                    if let Ok(transcript) = fetch_transcript(&video_id, &work_dir).await {
-                        let _ = tx.send((video_id, transcript));
-                    }
-                });
-            }
-        }
-    }
 }
 
 impl Drop for App {

@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// State of a transcript download/display
+#[derive(Debug, Clone)]
+pub enum TranscriptState {
+    Loading,
+    Ready(String),
+    Error(String),
+}
+
 /// A single video entry from a YouTube RSS feed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Video {
@@ -68,9 +76,10 @@ pub struct AppState {
     pub summary_video_title: Option<String>,
     // Transcript modal
     pub show_transcript: bool,
-    pub transcript_content: Option<String>,
+    pub transcript_state: Option<TranscriptState>,
     pub transcript_scroll: u16,
     pub transcript_video_title: Option<String>,
+    pub transcript_video_id: Option<String>, // Track which video we're loading for
 }
 
 impl Default for AppState {
@@ -92,9 +101,10 @@ impl Default for AppState {
             summary_scroll: 0,
             summary_video_title: None,
             show_transcript: false,
-            transcript_content: None,
+            transcript_state: None,
             transcript_scroll: 0,
             transcript_video_title: None,
+            transcript_video_id: None,
         }
     }
 }
