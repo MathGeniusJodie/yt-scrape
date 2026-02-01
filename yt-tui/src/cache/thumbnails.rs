@@ -149,7 +149,7 @@ impl ThumbnailCache {
         use std::process::Stdio;
 
         // Use ImageMagick to crop to 16:9 centered, then pipe to chafa
-        let convert = Command::new("convert")
+        let convert = Command::new("magick")
             .args([
                 path.to_str()?,
                 "-gravity",
@@ -163,7 +163,7 @@ impl ThumbnailCache {
             .spawn()
             .ok()?;
 
-        let bytes = Command::new("convert")
+        let bytes = Command::new("magick")
             .args(&[
                 path.to_str()?,
                 "-gravity",

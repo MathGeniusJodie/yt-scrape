@@ -95,8 +95,8 @@ pub async fn fetch_all_feeds(
     // Sort by published date (newest first)
     all_videos.sort_by(|a, b| b.published.cmp(&a.published));
 
-    // Keep only the most recent 100
-    all_videos.truncate(100);
+    // Keep only the most recent 400
+    all_videos.truncate(400);
 
     let total_videos = all_videos.len();
     tx.send(FetchProgress::AllComplete { total_videos }).await?;
