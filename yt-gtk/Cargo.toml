@@ -1,0 +1,50 @@
+[package]
+name = "yt-gtk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# GTK3
+gtk = "0.18"
+gdk = "0.18"
+gdk-pixbuf = "0.18"
+gio = "0.18"
+glib = "0.18"
+cairo-rs = "0.18"
+pango = "0.18"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["gzip", "stream", "json"] }
+
+# XML parsing for RSS
+quick-xml = "0.37"
+
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Directories
+directories = "5"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Futures utilities
+futures = "0.3"
+
+# Glob for file matching
+glob = "0.3"
+
+# Smart quotes
+smart_quotes = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1

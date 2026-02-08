@@ -2,4 +2,5 @@
 /youtube-feeds.xml
 youtube-feeds.json
 /yt-tui/target
+/yt-gtk/target
 /yt-tui/perf.data
