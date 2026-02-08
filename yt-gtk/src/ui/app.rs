@@ -100,38 +100,77 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let stack = Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
 
+    // Card dimensions for layout calculation
+    const CARD_WIDTH: i32 = 320;
+    const CARD_SPACING: i32 = 16;
+    const GRID_PADDING: i32 = 16;
+
     // Feed tab
     let feed_scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     feed_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
 
+    // Container to center the FlowBox
+    let feed_container = GtkBox::new(Orientation::Horizontal, 0);
+    feed_container.set_halign(gtk::Align::Center);
+    feed_container.set_valign(gtk::Align::Start);
+
     let feed_flow = FlowBox::new();
     feed_flow.set_widget_name("video-grid");
     feed_flow.set_valign(gtk::Align::Start);
+    feed_flow.set_halign(gtk::Align::Center);
     feed_flow.set_max_children_per_line(10);
     feed_flow.set_min_children_per_line(1);
     feed_flow.set_selection_mode(gtk::SelectionMode::Single);
     feed_flow.set_homogeneous(false);
-    feed_flow.set_column_spacing(16);
-    feed_flow.set_row_spacing(16);
+    feed_flow.set_column_spacing(CARD_SPACING as u32);
+    feed_flow.set_row_spacing(CARD_SPACING as u32);
 
-    feed_scroll.add(&feed_flow);
+    feed_container.pack_start(&feed_flow, false, false, 0);
+
+    // Dynamically adjust FlowBox width based on available space
+    let feed_flow_for_resize = feed_flow.clone();
+    feed_scroll.connect_size_allocate(move |_widget, allocation| {
+        let available_width = allocation.width() - GRID_PADDING * 2;
+        let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
+        let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
+        feed_flow_for_resize.set_size_request(optimal_width, -1);
+    });
+
+    feed_scroll.add(&feed_container);
     stack.add_titled(&feed_scroll, "feed", "Feed");
 
     // Watch Later tab
     let watch_later_scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     watch_later_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
 
+    // Container to center the FlowBox
+    let watch_later_container = GtkBox::new(Orientation::Horizontal, 0);
+    watch_later_container.set_halign(gtk::Align::Center);
+    watch_later_container.set_valign(gtk::Align::Start);
+
     let watch_later_flow = FlowBox::new();
     watch_later_flow.set_widget_name("video-grid");
     watch_later_flow.set_valign(gtk::Align::Start);
+    watch_later_flow.set_halign(gtk::Align::Center);
     watch_later_flow.set_max_children_per_line(10);
     watch_later_flow.set_min_children_per_line(1);
     watch_later_flow.set_selection_mode(gtk::SelectionMode::Single);
     watch_later_flow.set_homogeneous(false);
-    watch_later_flow.set_column_spacing(16);
-    watch_later_flow.set_row_spacing(16);
+    watch_later_flow.set_column_spacing(CARD_SPACING as u32);
+    watch_later_flow.set_row_spacing(CARD_SPACING as u32);
 
-    watch_later_scroll.add(&watch_later_flow);
+    watch_later_container.pack_start(&watch_later_flow, false, false, 0);
+
+    // Dynamically adjust FlowBox width based on available space
+    let watch_later_flow_for_resize = watch_later_flow.clone();
+    watch_later_scroll.connect_size_allocate(move |_widget, allocation| {
+        let available_width = allocation.width() - GRID_PADDING * 2;
+        let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
+        let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
+        watch_later_flow_for_resize.set_size_request(optimal_width, -1);
+    });
+
+    watch_later_scroll.add(&watch_later_container);
     stack.add_titled(&watch_later_scroll, "watch-later", "Watch Later");
 
     // Stack switcher
