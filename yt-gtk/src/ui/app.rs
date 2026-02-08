@@ -111,8 +111,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     feed_flow.set_min_children_per_line(1);
     feed_flow.set_selection_mode(gtk::SelectionMode::Single);
     feed_flow.set_homogeneous(false);
-    feed_flow.set_column_spacing(8);
-    feed_flow.set_row_spacing(8);
+    feed_flow.set_column_spacing(16);
+    feed_flow.set_row_spacing(16);
 
     feed_scroll.add(&feed_flow);
     stack.add_titled(&feed_scroll, "feed", "Feed");
@@ -128,8 +128,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     watch_later_flow.set_min_children_per_line(1);
     watch_later_flow.set_selection_mode(gtk::SelectionMode::Single);
     watch_later_flow.set_homogeneous(false);
-    watch_later_flow.set_column_spacing(8);
-    watch_later_flow.set_row_spacing(8);
+    watch_later_flow.set_column_spacing(16);
+    watch_later_flow.set_row_spacing(16);
 
     watch_later_scroll.add(&watch_later_flow);
     stack.add_titled(&watch_later_scroll, "watch-later", "Watch Later");
@@ -500,6 +500,14 @@ fn populate_flow_box(
         }));
 
         flow_box.add(&card);
+
+        // Configure the FlowBoxChild to not expand
+        if let Some(child) = card.parent() {
+            if let Ok(flow_child) = child.downcast::<gtk::FlowBoxChild>() {
+                flow_child.set_hexpand(false);
+                flow_child.set_halign(gtk::Align::Start);
+            }
+        }
     }
 
     flow_box.show_all();

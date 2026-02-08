@@ -26,7 +26,6 @@ headerbar {
 #video-card {
     background-color: @theme_base_color;
     border-radius: 8px;
-    padding: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     transition: box-shadow 200ms ease-in-out;
 }
@@ -35,18 +34,28 @@ headerbar {
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
 }
 
-/* Thumbnail */
+/* Thumbnail - edge to edge with rounded top corners */
 #thumbnail {
-    border-radius: 4px;
+    border-radius: 8px 8px 0 0;
     background-color: #333;
+    min-width: 320px;
+    min-height: 180px;
+}
+
+/* FlowBoxChild - prevent expansion */
+flowboxchild {
+    background: transparent;
+}
+
+flowboxchild:selected {
+    background-color: alpha(@theme_selected_bg_color, 0.3);
+    border-radius: 8px;
 }
 
 /* Video title */
 #video-title {
     font-weight: bold;
     font-size: 0.95em;
-    margin-top: 8px;
-    margin-bottom: 4px;
 }
 
 /* Video meta (channel + time) */

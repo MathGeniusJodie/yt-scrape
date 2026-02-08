@@ -2,8 +2,10 @@ use crate::data::Video;
 use chrono::Utc;
 use gdk_pixbuf::Pixbuf;
 use gtk::prelude::*;
-use gtk::{Align, EventBox, Image, Label, Orientation};
+use gtk::{Align, DrawingArea, EventBox, Label, Orientation};
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 /// Create a video card widget
 pub fn create_video_card(
@@ -17,33 +19,61 @@ pub fn create_video_card(
     event_box.set_hexpand(false);
     event_box.set_halign(Align::Start);
 
-    let card = gtk::Box::new(Orientation::Vertical, 4);
+    let card = gtk::Box::new(Orientation::Vertical, 0);
     card.set_widget_name("video-card");
     card.set_size_request(320, -1);
     card.set_hexpand(false);
-    card.set_margin_start(8);
-    card.set_margin_end(8);
-    card.set_margin_top(8);
-    card.set_margin_bottom(8);
+    card.set_halign(Align::Start);
 
-    // Thumbnail - 16:9 aspect ratio (320x180)
-    let thumbnail = if thumbnail_path.exists() {
-        // Load and crop to 16:9 (hqdefault is 480x360 = 4:3 with letterboxing)
-        match Pixbuf::from_file(thumbnail_path) {
-            Ok(pixbuf) => {
-                let cropped = crop_to_16_9(&pixbuf);
-                let scaled = cropped.scale_simple(320, 180, gdk_pixbuf::InterpType::Bilinear)
-                    .unwrap_or(cropped);
-                Image::from_pixbuf(Some(&scaled))
-            }
-            Err(_) => create_placeholder_image(),
-        }
-    } else {
-        create_placeholder_image()
-    };
+    // Thumbnail - 16:9 aspect ratio (320x180), edge-to-edge using DrawingArea
+    let thumbnail = DrawingArea::new();
     thumbnail.set_size_request(320, 180);
     thumbnail.set_widget_name("thumbnail");
+    thumbnail.set_hexpand(false);
+    thumbnail.set_vexpand(false);
+
+    // Load the pixbuf
+    let pixbuf: Rc<RefCell<Option<Pixbuf>>> = Rc::new(RefCell::new(None));
+    if thumbnail_path.exists() {
+        if let Ok(pb) = Pixbuf::from_file(thumbnail_path) {
+            let cropped = crop_to_16_9(&pb);
+            *pixbuf.borrow_mut() = Some(cropped);
+        }
+    }
+
+    let pixbuf_for_draw = pixbuf.clone();
+    thumbnail.connect_draw(move |widget, cr| {
+        let width = widget.allocated_width() as f64;
+        let height = widget.allocated_height() as f64;
+
+        if let Some(ref pb) = *pixbuf_for_draw.borrow() {
+            // Scale pixbuf to fill the entire area
+            let scale_x = width / pb.width() as f64;
+            let scale_y = height / pb.height() as f64;
+
+            cr.scale(scale_x, scale_y);
+            cr.set_source_pixbuf(pb, 0.0, 0.0);
+            cr.paint().ok();
+        } else {
+            // Draw placeholder background
+            cr.set_source_rgb(0.2, 0.2, 0.2);
+            cr.rectangle(0.0, 0.0, width, height);
+            cr.fill().ok();
+        }
+
+        glib::Propagation::Stop
+    });
+
     card.pack_start(&thumbnail, false, false, 0);
+
+    // Content box for text below thumbnail (with padding)
+    let content_box = gtk::Box::new(Orientation::Vertical, 4);
+    content_box.set_margin_start(8);
+    content_box.set_margin_end(8);
+    content_box.set_margin_top(8);
+    content_box.set_margin_bottom(8);
+    content_box.set_hexpand(false);
+    content_box.set_size_request(304, -1); // 320 - 16px margins
 
     // Title - always 2 lines
     let title_text = format_two_line_title(&video.title);
@@ -54,9 +84,9 @@ pub fn create_video_card(
     title_label.set_lines(2);
     title_label.set_ellipsize(pango::EllipsizeMode::End);
     title_label.set_xalign(0.0);
-    title_label.set_width_chars(38);
-    title_label.set_max_width_chars(38);
-    card.pack_start(&title_label, false, false, 0);
+    title_label.set_width_chars(36);
+    title_label.set_max_width_chars(36);
+    content_box.pack_start(&title_label, false, false, 0);
 
     // Channel name and time
     let meta_box = gtk::Box::new(Orientation::Horizontal, 8);
@@ -74,7 +104,7 @@ pub fn create_video_card(
     time_label.set_widget_name("time-ago");
     meta_box.pack_end(&time_label, false, false, 0);
 
-    card.pack_start(&meta_box, false, false, 0);
+    content_box.pack_start(&meta_box, false, false, 0);
 
     // Status indicators
     let status_box = gtk::Box::new(Orientation::Horizontal, 4);
@@ -92,16 +122,12 @@ pub fn create_video_card(
         status_box.pack_end(&watch_later_label, false, false, 0);
     }
 
-    card.pack_start(&status_box, false, false, 0);
+    content_box.pack_start(&status_box, false, false, 0);
+
+    card.pack_start(&content_box, false, false, 0);
 
     event_box.add(&card);
     event_box
-}
-
-fn create_placeholder_image() -> Image {
-    let image = Image::from_icon_name(Some("video-x-generic"), gtk::IconSize::Dialog);
-    image.set_size_request(320, 180);
-    image
 }
 
 /// Crop a pixbuf to 16:9 aspect ratio (center crop)
