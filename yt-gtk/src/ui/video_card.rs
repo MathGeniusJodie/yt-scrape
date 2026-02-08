@@ -45,6 +45,16 @@ pub fn create_video_card(
     thumbnail.connect_draw(move |widget, cr| {
         let width = widget.allocated_width() as f64;
         let height = widget.allocated_height() as f64;
+        let radius = 8.0; // Corner radius matching the card
+
+        // Create clipping path with rounded top corners
+        cr.new_path();
+        cr.arc(radius, radius, radius, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+        cr.arc(width - radius, radius, radius, 1.5 * std::f64::consts::PI, 2.0 * std::f64::consts::PI);
+        cr.line_to(width, height);
+        cr.line_to(0.0, height);
+        cr.close_path();
+        cr.clip();
 
         if let Some(ref pb) = *pixbuf_for_draw.borrow() {
             // Scale uniformly to cover the area (both image and area are 16:9)
