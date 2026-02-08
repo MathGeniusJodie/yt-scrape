@@ -8,12 +8,13 @@ use std::path::Path;
 use std::rc::Rc;
 
 /// Create a video card widget
+/// Returns the card EventBox and the watch later toggle button
 pub fn create_video_card(
     video: &Video,
     thumbnail_path: &Path,
     is_watch_later: bool,
     is_downloaded: bool,
-) -> EventBox {
+) -> (EventBox, gtk::Button) {
     let event_box = EventBox::new();
     event_box.set_above_child(false);
     event_box.set_hexpand(false);
@@ -122,9 +123,29 @@ pub fn create_video_card(
 
     content_box.pack_start(&meta_box, false, false, 0);
 
-    // Status indicators
+    // Status row with toggle and indicators
     let status_box = gtk::Box::new(Orientation::Horizontal, 4);
-    status_box.set_halign(Align::End);
+    status_box.set_halign(Align::Fill);
+
+    // Watch later toggle button
+    let watch_later_toggle = gtk::Button::new();
+    watch_later_toggle.set_widget_name(if is_watch_later {
+        "watch-later-toggle-active"
+    } else {
+        "watch-later-toggle"
+    });
+    watch_later_toggle.set_label(if is_watch_later { "✓" } else { "+" });
+    watch_later_toggle.set_tooltip_text(Some(if is_watch_later {
+        "Remove from Watch Later"
+    } else {
+        "Add to Watch Later"
+    }));
+    status_box.pack_start(&watch_later_toggle, false, false, 0);
+
+    // Spacer
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    status_box.pack_start(&spacer, true, true, 0);
 
     if is_downloaded {
         let downloaded_label = Label::new(Some("Downloaded"));
@@ -132,18 +153,12 @@ pub fn create_video_card(
         status_box.pack_end(&downloaded_label, false, false, 0);
     }
 
-    if is_watch_later {
-        let watch_later_label = Label::new(Some("Watch Later"));
-        watch_later_label.set_widget_name("status-watch-later");
-        status_box.pack_end(&watch_later_label, false, false, 0);
-    }
-
     content_box.pack_start(&status_box, false, false, 0);
 
     card.pack_start(&content_box, false, false, 0);
 
     event_box.add(&card);
-    event_box
+    (event_box, watch_later_toggle)
 }
 
 /// Crop a pixbuf to 16:9 aspect ratio (center crop)

@@ -11,7 +11,7 @@ use glib::clone;
 use gtk::prelude::*;
 use gtk::{
     Application, ApplicationWindow, Box as GtkBox, Button, FlowBox, HeaderBar, Label,
-    Orientation, Popover, ScrolledWindow, Spinner, Stack, StackSwitcher,
+    Orientation, Popover, ScrolledWindow, Spinner, Stack,
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -182,10 +182,61 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     watch_later_scroll.add(&watch_later_container);
     stack.add_titled(&watch_later_scroll, "watch-later", "Watch Later");
 
-    // Stack switcher
-    let stack_switcher = StackSwitcher::new();
-    stack_switcher.set_stack(Some(&stack));
-    header.set_custom_title(Some(&stack_switcher));
+    // Custom tab bar with stylish badge
+    let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
+    tab_bar.set_widget_name("tab-bar");
+    tab_bar.style_context().add_class("linked");
+
+    // Feed tab button
+    let feed_tab = gtk::ToggleButton::with_label("Feed");
+    feed_tab.set_widget_name("tab-feed");
+    feed_tab.set_active(true);
+    tab_bar.pack_start(&feed_tab, false, false, 0);
+
+    // Watch Later tab button with badge
+    let watch_later_tab = gtk::ToggleButton::new();
+    watch_later_tab.set_widget_name("tab-watch-later");
+
+    let wl_tab_box = GtkBox::new(Orientation::Horizontal, 6);
+    let wl_tab_label = Label::new(Some("Watch Later"));
+    wl_tab_box.pack_start(&wl_tab_label, false, false, 0);
+
+    let wl_badge = Label::new(None);
+    wl_badge.set_widget_name("watch-later-badge");
+    wl_tab_box.pack_start(&wl_badge, false, false, 0);
+
+    watch_later_tab.add(&wl_tab_box);
+    tab_bar.pack_start(&watch_later_tab, false, false, 0);
+
+    header.set_custom_title(Some(&tab_bar));
+
+    // Connect tab buttons to stack
+    {
+        let stack = stack.clone();
+        let watch_later_tab = watch_later_tab.clone();
+        let feed_scroll = feed_scroll.clone();
+        feed_tab.connect_toggled(move |btn| {
+            if btn.is_active() {
+                stack.set_visible_child_name("feed");
+                watch_later_tab.set_active(false);
+                // Trigger column recalculation
+                feed_scroll.queue_resize();
+            }
+        });
+    }
+    {
+        let stack = stack.clone();
+        let feed_tab = feed_tab.clone();
+        let watch_later_scroll = watch_later_scroll.clone();
+        watch_later_tab.connect_toggled(move |btn| {
+            if btn.is_active() {
+                stack.set_visible_child_name("watch-later");
+                feed_tab.set_active(false);
+                // Trigger column recalculation
+                watch_later_scroll.queue_resize();
+            }
+        });
+    }
 
     main_box.pack_start(&stack, true, true, 0);
     window.add(&main_box);
@@ -198,11 +249,13 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         runtime.clone(),
         feed_flow.clone(),
         watch_later_flow.clone(),
+        wl_badge.clone(),
     );
 
-    // Populate initial videos
-    populate_flow_box(&feed_flow, &state.borrow(), Tab::Feed, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
-    populate_flow_box(&watch_later_flow, &state.borrow(), Tab::WatchLater, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+    // Set initial badge and populate videos
+    update_watch_later_badge(&wl_badge, state.borrow().watch_later.len());
+    populate_flow_box(&feed_flow, &state.borrow(), Tab::Feed, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
+    populate_flow_box(&watch_later_flow, &state.borrow(), Tab::WatchLater, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
 
     // Track tab changes
     {
@@ -230,6 +283,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let window = window.clone();
         let runtime = runtime.clone();
         let selected_video = selected_video.clone();
+        let wl_badge = wl_badge.clone();
 
         refresh_button.connect_clicked(move |_| {
             let state_clone = state.clone();
@@ -241,6 +295,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             let window = window.clone();
             let runtime = runtime.clone();
             let selected_video = selected_video.clone();
+            let wl_badge = wl_badge.clone();
 
             spinner.start();
             status_label.set_text("Refreshing...");
@@ -317,6 +372,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             let window2 = window.clone();
             let runtime2 = runtime.clone();
             let selected_video2 = selected_video.clone();
+            let wl_badge2 = wl_badge.clone();
             videos_rx.attach(None, move |videos| {
                 // Save to storage and update state
                 let mut state = state_clone.borrow_mut();
@@ -329,8 +385,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 // Repopulate flow boxes
                 drop(state);
                 let state_ref = state_clone.borrow();
-                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
-                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
+                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
 
                 // Schedule a refresh after thumbnails have had time to download
                 let state_clone2 = state_clone.clone();
@@ -340,10 +396,11 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 let window = window2.clone();
                 let runtime = runtime2.clone();
                 let selected_video = selected_video2.clone();
+                let wl_badge = wl_badge2.clone();
                 glib::timeout_add_seconds_local_once(3, move || {
                     let state_ref = state_clone2.borrow();
-                    populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
-                    populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+                    populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
+                    populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
                 });
 
                 glib::ControlFlow::Continue
@@ -367,6 +424,7 @@ fn create_context_menu(
     runtime: Arc<Runtime>,
     feed_flow: FlowBox,
     watch_later_flow: FlowBox,
+    badge: Label,
 ) -> Popover {
     let popover = Popover::new(None::<&gtk::Widget>);
 
@@ -420,6 +478,7 @@ fn create_context_menu(
         let feed_flow = feed_flow.clone();
         let watch_later_flow = watch_later_flow.clone();
         let window = window.clone();
+        let badge = badge.clone();
         watch_later_button.connect_clicked(move |_| {
             if let Some(ref video) = selected_video.borrow().clone() {
                 {
@@ -448,10 +507,11 @@ fn create_context_menu(
                 }
                 popover_clone.popdown();
 
-                // Refresh both flow boxes
+                // Update badge and refresh both flow boxes
                 let state_ref = state_rc.borrow();
-                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
-                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+                update_watch_later_badge(&badge, state_ref.watch_later.len());
+                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &badge);
+                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &badge);
             }
         });
     }
@@ -493,10 +553,11 @@ fn populate_flow_box(
     context_menu: &Popover,
     state_rc: &Rc<RefCell<AppState>>,
     _window: &ApplicationWindow,
-    _runtime: Arc<Runtime>,
-    _feed_flow: FlowBox,
-    _watch_later_flow: FlowBox,
+    runtime: Arc<Runtime>,
+    feed_flow: FlowBox,
+    watch_later_flow: FlowBox,
     selected_video: &Rc<RefCell<Option<SelectedVideo>>>,
+    badge: &Label,
 ) {
     // Clear existing children
     flow_box.foreach(|child| {
@@ -517,7 +578,7 @@ fn populate_flow_box(
         let is_watch_later = state.watch_later.contains(&video.video_id);
         let is_downloaded = state.storage.has_video(&video.video_id);
 
-        let card = create_video_card(video, &thumbnail_path, is_watch_later, is_downloaded);
+        let (card, watch_later_toggle) = create_video_card(video, &thumbnail_path, is_watch_later, is_downloaded);
 
         let video_id = video.video_id.clone();
         let video_title = video.title.clone();
@@ -526,6 +587,18 @@ fn populate_flow_box(
         let context_menu = context_menu.clone();
         let state_rc = state_rc.clone();
         let selected_video = selected_video.clone();
+
+        // Clone for watch later toggle (before button_press_event moves them)
+        let wl_video_id = video_id.clone();
+        let wl_video_title = video_title.clone();
+        let wl_state_rc = state_rc.clone();
+        let wl_runtime = runtime.clone();
+        let wl_feed_flow = feed_flow.clone();
+        let wl_watch_later_flow = watch_later_flow.clone();
+        let wl_context_menu = context_menu.clone();
+        let wl_window = _window.clone();
+        let wl_selected_video = selected_video.clone();
+        let wl_badge = badge.clone();
 
         // Double-click to play, right-click for context menu
         card.connect_button_press_event(clone!(@strong video_id, @strong video_title, @strong state_rc => move |widget, event| {
@@ -555,6 +628,40 @@ fn populate_flow_box(
             glib::Propagation::Proceed
         }));
 
+        // Watch later toggle button handler
+        watch_later_toggle.connect_clicked(move |_| {
+            {
+                let mut state = wl_state_rc.borrow_mut();
+                if state.watch_later.contains(&wl_video_id) {
+                    state.watch_later.remove(&wl_video_id);
+                } else {
+                    state.watch_later.insert(wl_video_id.clone());
+
+                    // Start download if not already downloaded
+                    if !state.storage.has_video(&wl_video_id) {
+                        let video_path = state.storage.video_path(&wl_video_id, &wl_video_title);
+                        let video_id = wl_video_id.clone();
+                        let runtime = wl_runtime.clone();
+
+                        std::thread::spawn(move || {
+                            runtime.block_on(async {
+                                if let Err(e) = download_video(&video_id, &video_path).await {
+                                    eprintln!("Failed to download video: {}", e);
+                                }
+                            });
+                        });
+                    }
+                }
+                let _ = state.storage.save_watch_later(&state.watch_later);
+            }
+
+            // Update badge and refresh UI
+            let state_ref = wl_state_rc.borrow();
+            update_watch_later_badge(&wl_badge, state_ref.watch_later.len());
+            populate_flow_box(&wl_feed_flow, &state_ref, Tab::Feed, &wl_context_menu, &wl_state_rc, &wl_window, wl_runtime.clone(), wl_feed_flow.clone(), wl_watch_later_flow.clone(), &wl_selected_video, &wl_badge);
+            populate_flow_box(&wl_watch_later_flow, &state_ref, Tab::WatchLater, &wl_context_menu, &wl_state_rc, &wl_window, wl_runtime.clone(), wl_feed_flow.clone(), wl_watch_later_flow.clone(), &wl_selected_video, &wl_badge);
+        });
+
         flow_box.add(&card);
 
         // Configure the FlowBoxChild to not expand
@@ -567,6 +674,15 @@ fn populate_flow_box(
     }
 
     flow_box.show_all();
+}
+
+fn update_watch_later_badge(badge: &Label, count: usize) {
+    if count > 0 {
+        badge.set_text(&count.to_string());
+        badge.show();
+    } else {
+        badge.hide();
+    }
 }
 
 fn download_missing_thumbnails(videos: &[Video], storage: &Storage) {

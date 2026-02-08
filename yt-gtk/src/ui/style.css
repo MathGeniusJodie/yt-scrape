@@ -73,6 +73,36 @@ flowboxchild:selected {
     opacity: 0.6;
 }
 
+/* Watch later toggle button */
+#watch-later-toggle,
+#watch-later-toggle-active {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    border-radius: 12px;
+    font-size: 0.9em;
+    font-weight: bold;
+}
+
+#watch-later-toggle {
+    background-color: alpha(@theme_fg_color, 0.1);
+    color: @theme_fg_color;
+}
+
+#watch-later-toggle:hover {
+    background-color: alpha(@theme_selected_bg_color, 0.3);
+    color: @theme_selected_bg_color;
+}
+
+#watch-later-toggle-active {
+    background-color: @theme_selected_bg_color;
+    color: @theme_base_color;
+}
+
+#watch-later-toggle-active:hover {
+    background-color: alpha(@theme_selected_bg_color, 0.8);
+}
+
 /* Status indicators */
 #status-watch-later {
     font-size: 0.75em;
@@ -101,10 +131,27 @@ popover button {
     min-width: 150px;
 }
 
-/* Stack switcher tabs */
-stackswitcher button {
-    padding: 8px 24px;
+/* Custom tab bar */
+#tab-bar {
+    margin: 0 8px;
+}
+
+#tab-bar button {
+    padding: 6px 16px;
     font-weight: 500;
+    border-radius: 6px;
+}
+
+/* Watch later badge - pill shape */
+#watch-later-badge {
+    background-color: @theme_selected_bg_color;
+    color: @theme_base_color;
+    font-size: 0.75em;
+    font-weight: bold;
+    min-width: 8px;
+    min-height: 16px;
+    padding: 1px 6px;
+    border-radius: 10px;
 }
 
 /* Dialogs */
