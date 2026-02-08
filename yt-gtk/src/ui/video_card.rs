@@ -25,14 +25,14 @@ pub fn create_video_card(
     card.set_hexpand(false);
     card.set_halign(Align::Start);
 
-    // Thumbnail - 16:9 aspect ratio (320x180), edge-to-edge using DrawingArea
+    // Thumbnail - 16:9 aspect ratio, fills card width using DrawingArea
     let thumbnail = DrawingArea::new();
-    thumbnail.set_size_request(320, 180);
+    thumbnail.set_size_request(-1, 180); // Let width be determined by card
     thumbnail.set_widget_name("thumbnail");
-    thumbnail.set_hexpand(false);
+    thumbnail.set_hexpand(true); // Expand to fill card width
     thumbnail.set_vexpand(false);
 
-    // Load the pixbuf
+    // Load the cropped 16:9 pixbuf
     let pixbuf: Rc<RefCell<Option<Pixbuf>>> = Rc::new(RefCell::new(None));
     if thumbnail_path.exists() {
         if let Ok(pb) = Pixbuf::from_file(thumbnail_path) {
@@ -47,11 +47,17 @@ pub fn create_video_card(
         let height = widget.allocated_height() as f64;
 
         if let Some(ref pb) = *pixbuf_for_draw.borrow() {
-            // Scale pixbuf to fill the entire area
-            let scale_x = width / pb.width() as f64;
-            let scale_y = height / pb.height() as f64;
+            // Scale uniformly to cover the area (both image and area are 16:9)
+            let scale = (width / pb.width() as f64).max(height / pb.height() as f64);
+            let scaled_w = pb.width() as f64 * scale;
+            let scaled_h = pb.height() as f64 * scale;
 
-            cr.scale(scale_x, scale_y);
+            // Center the scaled image
+            let x_offset = (width - scaled_w) / 2.0;
+            let y_offset = (height - scaled_h) / 2.0;
+
+            cr.translate(x_offset, y_offset);
+            cr.scale(scale, scale);
             cr.set_source_pixbuf(pb, 0.0, 0.0);
             cr.paint().ok();
         } else {
