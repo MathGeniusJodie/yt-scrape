@@ -11,6 +11,10 @@ use gtk::Application;
 use std::path::PathBuf;
 
 fn main() {
+    // Set program name for desktop environment integration
+    glib::set_prgname(Some("yt-gtk"));
+    glib::set_application_name("yt-gtk");
+
     // Find the subs file
     let subs_file = match find_subs_file() {
         Ok(path) => path,

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=yt-gtk
+Comment=YouTube feed viewer
+Exec=yt-gtk
+Icon=video-x-generic
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;Network;
+StartupWMClass=com.github.yt-gtk
