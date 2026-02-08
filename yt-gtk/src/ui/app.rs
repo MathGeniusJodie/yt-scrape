@@ -86,9 +86,10 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     header.set_show_close_button(true);
     header.set_title(Some("yt-gtk"));
 
-    // Refresh button
-    let refresh_button = Button::with_label("Refresh");
+    // Refresh button with icon
+    let refresh_button = Button::from_icon_name(Some("view-refresh-symbolic"), gtk::IconSize::Button);
     refresh_button.set_widget_name("refresh-button");
+    refresh_button.set_tooltip_text(Some("Refresh feeds"));
     header.pack_start(&refresh_button);
 
     // Status label
