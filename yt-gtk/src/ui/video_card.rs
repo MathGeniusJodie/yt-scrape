@@ -45,15 +45,17 @@ pub fn create_video_card(
     thumbnail.set_widget_name("thumbnail");
     card.pack_start(&thumbnail, false, false, 0);
 
-    // Title
-    let title_label = Label::new(Some(&video.title));
+    // Title - always 2 lines
+    let title_text = format_two_line_title(&video.title);
+    let title_label = Label::new(Some(&title_text));
     title_label.set_widget_name("video-title");
     title_label.set_line_wrap(true);
     title_label.set_line_wrap_mode(pango::WrapMode::WordChar);
     title_label.set_lines(2);
     title_label.set_ellipsize(pango::EllipsizeMode::End);
     title_label.set_xalign(0.0);
-    title_label.set_max_width_chars(40);
+    title_label.set_width_chars(38);
+    title_label.set_max_width_chars(38);
     card.pack_start(&title_label, false, false, 0);
 
     // Channel name and time
@@ -124,6 +126,22 @@ fn crop_to_16_9(pixbuf: &Pixbuf) -> Pixbuf {
     };
 
     pixbuf.new_subpixbuf(crop_x, crop_y, crop_width, crop_height)
+}
+
+/// Format title to always occupy 2 lines
+/// - Short titles get an em dash on the second line
+/// - Long titles wrap and get ellipsized if > 2 lines
+fn format_two_line_title(title: &str) -> String {
+    // Approximate characters that fit on one line at 320px width
+    const CHARS_PER_LINE: usize = 38;
+
+    if title.chars().count() <= CHARS_PER_LINE {
+        // Short title - add em dash on second line
+        format!("{}\n—", title)
+    } else {
+        // Long title - let it wrap naturally (will be ellipsized if > 2 lines)
+        title.to_string()
+    }
 }
 
 fn format_time_ago(dt: &chrono::DateTime<Utc>) -> String {

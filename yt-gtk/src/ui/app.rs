@@ -110,7 +110,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     feed_flow.set_max_children_per_line(10);
     feed_flow.set_min_children_per_line(1);
     feed_flow.set_selection_mode(gtk::SelectionMode::Single);
-    feed_flow.set_homogeneous(true);
+    feed_flow.set_homogeneous(false);
     feed_flow.set_column_spacing(8);
     feed_flow.set_row_spacing(8);
 
@@ -127,7 +127,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     watch_later_flow.set_max_children_per_line(10);
     watch_later_flow.set_min_children_per_line(1);
     watch_later_flow.set_selection_mode(gtk::SelectionMode::Single);
-    watch_later_flow.set_homogeneous(true);
+    watch_later_flow.set_homogeneous(false);
     watch_later_flow.set_column_spacing(8);
     watch_later_flow.set_row_spacing(8);
 
