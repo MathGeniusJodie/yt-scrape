@@ -27,8 +27,15 @@ struct AppState {
     current_tab: Tab,
     storage: Storage,
     subs_file: PathBuf,
-    #[allow(dead_code)]
-    selected_video_id: Option<String>,
+}
+
+/// Info about the currently selected video (for context menu actions)
+#[derive(Clone)]
+struct SelectedVideo {
+    video_id: String,
+    video_title: String,
+    video_url: String,
+    channel_name: String,
 }
 
 pub fn build_ui(app: &Application, subs_file: PathBuf) {
@@ -48,8 +55,10 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         current_tab: Tab::Feed,
         storage,
         subs_file,
-        selected_video_id: None,
     }));
+
+    // Selected video for context menu actions
+    let selected_video: Rc<RefCell<Option<SelectedVideo>>> = Rc::new(RefCell::new(None));
 
     // Create main window
     let window = ApplicationWindow::builder()
@@ -181,12 +190,19 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     main_box.pack_start(&stack, true, true, 0);
     window.add(&main_box);
 
-    // Create context menu
-    let context_menu = create_context_menu();
+    // Create context menu with handlers connected once
+    let context_menu = create_context_menu(
+        selected_video.clone(),
+        state.clone(),
+        window.clone(),
+        runtime.clone(),
+        feed_flow.clone(),
+        watch_later_flow.clone(),
+    );
 
     // Populate initial videos
-    populate_flow_box(&feed_flow, &state.borrow(), Tab::Feed, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
-    populate_flow_box(&watch_later_flow, &state.borrow(), Tab::WatchLater, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
+    populate_flow_box(&feed_flow, &state.borrow(), Tab::Feed, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+    populate_flow_box(&watch_later_flow, &state.borrow(), Tab::WatchLater, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
 
     // Track tab changes
     {
@@ -213,6 +229,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let context_menu = context_menu.clone();
         let window = window.clone();
         let runtime = runtime.clone();
+        let selected_video = selected_video.clone();
 
         refresh_button.connect_clicked(move |_| {
             let state_clone = state.clone();
@@ -223,6 +240,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             let context_menu = context_menu.clone();
             let window = window.clone();
             let runtime = runtime.clone();
+            let selected_video = selected_video.clone();
 
             spinner.start();
             status_label.set_text("Refreshing...");
@@ -298,6 +316,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             let context_menu2 = context_menu.clone();
             let window2 = window.clone();
             let runtime2 = runtime.clone();
+            let selected_video2 = selected_video.clone();
             videos_rx.attach(None, move |videos| {
                 // Save to storage and update state
                 let mut state = state_clone.borrow_mut();
@@ -310,8 +329,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 // Repopulate flow boxes
                 drop(state);
                 let state_ref = state_clone.borrow();
-                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
-                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
+                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
 
                 // Schedule a refresh after thumbnails have had time to download
                 let state_clone2 = state_clone.clone();
@@ -320,10 +339,11 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 let context_menu = context_menu2.clone();
                 let window = window2.clone();
                 let runtime = runtime2.clone();
+                let selected_video = selected_video2.clone();
                 glib::timeout_add_seconds_local_once(3, move || {
                     let state_ref = state_clone2.borrow();
-                    populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
-                    populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
+                    populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+                    populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_clone2, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
                 });
 
                 glib::ControlFlow::Continue
@@ -340,7 +360,14 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     window.show_all();
 }
 
-fn create_context_menu() -> Popover {
+fn create_context_menu(
+    selected_video: Rc<RefCell<Option<SelectedVideo>>>,
+    state_rc: Rc<RefCell<AppState>>,
+    window: ApplicationWindow,
+    runtime: Arc<Runtime>,
+    feed_flow: FlowBox,
+    watch_later_flow: FlowBox,
+) -> Popover {
     let popover = Popover::new(None::<&gtk::Widget>);
 
     let menu_box = GtkBox::new(Orientation::Vertical, 0);
@@ -368,6 +395,94 @@ fn create_context_menu() -> Popover {
     popover.add(&menu_box);
     menu_box.show_all();
 
+    // Connect handlers once - they read from selected_video
+    {
+        let selected_video = selected_video.clone();
+        let state_rc = state_rc.clone();
+        let popover = popover.clone();
+        play_button.connect_clicked(move |_| {
+            if let Some(ref video) = *selected_video.borrow() {
+                let state = state_rc.borrow();
+                let local_path = state.storage.find_video_path(&video.video_id);
+                if let Err(e) = play_video(&video.video_id, &video.video_title, local_path.as_deref()) {
+                    eprintln!("Failed to play video: {}", e);
+                }
+            }
+            popover.popdown();
+        });
+    }
+
+    {
+        let selected_video = selected_video.clone();
+        let state_rc = state_rc.clone();
+        let popover_clone = popover.clone();
+        let runtime = runtime.clone();
+        let feed_flow = feed_flow.clone();
+        let watch_later_flow = watch_later_flow.clone();
+        let window = window.clone();
+        watch_later_button.connect_clicked(move |_| {
+            if let Some(ref video) = selected_video.borrow().clone() {
+                {
+                    let mut state = state_rc.borrow_mut();
+                    if state.watch_later.contains(&video.video_id) {
+                        state.watch_later.remove(&video.video_id);
+                    } else {
+                        state.watch_later.insert(video.video_id.clone());
+
+                        // Start download if not already downloaded
+                        if !state.storage.has_video(&video.video_id) {
+                            let video_path = state.storage.video_path(&video.video_id, &video.video_title);
+                            let video_id = video.video_id.clone();
+                            let runtime = runtime.clone();
+
+                            std::thread::spawn(move || {
+                                runtime.block_on(async {
+                                    if let Err(e) = download_video(&video_id, &video_path).await {
+                                        eprintln!("Failed to download video: {}", e);
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    let _ = state.storage.save_watch_later(&state.watch_later);
+                }
+                popover_clone.popdown();
+
+                // Refresh both flow boxes
+                let state_ref = state_rc.borrow();
+                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video);
+            }
+        });
+    }
+
+    {
+        let selected_video = selected_video.clone();
+        let popover = popover.clone();
+        let window = window.clone();
+        let runtime = runtime.clone();
+        summary_button.connect_clicked(move |_| {
+            if let Some(ref video) = *selected_video.borrow() {
+                popover.popdown();
+                show_summary_dialog(&window, &video.video_url, &video.video_title, &video.channel_name, runtime.clone());
+            }
+        });
+    }
+
+    {
+        let selected_video = selected_video.clone();
+        let state_rc = state_rc.clone();
+        let popover = popover.clone();
+        let window = window.clone();
+        let runtime = runtime.clone();
+        transcript_button.connect_clicked(move |_| {
+            if let Some(ref video) = *selected_video.borrow() {
+                popover.popdown();
+                show_transcript_dialog(&window, &video.video_id, &video.video_title, &state_rc, runtime.clone());
+            }
+        });
+    }
+
     popover
 }
 
@@ -377,10 +492,11 @@ fn populate_flow_box(
     tab: Tab,
     context_menu: &Popover,
     state_rc: &Rc<RefCell<AppState>>,
-    window: &ApplicationWindow,
-    runtime: Arc<Runtime>,
-    feed_flow: FlowBox,
-    watch_later_flow: FlowBox,
+    _window: &ApplicationWindow,
+    _runtime: Arc<Runtime>,
+    _feed_flow: FlowBox,
+    _watch_later_flow: FlowBox,
+    selected_video: &Rc<RefCell<Option<SelectedVideo>>>,
 ) {
     // Clear existing children
     flow_box.foreach(|child| {
@@ -409,12 +525,9 @@ fn populate_flow_box(
         let channel_name = video.channel_name.clone();
         let context_menu = context_menu.clone();
         let state_rc = state_rc.clone();
-        let window = window.clone();
-        let runtime = runtime.clone();
-        let feed_flow_for_handler = feed_flow.clone();
-        let watch_later_flow_for_handler = watch_later_flow.clone();
+        let selected_video = selected_video.clone();
 
-        // Double-click to play
+        // Double-click to play, right-click for context menu
         card.connect_button_press_event(clone!(@strong video_id, @strong video_title, @strong state_rc => move |widget, event| {
             if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
                 // Play video
@@ -427,111 +540,15 @@ fn populate_flow_box(
             }
 
             if event.button() == 3 {
-                // Right-click - show context menu
+                // Right-click - set selected video and show context menu
+                *selected_video.borrow_mut() = Some(SelectedVideo {
+                    video_id: video_id.clone(),
+                    video_title: video_title.clone(),
+                    video_url: video_url.clone(),
+                    channel_name: channel_name.clone(),
+                });
                 context_menu.set_relative_to(Some(widget));
                 context_menu.popup();
-
-                // Wire up menu actions for this video
-                let menu_box = context_menu.child().unwrap().downcast::<GtkBox>().unwrap();
-                let children: Vec<_> = menu_box.children();
-
-                // Play button
-                if let Some(play_btn) = children.get(0) {
-                    let play_btn = play_btn.clone().downcast::<Button>().unwrap();
-                    let video_id = video_id.clone();
-                    let video_title = video_title.clone();
-                    let state_rc = state_rc.clone();
-                    let context_menu = context_menu.clone();
-
-                    // Disconnect old handlers
-                    play_btn.connect_clicked(move |_| {
-                        let state = state_rc.borrow();
-                        let local_path = state.storage.find_video_path(&video_id);
-                        if let Err(e) = play_video(&video_id, &video_title, local_path.as_deref()) {
-                            eprintln!("Failed to play video: {}", e);
-                        }
-                        context_menu.popdown();
-                    });
-                }
-
-                // Watch Later button
-                if let Some(wl_btn) = children.get(1) {
-                    let wl_btn = wl_btn.clone().downcast::<Button>().unwrap();
-                    let video_id = video_id.clone();
-                    let video_title = video_title.clone();
-                    let state_rc = state_rc.clone();
-                    let context_menu = context_menu.clone();
-                    let runtime = runtime.clone();
-                    let feed_flow = feed_flow_for_handler.clone();
-                    let watch_later_flow = watch_later_flow_for_handler.clone();
-                    let window = window.clone();
-
-                    wl_btn.connect_clicked(move |_| {
-                        {
-                            let mut state = state_rc.borrow_mut();
-                            if state.watch_later.contains(&video_id) {
-                                state.watch_later.remove(&video_id);
-                            } else {
-                                state.watch_later.insert(video_id.clone());
-
-                                // Start download if not already downloaded
-                                if !state.storage.has_video(&video_id) {
-                                    let video_path = state.storage.video_path(&video_id, &video_title);
-                                    let video_id = video_id.clone();
-                                    let runtime = runtime.clone();
-
-                                    std::thread::spawn(move || {
-                                        runtime.block_on(async {
-                                            if let Err(e) = download_video(&video_id, &video_path).await {
-                                                eprintln!("Failed to download video: {}", e);
-                                            }
-                                        });
-                                    });
-                                }
-                            }
-                            let _ = state.storage.save_watch_later(&state.watch_later);
-                        }
-                        context_menu.popdown();
-
-                        // Refresh both flow boxes to show updated status
-                        let state_ref = state_rc.borrow();
-                        populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &context_menu, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
-                        populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &context_menu, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone());
-                    });
-                }
-
-                // Summary button
-                if let Some(summary_btn) = children.get(2) {
-                    let summary_btn = summary_btn.clone().downcast::<Button>().unwrap();
-                    let video_url = video_url.clone();
-                    let video_title = video_title.clone();
-                    let channel_name = channel_name.clone();
-                    let window = window.clone();
-                    let context_menu = context_menu.clone();
-                    let runtime = runtime.clone();
-
-                    summary_btn.connect_clicked(move |_| {
-                        context_menu.popdown();
-                        show_summary_dialog(&window, &video_url, &video_title, &channel_name, runtime.clone());
-                    });
-                }
-
-                // Transcript button
-                if let Some(transcript_btn) = children.get(3) {
-                    let transcript_btn = transcript_btn.clone().downcast::<Button>().unwrap();
-                    let video_id = video_id.clone();
-                    let video_title = video_title.clone();
-                    let state_rc = state_rc.clone();
-                    let window = window.clone();
-                    let context_menu = context_menu.clone();
-                    let runtime = runtime.clone();
-
-                    transcript_btn.connect_clicked(move |_| {
-                        context_menu.popdown();
-                        show_transcript_dialog(&window, &video_id, &video_title, &state_rc, runtime.clone());
-                    });
-                }
-
                 return glib::Propagation::Stop;
             }
 
