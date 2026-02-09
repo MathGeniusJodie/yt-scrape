@@ -22,37 +22,33 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn find_subs_file() -> anyhow::Result<PathBuf> {
-    // Try current directory
-    let current = PathBuf::from("youtube-subs.txt");
-    if current.exists() {
-        return Ok(current);
-    }
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path.parent().ok_or_else(|| {
+        anyhow::anyhow!("Could not determine executable directory: {}", exe_path.display())
+    })?;
 
-    // Try parent directory (when running from yt-tui subdirectory)
-    let parent = PathBuf::from("../youtube-subs.txt");
-    if parent.exists() {
-        return Ok(parent);
-    }
+    let candidates = vec![
+        exe_dir.join("youtube-subs.txt"),
+        exe_dir.join("../youtube-subs.txt"),
+        exe_dir.join("../../youtube-subs.txt"),
+        exe_dir.join("../../../youtube-subs.txt"),
+    ];
 
-    // Try alongside the executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let beside_exe = exe_dir.join("youtube-subs.txt");
-            if beside_exe.exists() {
-                return Ok(beside_exe);
-            }
-
-            // Check parent of exe dir
-            if let Some(parent_dir) = exe_dir.parent() {
-                let in_parent = parent_dir.join("youtube-subs.txt");
-                if in_parent.exists() {
-                    return Ok(in_parent);
-                }
-            }
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
         }
     }
 
+    let searched = candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
     anyhow::bail!(
-        "Could not find youtube-subs.txt. Please ensure it exists in the current directory or parent directory."
+        "Could not find youtube-subs.txt relative to executable {}. Searched: {}",
+        exe_path.display(),
+        searched
     )
 }
