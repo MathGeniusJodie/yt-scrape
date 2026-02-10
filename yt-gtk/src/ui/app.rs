@@ -519,13 +519,23 @@ fn create_context_menu(
 
     {
         let selected_video = selected_video.clone();
+        let state_rc = state_rc.clone();
         let popover = popover.clone();
         let window = window.clone();
         let runtime = runtime.clone();
         summary_button.connect_clicked(move |_| {
             if let Some(ref video) = *selected_video.borrow() {
+                let transcripts_work_dir = state_rc.borrow().storage.transcripts_work_dir().clone();
                 popover.popdown();
-                show_summary_dialog(&window, &video.video_url, &video.video_title, &video.channel_name, runtime.clone());
+                show_summary_dialog(
+                    &window,
+                    &video.video_id,
+                    &video.video_url,
+                    &video.video_title,
+                    &video.channel_name,
+                    transcripts_work_dir,
+                    runtime.clone(),
+                );
             }
         });
     }
@@ -714,9 +724,11 @@ fn download_missing_thumbnails(videos: &[Video], storage: &Storage) {
 
 fn show_summary_dialog(
     window: &ApplicationWindow,
+    video_id: &str,
     video_url: &str,
     video_title: &str,
     channel_name: &str,
+    transcripts_work_dir: PathBuf,
     runtime: Arc<Runtime>,
 ) {
     let dialog = gtk::Dialog::with_buttons(
@@ -752,13 +764,22 @@ fn show_summary_dialog(
 
     // Start streaming summary
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let video_id = video_id.to_string();
     let video_url = video_url.to_string();
     let video_title = video_title.to_string();
     let channel_name = channel_name.to_string();
 
     std::thread::spawn(move || {
         runtime.block_on(async {
-            summarize_video_streaming(&video_url, &video_title, &channel_name, tx).await;
+            summarize_video_streaming(
+                &video_id,
+                &video_url,
+                &video_title,
+                &channel_name,
+                &transcripts_work_dir,
+                tx,
+            )
+            .await;
         });
     });
 

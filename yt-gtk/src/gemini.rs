@@ -1,10 +1,18 @@
+use crate::cache::fetch_transcript;
 use anyhow::Result;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tokio::sync::mpsc;
 
-const GEMINI_PRO_MODEL: &str = "gemini-3-pro-preview";
 const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
+const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_MODELS: [&str; 3] = [
+    "moonshotai/kimi-k2:free",
+    "deepseek/deepseek-r1-0528:free",
+    "tngtech/deepseek-r1t2-chimera:free",
+];
+const SUMMARY_PROMPT: &str = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -98,6 +106,39 @@ struct GeminiError {
     status: Option<String>,
 }
 
+#[derive(Serialize)]
+struct OpenRouterRequest {
+    models: Vec<String>,
+    messages: Vec<OpenRouterMessage>,
+}
+
+#[derive(Serialize)]
+struct OpenRouterMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterResponse {
+    choices: Option<Vec<OpenRouterChoice>>,
+    error: Option<OpenRouterError>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterChoice {
+    message: OpenRouterMessageResponse,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterMessageResponse {
+    content: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterError {
+    message: Option<String>,
+}
+
 /// Message sent through the streaming channel
 #[derive(Debug)]
 pub enum StreamingMessage {
@@ -110,48 +151,42 @@ pub enum StreamingMessage {
 }
 
 pub async fn summarize_video_streaming(
+    video_id: &str,
     video_url: &str,
-    _video_title: &str,
-    _channel_name: &str,
+    video_title: &str,
+    channel_name: &str,
+    transcripts_work_dir: &Path,
     tx: mpsc::UnboundedSender<StreamingMessage>,
 ) {
-    let api_key = match std::env::var("GEMINI_API_KEY") {
-        Ok(key) => key,
-        Err(_) => {
-            let _ = tx.send(StreamingMessage::Error(
-                "GEMINI_API_KEY environment variable not set".to_string(),
-            ));
-            return;
+    let prompt = SUMMARY_PROMPT.to_string();
+
+    // Try Gemini flash first, then OpenRouter with transcript fallback.
+    let gemini_result = match std::env::var("GEMINI_API_KEY") {
+        Ok(api_key) => {
+            call_gemini_streaming(&api_key, GEMINI_FLASH_MODEL, video_url, &prompt, tx.clone())
+                .await
         }
+        Err(_) => Err(anyhow::anyhow!(
+            "GEMINI_API_KEY environment variable not set"
+        )),
     };
 
-    let prompt = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections".to_string();
-
-    // Try pro model first, fall back to flash on rate limit
-    match call_gemini_streaming(&api_key, GEMINI_PRO_MODEL, video_url, &prompt, tx.clone()).await {
-        Ok(()) => {}
-        Err(e) => {
-            let error_str = e.to_string();
-            // Check for rate limit (429) or quota exceeded
-            if error_str.contains("429")
-                || error_str.contains("RESOURCE_EXHAUSTED")
-                || error_str.contains("quota")
-            {
-                // Fall back to flash model
-                if let Err(e) = call_gemini_streaming(
-                    &api_key,
-                    GEMINI_FLASH_MODEL,
-                    video_url,
-                    &prompt,
-                    tx.clone(),
-                )
-                .await
-                {
-                    let _ = tx.send(StreamingMessage::Error(e.to_string()));
-                }
-            } else {
-                let _ = tx.send(StreamingMessage::Error(error_str));
-            }
+    if let Err(gemini_error) = gemini_result {
+        if let Err(openrouter_error) = call_openrouter_with_transcript(
+            video_id,
+            video_url,
+            video_title,
+            channel_name,
+            &prompt,
+            transcripts_work_dir,
+            tx.clone(),
+        )
+        .await
+        {
+            let _ = tx.send(StreamingMessage::Error(format!(
+                "Gemini failed: {}. OpenRouter fallback failed: {}",
+                gemini_error, openrouter_error
+            )));
         }
     }
 }
@@ -261,6 +296,99 @@ async fn call_gemini_streaming(
 
     let _ = tx.send(StreamingMessage::Done);
     Ok(())
+}
+
+async fn call_openrouter_with_transcript(
+    video_id: &str,
+    video_url: &str,
+    video_title: &str,
+    channel_name: &str,
+    prompt: &str,
+    transcripts_work_dir: &Path,
+    tx: mpsc::UnboundedSender<StreamingMessage>,
+) -> Result<()> {
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .map_err(|_| anyhow::anyhow!("OPENROUTER_API_KEY environment variable not set"))?;
+
+    let transcript = fetch_transcript(video_id, transcripts_work_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch transcript: {}", e))?;
+
+    if transcript.trim().is_empty() {
+        anyhow::bail!("Transcript is empty");
+    }
+
+    let request = OpenRouterRequest {
+        models: OPENROUTER_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect(),
+        messages: vec![OpenRouterMessage {
+            role: "user".to_string(),
+            content: format!(
+                "{prompt}\n\nVideo title: {video_title}\nChannel: {channel_name}\nVideo URL: {video_url}\n\nTranscript:\n{transcript}"
+            ),
+        }],
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+
+    let response = client
+        .post(OPENROUTER_URL)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&request)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        if let Ok(error_response) = serde_json::from_str::<OpenRouterResponse>(&body) {
+            if let Some(error) = error_response.error {
+                if let Some(message) = error.message {
+                    return Err(anyhow::anyhow!("{}: {}", status, message));
+                }
+            }
+        }
+        return Err(anyhow::anyhow!("{}: {}", status, body));
+    }
+
+    let openrouter_response: OpenRouterResponse = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenRouter response: {}", e))?;
+    let content = openrouter_response
+        .choices
+        .and_then(|choices| choices.into_iter().next())
+        .and_then(|choice| extract_openrouter_content(&choice.message.content))
+        .ok_or_else(|| anyhow::anyhow!("OpenRouter returned no summary text"))?;
+
+    let summary = smartify_quotes(content.trim());
+    if !summary.is_empty() {
+        let _ = tx.send(StreamingMessage::Chunk(summary));
+    }
+    let _ = tx.send(StreamingMessage::Done);
+    Ok(())
+}
+
+fn extract_openrouter_content(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let merged = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            if merged.trim().is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Convert straight quotes to curly/smart quotes
