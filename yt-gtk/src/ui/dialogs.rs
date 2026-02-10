@@ -1,6 +1,7 @@
 use gtk::prelude::*;
 use gtk::{
-    ApplicationWindow, Dialog, DialogFlags, Label, ResponseType, ScrolledWindow, TextView, TextBuffer,
+    ApplicationWindow, Dialog, DialogFlags, Label, ResponseType, ScrolledWindow, TextBuffer,
+    TextView,
 };
 
 /// Show a scrollable text dialog (for transcripts/summaries)
@@ -43,7 +44,9 @@ pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) 
     });
 
     dialog.run();
-    unsafe { dialog.destroy(); }
+    unsafe {
+        dialog.destroy();
+    }
 }
 
 /// Show a loading dialog that can be updated
@@ -85,5 +88,7 @@ pub fn show_error_dialog(parent: &ApplicationWindow, title: &str, message: &str)
     );
     dialog.set_title(title);
     dialog.run();
-    unsafe { dialog.destroy(); }
+    unsafe {
+        dialog.destroy();
+    }
 }

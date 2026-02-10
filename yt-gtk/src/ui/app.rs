@@ -10,8 +10,8 @@ use gio::prelude::*;
 use glib::clone;
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Box as GtkBox, Button, FlowBox, HeaderBar, Label,
-    Orientation, Popover, ScrolledWindow, Spinner, Stack,
+    Application, ApplicationWindow, Box as GtkBox, Button, FlowBox, HeaderBar, Label, Orientation,
+    Popover, ScrolledWindow, Spinner, Stack,
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -87,7 +87,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     header.set_title(Some("yt-gtk"));
 
     // Refresh button with icon
-    let refresh_button = Button::from_icon_name(Some("view-refresh-symbolic"), gtk::IconSize::Button);
+    let refresh_button =
+        Button::from_icon_name(Some("view-refresh-symbolic"), gtk::IconSize::Button);
     refresh_button.set_widget_name("refresh-button");
     refresh_button.set_tooltip_text(Some("Refresh feeds"));
     header.pack_start(&refresh_button);
@@ -255,8 +256,32 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     // Set initial badge and populate videos
     update_watch_later_badge(&wl_badge, state.borrow().watch_later.len());
-    populate_flow_box(&feed_flow, &state.borrow(), Tab::Feed, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
-    populate_flow_box(&watch_later_flow, &state.borrow(), Tab::WatchLater, &context_menu, &state, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &wl_badge);
+    populate_flow_box(
+        &feed_flow,
+        &state.borrow(),
+        Tab::Feed,
+        &context_menu,
+        &state,
+        &window,
+        runtime.clone(),
+        feed_flow.clone(),
+        watch_later_flow.clone(),
+        &selected_video,
+        &wl_badge,
+    );
+    populate_flow_box(
+        &watch_later_flow,
+        &state.borrow(),
+        Tab::WatchLater,
+        &context_menu,
+        &state,
+        &window,
+        runtime.clone(),
+        feed_flow.clone(),
+        watch_later_flow.clone(),
+        &selected_video,
+        &wl_badge,
+    );
 
     // Track tab changes
     {
@@ -321,6 +346,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
             // Spawn the fetch task
             let runtime_clone = runtime.clone();
+            let tx_for_errors = tx.clone();
             std::thread::spawn(move || {
                 runtime_clone.block_on(async {
                     match fetch_all_feeds(channel_ids, tx).await {
@@ -328,7 +354,11 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                             let _ = videos_tx.send(videos);
                         }
                         Err(e) => {
-                            eprintln!("Fetch error: {}", e);
+                            let _ = tx_for_errors
+                                .send(FetchProgress::Fatal {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 });
@@ -347,20 +377,76 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 });
             });
 
+            let mut total_channels = 0usize;
+            let mut completed_channels = 0usize;
+            let mut failed_channels = 0usize;
+
             grx.attach(None, move |progress| {
                 match progress {
                     FetchProgress::Started { total } => {
-                        status_label.set_text(&format!("Fetching {} channels...", total));
+                        total_channels = total;
+                        completed_channels = 0;
+                        failed_channels = 0;
+                        status_label.set_text(&format!("Fetching feeds (0/{total})..."));
                     }
-                    FetchProgress::ChannelComplete { channel: _, count: _ } => {
-                        // Could show per-channel progress
+                    FetchProgress::ChannelComplete { channel, count } => {
+                        completed_channels += 1;
+                        if failed_channels == 0 {
+                            status_label
+                                .set_text(&format!("Fetching feeds ({completed_channels}/{total_channels})..."));
+                        } else {
+                            status_label.set_text(&format!(
+                                "Fetching feeds ({completed_channels}/{total_channels}, {failed_channels} failed)..."
+                            ));
+                        }
+                        eprintln!("Fetched {} videos for channel {}", count, channel);
+                    }
+                    FetchProgress::RetryScheduled {
+                        channel_id,
+                        next_attempt,
+                        max_attempts,
+                        delay_secs,
+                        reason,
+                    } => {
+                        status_label.set_text(&format!(
+                            "Retrying {} ({}/{}) in {}s...",
+                            channel_id, next_attempt, max_attempts, delay_secs
+                        ));
+                        eprintln!(
+                            "Retrying channel {} ({}/{}) in {}s: {}",
+                            channel_id, next_attempt, max_attempts, delay_secs, reason
+                        );
                     }
                     FetchProgress::Error { channel_id, error } => {
+                        completed_channels += 1;
+                        failed_channels += 1;
+                        status_label.set_text(&format!(
+                            "Failed {} of {} channels (last: {})",
+                            failed_channels, total_channels, channel_id
+                        ));
                         eprintln!("Error fetching {}: {}", channel_id, error);
                     }
-                    FetchProgress::AllComplete { total_videos } => {
+                    FetchProgress::Fatal { error } => {
                         spinner.stop();
-                        status_label.set_text(&format!("{} videos loaded", total_videos));
+                        status_label.set_text(&format!("Refresh failed: {}", error));
+                        eprintln!("Fatal refresh error: {}", error);
+                        return glib::ControlFlow::Break;
+                    }
+                    FetchProgress::AllComplete {
+                        total_videos,
+                        successful_channels,
+                        failed_channels: final_failed_channels,
+                    } => {
+                        spinner.stop();
+                        if final_failed_channels > 0 {
+                            status_label.set_text(&format!(
+                                "{} videos loaded ({} channels ok, {} failed)",
+                                total_videos, successful_channels, final_failed_channels
+                            ));
+                        } else {
+                            status_label.set_text(&format!("{} videos loaded", total_videos));
+                        }
+                        return glib::ControlFlow::Break;
                     }
                 }
                 glib::ControlFlow::Continue
@@ -463,7 +549,9 @@ fn create_context_menu(
             if let Some(ref video) = *selected_video.borrow() {
                 let state = state_rc.borrow();
                 let local_path = state.storage.find_video_path(&video.video_id);
-                if let Err(e) = play_video(&video.video_id, &video.video_title, local_path.as_deref()) {
+                if let Err(e) =
+                    play_video(&video.video_id, &video.video_title, local_path.as_deref())
+                {
                     eprintln!("Failed to play video: {}", e);
                 }
             }
@@ -491,7 +579,9 @@ fn create_context_menu(
 
                         // Start download if not already downloaded
                         if !state.storage.has_video(&video.video_id) {
-                            let video_path = state.storage.video_path(&video.video_id, &video.video_title);
+                            let video_path = state
+                                .storage
+                                .video_path(&video.video_id, &video.video_title);
                             let video_id = video.video_id.clone();
                             let runtime = runtime.clone();
 
@@ -511,8 +601,32 @@ fn create_context_menu(
                 // Update badge and refresh both flow boxes
                 let state_ref = state_rc.borrow();
                 update_watch_later_badge(&badge, state_ref.watch_later.len());
-                populate_flow_box(&feed_flow, &state_ref, Tab::Feed, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &badge);
-                populate_flow_box(&watch_later_flow, &state_ref, Tab::WatchLater, &popover_clone, &state_rc, &window, runtime.clone(), feed_flow.clone(), watch_later_flow.clone(), &selected_video, &badge);
+                populate_flow_box(
+                    &feed_flow,
+                    &state_ref,
+                    Tab::Feed,
+                    &popover_clone,
+                    &state_rc,
+                    &window,
+                    runtime.clone(),
+                    feed_flow.clone(),
+                    watch_later_flow.clone(),
+                    &selected_video,
+                    &badge,
+                );
+                populate_flow_box(
+                    &watch_later_flow,
+                    &state_ref,
+                    Tab::WatchLater,
+                    &popover_clone,
+                    &state_rc,
+                    &window,
+                    runtime.clone(),
+                    feed_flow.clone(),
+                    watch_later_flow.clone(),
+                    &selected_video,
+                    &badge,
+                );
             }
         });
     }
@@ -549,7 +663,13 @@ fn create_context_menu(
         transcript_button.connect_clicked(move |_| {
             if let Some(ref video) = *selected_video.borrow() {
                 popover.popdown();
-                show_transcript_dialog(&window, &video.video_id, &video.video_title, &state_rc, runtime.clone());
+                show_transcript_dialog(
+                    &window,
+                    &video.video_id,
+                    &video.video_title,
+                    &state_rc,
+                    runtime.clone(),
+                );
             }
         });
     }
@@ -589,7 +709,8 @@ fn populate_flow_box(
         let is_watch_later = state.watch_later.contains(&video.video_id);
         let is_downloaded = state.storage.has_video(&video.video_id);
 
-        let (card, watch_later_toggle) = create_video_card(video, &thumbnail_path, is_watch_later, is_downloaded);
+        let (card, watch_later_toggle) =
+            create_video_card(video, &thumbnail_path, is_watch_later, is_downloaded);
 
         let video_id = video.video_id.clone();
         let video_title = video.title.clone();
@@ -612,32 +733,34 @@ fn populate_flow_box(
         let wl_badge = badge.clone();
 
         // Double-click to play, right-click for context menu
-        card.connect_button_press_event(clone!(@strong video_id, @strong video_title, @strong state_rc => move |widget, event| {
-            if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
-                // Play video
-                let state = state_rc.borrow();
-                let local_path = state.storage.find_video_path(&video_id);
-                if let Err(e) = play_video(&video_id, &video_title, local_path.as_deref()) {
-                    eprintln!("Failed to play video: {}", e);
+        card.connect_button_press_event(
+            clone!(@strong video_id, @strong video_title, @strong state_rc => move |widget, event| {
+                if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
+                    // Play video
+                    let state = state_rc.borrow();
+                    let local_path = state.storage.find_video_path(&video_id);
+                    if let Err(e) = play_video(&video_id, &video_title, local_path.as_deref()) {
+                        eprintln!("Failed to play video: {}", e);
+                    }
+                    return glib::Propagation::Stop;
                 }
-                return glib::Propagation::Stop;
-            }
 
-            if event.button() == 3 {
-                // Right-click - set selected video and show context menu
-                *selected_video.borrow_mut() = Some(SelectedVideo {
-                    video_id: video_id.clone(),
-                    video_title: video_title.clone(),
-                    video_url: video_url.clone(),
-                    channel_name: channel_name.clone(),
-                });
-                context_menu.set_relative_to(Some(widget));
-                context_menu.popup();
-                return glib::Propagation::Stop;
-            }
+                if event.button() == 3 {
+                    // Right-click - set selected video and show context menu
+                    *selected_video.borrow_mut() = Some(SelectedVideo {
+                        video_id: video_id.clone(),
+                        video_title: video_title.clone(),
+                        video_url: video_url.clone(),
+                        channel_name: channel_name.clone(),
+                    });
+                    context_menu.set_relative_to(Some(widget));
+                    context_menu.popup();
+                    return glib::Propagation::Stop;
+                }
 
-            glib::Propagation::Proceed
-        }));
+                glib::Propagation::Proceed
+            }),
+        );
 
         // Watch later toggle button handler
         watch_later_toggle.connect_clicked(move |_| {
@@ -669,8 +792,32 @@ fn populate_flow_box(
             // Update badge and refresh UI
             let state_ref = wl_state_rc.borrow();
             update_watch_later_badge(&wl_badge, state_ref.watch_later.len());
-            populate_flow_box(&wl_feed_flow, &state_ref, Tab::Feed, &wl_context_menu, &wl_state_rc, &wl_window, wl_runtime.clone(), wl_feed_flow.clone(), wl_watch_later_flow.clone(), &wl_selected_video, &wl_badge);
-            populate_flow_box(&wl_watch_later_flow, &state_ref, Tab::WatchLater, &wl_context_menu, &wl_state_rc, &wl_window, wl_runtime.clone(), wl_feed_flow.clone(), wl_watch_later_flow.clone(), &wl_selected_video, &wl_badge);
+            populate_flow_box(
+                &wl_feed_flow,
+                &state_ref,
+                Tab::Feed,
+                &wl_context_menu,
+                &wl_state_rc,
+                &wl_window,
+                wl_runtime.clone(),
+                wl_feed_flow.clone(),
+                wl_watch_later_flow.clone(),
+                &wl_selected_video,
+                &wl_badge,
+            );
+            populate_flow_box(
+                &wl_watch_later_flow,
+                &state_ref,
+                Tab::WatchLater,
+                &wl_context_menu,
+                &wl_state_rc,
+                &wl_window,
+                wl_runtime.clone(),
+                wl_feed_flow.clone(),
+                wl_watch_later_flow.clone(),
+                &wl_selected_video,
+                &wl_badge,
+            );
         });
 
         flow_box.add(&card);
@@ -873,7 +1020,8 @@ fn show_transcript_dialog(
     let work_dir = state_rc.borrow().storage.transcripts_work_dir().clone();
 
     #[allow(deprecated)]
-    let (gtx, grx) = glib::MainContext::channel::<(String, Result<String, String>)>(glib::Priority::DEFAULT);
+    let (gtx, grx) =
+        glib::MainContext::channel::<(String, Result<String, String>)>(glib::Priority::DEFAULT);
 
     let video_id_for_thread = video_id.to_string();
     std::thread::spawn(move || {

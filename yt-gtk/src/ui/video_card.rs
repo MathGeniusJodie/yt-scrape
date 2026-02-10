@@ -50,8 +50,20 @@ pub fn create_video_card(
 
         // Create clipping path with rounded top corners
         cr.new_path();
-        cr.arc(radius, radius, radius, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-        cr.arc(width - radius, radius, radius, 1.5 * std::f64::consts::PI, 2.0 * std::f64::consts::PI);
+        cr.arc(
+            radius,
+            radius,
+            radius,
+            std::f64::consts::PI,
+            1.5 * std::f64::consts::PI,
+        );
+        cr.arc(
+            width - radius,
+            radius,
+            radius,
+            1.5 * std::f64::consts::PI,
+            2.0 * std::f64::consts::PI,
+        );
         cr.line_to(width, height);
         cr.line_to(0.0, height);
         cr.close_path();

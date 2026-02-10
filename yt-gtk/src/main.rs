@@ -38,7 +38,10 @@ fn main() {
 fn find_subs_file() -> anyhow::Result<PathBuf> {
     let exe_path = std::env::current_exe()?;
     let exe_dir = exe_path.parent().ok_or_else(|| {
-        anyhow::anyhow!("Could not determine executable directory: {}", exe_path.display())
+        anyhow::anyhow!(
+            "Could not determine executable directory: {}",
+            exe_path.display()
+        )
     })?;
 
     let candidates = vec![
