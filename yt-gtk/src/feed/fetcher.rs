@@ -1,18 +1,19 @@
 use crate::data::Video;
-use crate::feed::parser::parse_feed;
 use crate::urls;
-use futures::stream::{self, StreamExt};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use anyhow::Context;
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use std::collections::VecDeque;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 
-// Conservative defaults to avoid tripping YouTube rate limits.
-const MAX_CONCURRENT_REQUESTS: usize = 1;
-const MIN_REQUEST_SPACING_MS: u64 = 4_000;
-const MAX_REQUEST_JITTER_MS: u64 = 1_500;
+const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
+const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
+const PLAYLIST_ITEMS_MAX_RESULTS: &str = "25";
 const MAX_FETCH_ATTEMPTS: usize = 3;
 const INITIAL_BACKOFF_MS: u64 = 15_000;
 const MAX_BACKOFF_MS: u64 = 300_000;
+const MAX_BACKOFF_JITTER_MS: u64 = 2_000;
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
 
@@ -48,42 +49,93 @@ pub enum FetchProgress {
     },
 }
 
-#[derive(Debug)]
-struct ChannelFetchResult {
-    videos: Vec<Video>,
-    failed: bool,
+#[derive(Debug, Deserialize)]
+struct PlaylistItemsResponse {
+    #[serde(default)]
+    items: Vec<PlaylistItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelsResponse {
+    #[serde(default)]
+    items: Vec<ChannelItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelItem {
+    #[serde(rename = "contentDetails")]
+    content_details: Option<ChannelContentDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelContentDetails {
+    #[serde(rename = "relatedPlaylists")]
+    related_playlists: Option<RelatedPlaylists>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelatedPlaylists {
+    uploads: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistItem {
+    snippet: Option<PlaylistItemSnippet>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistItemSnippet {
+    #[serde(rename = "publishedAt")]
+    published_at: Option<DateTime<Utc>>,
+    title: Option<String>,
+    #[serde(rename = "channelId")]
+    channel_id: Option<String>,
+    #[serde(rename = "channelTitle")]
+    channel_title: Option<String>,
+    #[serde(rename = "resourceId")]
+    resource_id: Option<PlaylistResourceId>,
+    thumbnails: Option<PlaylistThumbnails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistResourceId {
+    #[serde(rename = "videoId")]
+    video_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistThumbnails {
+    maxres: Option<Thumbnail>,
+    standard: Option<Thumbnail>,
+    high: Option<Thumbnail>,
+    medium: Option<Thumbnail>,
+    #[serde(rename = "default")]
+    default_thumbnail: Option<Thumbnail>,
+}
+
+impl PlaylistThumbnails {
+    fn best_url(&self) -> Option<String> {
+        self.maxres
+            .as_ref()
+            .or(self.standard.as_ref())
+            .or(self.high.as_ref())
+            .or(self.medium.as_ref())
+            .or(self.default_thumbnail.as_ref())
+            .map(|t| t.url.clone())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Thumbnail {
+    url: String,
 }
 
 #[derive(Debug)]
-struct RequestThrottle {
-    next_allowed_at: Mutex<Instant>,
-}
-
-impl RequestThrottle {
-    fn new() -> Self {
-        Self {
-            next_allowed_at: Mutex::new(Instant::now()),
-        }
-    }
-
-    async fn wait_for_turn(&self, channel_id: &str, attempt: usize) {
-        let spacing = Duration::from_millis(request_spacing_ms(channel_id, attempt));
-
-        let mut next_allowed_at = self.next_allowed_at.lock().await;
-        let now = Instant::now();
-        let scheduled_start = if *next_allowed_at > now {
-            *next_allowed_at
-        } else {
-            now
-        };
-        *next_allowed_at = scheduled_start + spacing;
-        drop(next_allowed_at);
-
-        let now = Instant::now();
-        if scheduled_start > now {
-            sleep(scheduled_start - now).await;
-        }
-    }
+struct PendingChannel {
+    channel_id: String,
+    uploads_playlist_id: String,
+    attempt: usize,
+    not_before: Instant,
 }
 
 /// Fetch all feeds from the given channel IDs
@@ -94,34 +146,139 @@ pub async fn fetch_all_feeds(
     let total = channel_ids.len();
     let _ = tx.send(FetchProgress::Started { total }).await;
 
+    let api_key = std::env::var("GOOGLE_API_KEY")
+        .context("GOOGLE_API_KEY is not set. Set it before refreshing feeds.")?;
+
     let client = reqwest::Client::builder()
         .user_agent(BROWSER_USER_AGENT)
         .timeout(Duration::from_secs(30))
         .gzip(true)
         .build()?;
-    let throttle = Arc::new(RequestThrottle::new());
 
-    // Strictly bounded concurrency; request starts are additionally rate-limited globally.
-    let mut fetches = stream::iter(channel_ids.into_iter().map(|channel_id| {
-        let client = client.clone();
-        let tx = tx.clone();
-        let throttle = throttle.clone();
-        async move { fetch_channel_with_retry(client, tx, throttle, channel_id).await }
-    }))
-    .buffer_unordered(MAX_CONCURRENT_REQUESTS);
-
-    // Collect all results
     let mut all_videos = Vec::new();
     let mut successful_channels = 0usize;
     let mut failed_channels = 0usize;
 
-    while let Some(ChannelFetchResult { videos, failed }) = fetches.next().await {
-        if failed {
-            failed_channels += 1;
-        } else {
-            successful_channels += 1;
+    let now = Instant::now();
+    let mut queue = VecDeque::new();
+
+    for channel_id in channel_ids {
+        match uploads_playlist_id_for_channel(&channel_id) {
+            Some(uploads_playlist_id) => queue.push_back(PendingChannel {
+                channel_id,
+                uploads_playlist_id,
+                attempt: 1,
+                not_before: now,
+            }),
+            None => {
+                failed_channels += 1;
+                let _ = tx
+                    .send(FetchProgress::Error {
+                        channel_id,
+                        error: "Invalid channel ID. Expected an ID starting with 'UC'.".to_string(),
+                    })
+                    .await;
+            }
         }
-        all_videos.extend(videos);
+    }
+
+    while !queue.is_empty() {
+        if !move_next_ready_channel_to_front(&mut queue) {
+            if let Some(next_ready_at) = queue.iter().map(|entry| entry.not_before).min() {
+                let now = Instant::now();
+                if next_ready_at > now {
+                    sleep(next_ready_at - now).await;
+                }
+            }
+            continue;
+        }
+
+        let mut pending = match queue.pop_front() {
+            Some(entry) => entry,
+            None => continue,
+        };
+
+        let fetch_result = fetch_channel_once(
+            &client,
+            &api_key,
+            &pending.uploads_playlist_id,
+            &pending.channel_id,
+        )
+        .await;
+
+        match fetch_result {
+            Ok(videos) => {
+                successful_channels += 1;
+                let _ = tx
+                    .send(FetchProgress::ChannelComplete {
+                        channel: pending.channel_id.clone(),
+                        count: videos.len(),
+                    })
+                    .await;
+                all_videos.extend(videos);
+            }
+            Err(error) => {
+                if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                    match resolve_uploads_playlist_id(&client, &api_key, &pending.channel_id).await
+                    {
+                        Ok(Some(resolved_uploads_playlist_id))
+                            if resolved_uploads_playlist_id != pending.uploads_playlist_id =>
+                        {
+                            let _ = tx
+                                .send(FetchProgress::RetryScheduled {
+                                    channel_id: pending.channel_id.clone(),
+                                    next_attempt: pending.attempt,
+                                    max_attempts: MAX_FETCH_ATTEMPTS,
+                                    delay_secs: 0,
+                                    reason:
+                                        "Resolved uploads playlist ID after 404; queued for retry."
+                                            .to_string(),
+                                })
+                                .await;
+
+                            pending.uploads_playlist_id = resolved_uploads_playlist_id;
+                            pending.not_before = Instant::now();
+                            queue.push_back(pending);
+                            continue;
+                        }
+                        Ok(_) => {}
+                        Err(lookup_error) => {
+                            eprintln!(
+                                "Failed resolving uploads playlist for {} after 404: {}",
+                                pending.channel_id, lookup_error
+                            );
+                        }
+                    }
+                }
+
+                if should_retry(&error) && pending.attempt < MAX_FETCH_ATTEMPTS {
+                    let delay_ms =
+                        backoff_ms_for_attempt(pending.attempt, &pending.channel_id, &error);
+                    let _ = tx
+                        .send(FetchProgress::RetryScheduled {
+                            channel_id: pending.channel_id.clone(),
+                            next_attempt: pending.attempt + 1,
+                            max_attempts: MAX_FETCH_ATTEMPTS,
+                            delay_secs: delay_ms.div_ceil(1000),
+                            reason: error.to_string(),
+                        })
+                        .await;
+
+                    pending.attempt += 1;
+                    pending.not_before = Instant::now() + Duration::from_millis(delay_ms);
+                    queue.push_back(pending);
+                    continue;
+                }
+
+                failed_channels += 1;
+                let _ = tx
+                    .send(FetchProgress::Error {
+                        channel_id: pending.channel_id,
+                        error: error.to_string(),
+                    })
+                    .await;
+            }
+        }
     }
 
     // Sort by published date (newest first)
@@ -142,73 +299,105 @@ pub async fn fetch_all_feeds(
     Ok(all_videos)
 }
 
-async fn fetch_channel_with_retry(
-    client: reqwest::Client,
-    tx: mpsc::Sender<FetchProgress>,
-    throttle: Arc<RequestThrottle>,
-    channel_id: String,
-) -> ChannelFetchResult {
-    let url = urls::feed_url(&channel_id);
-
-    for attempt in 1..=MAX_FETCH_ATTEMPTS {
-        throttle.wait_for_turn(&channel_id, attempt).await;
-
-        let request_result = async {
-            let response = client.get(&url).send().await?;
-            let response = response.error_for_status()?;
-            response.text().await
-        }
-        .await;
-
-        match request_result {
-            Ok(text) => {
-                let videos = parse_feed(&text, &channel_id);
-                let count = videos.len();
-                let _ = tx
-                    .send(FetchProgress::ChannelComplete {
-                        channel: channel_id.clone(),
-                        count,
-                    })
-                    .await;
-                return ChannelFetchResult {
-                    videos,
-                    failed: false,
-                };
-            }
-            Err(error) => {
-                if should_retry(&error) && attempt < MAX_FETCH_ATTEMPTS {
-                    let delay_ms = backoff_ms_for_attempt(attempt, &channel_id, &error);
-                    let _ = tx
-                        .send(FetchProgress::RetryScheduled {
-                            channel_id: channel_id.clone(),
-                            next_attempt: attempt + 1,
-                            max_attempts: MAX_FETCH_ATTEMPTS,
-                            delay_secs: delay_ms.div_ceil(1000),
-                            reason: error.to_string(),
-                        })
-                        .await;
-                    sleep(Duration::from_millis(delay_ms)).await;
-                    continue;
-                }
-
-                let _ = tx
-                    .send(FetchProgress::Error {
-                        channel_id: channel_id.clone(),
-                        error: error.to_string(),
-                    })
-                    .await;
-                return ChannelFetchResult {
-                    videos: Vec::new(),
-                    failed: true,
-                };
-            }
-        }
+fn move_next_ready_channel_to_front(queue: &mut VecDeque<PendingChannel>) -> bool {
+    let now = Instant::now();
+    let ready_index = queue.iter().position(|entry| entry.not_before <= now);
+    if let Some(index) = ready_index {
+        queue.rotate_left(index);
+        true
+    } else {
+        false
     }
+}
 
-    ChannelFetchResult {
-        videos: Vec::new(),
-        failed: true,
-    }
+async fn fetch_channel_once(
+    client: &reqwest::Client,
+    api_key: &str,
+    uploads_playlist_id: &str,
+    channel_id: &str,
+) -> Result<Vec<Video>, reqwest::Error> {
+    let response = client
+        .get(YOUTUBE_PLAYLIST_ITEMS_API_URL)
+        .query(&[
+            ("part", "snippet"),
+            ("playlistId", uploads_playlist_id),
+            ("maxResults", PLAYLIST_ITEMS_MAX_RESULTS),
+            ("key", api_key),
+        ])
+        .send()
+        .await?;
+
+    let response = response.error_for_status()?;
+    let payload = response.json::<PlaylistItemsResponse>().await?;
+    Ok(videos_from_playlist_items(payload, channel_id))
+}
+
+async fn resolve_uploads_playlist_id(
+    client: &reqwest::Client,
+    api_key: &str,
+    channel_id: &str,
+) -> Result<Option<String>, reqwest::Error> {
+    let response = client
+        .get(YOUTUBE_CHANNELS_API_URL)
+        .query(&[
+            ("part", "contentDetails"),
+            ("id", channel_id),
+            ("key", api_key),
+        ])
+        .send()
+        .await?;
+
+    let response = response.error_for_status()?;
+    let payload = response.json::<ChannelsResponse>().await?;
+
+    Ok(payload
+        .items
+        .into_iter()
+        .find_map(|item| item.content_details?.related_playlists?.uploads))
+}
+
+fn videos_from_playlist_items(
+    response: PlaylistItemsResponse,
+    fallback_channel_id: &str,
+) -> Vec<Video> {
+    response
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let snippet = item.snippet?;
+            let published = snippet.published_at?;
+            let video_id = snippet.resource_id?.video_id?;
+
+            let title = snippet.title.unwrap_or_else(|| "Untitled".to_string());
+            let channel_id = snippet
+                .channel_id
+                .unwrap_or_else(|| fallback_channel_id.to_string());
+            let channel_name = snippet
+                .channel_title
+                .unwrap_or_else(|| "Unknown channel".to_string());
+            let thumbnail_url = snippet
+                .thumbnails
+                .as_ref()
+                .and_then(PlaylistThumbnails::best_url)
+                .unwrap_or_else(|| urls::thumbnail_url(&video_id));
+
+            Some(Video {
+                video_id,
+                channel_id,
+                channel_name,
+                title,
+                published,
+                thumbnail_url,
+                transcript: None,
+            })
+        })
+        .collect()
+}
+
+fn uploads_playlist_id_for_channel(channel_id: &str) -> Option<String> {
+    channel_id
+        .strip_prefix("UC")
+        .map(|suffix| format!("UU{}", suffix))
 }
 
 fn should_retry(error: &reqwest::Error) -> bool {
@@ -219,6 +408,9 @@ fn should_retry(error: &reqwest::Error) -> bool {
     match error.status() {
         Some(status) => {
             status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::NOT_FOUND
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
                 || status.is_server_error()
         }
@@ -226,13 +418,12 @@ fn should_retry(error: &reqwest::Error) -> bool {
     }
 }
 
-fn request_spacing_ms(channel_id: &str, attempt: usize) -> u64 {
-    MIN_REQUEST_SPACING_MS + deterministic_jitter_ms(channel_id, attempt, MAX_REQUEST_JITTER_MS)
-}
-
 fn backoff_ms_for_attempt(attempt: usize, channel_id: &str, error: &reqwest::Error) -> u64 {
     let base_ms = match error.status() {
         Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => 30_000,
+        Some(reqwest::StatusCode::FORBIDDEN) => 30_000,
+        Some(reqwest::StatusCode::UNAUTHORIZED) => 30_000,
+        Some(reqwest::StatusCode::NOT_FOUND) => 20_000,
         Some(reqwest::StatusCode::REQUEST_TIMEOUT) => 12_000,
         Some(status) if status.is_server_error() => 20_000,
         _ if error.is_timeout() => 12_000,
@@ -242,7 +433,7 @@ fn backoff_ms_for_attempt(attempt: usize, channel_id: &str, error: &reqwest::Err
 
     let shift = attempt.saturating_sub(1).min(6) as u32;
     let exponential = base_ms.saturating_mul(1u64 << shift);
-    let jitter = deterministic_jitter_ms(channel_id, attempt + 13, 2_000);
+    let jitter = deterministic_jitter_ms(channel_id, attempt + 13, MAX_BACKOFF_JITTER_MS);
     exponential.saturating_add(jitter).min(MAX_BACKOFF_MS)
 }
 
