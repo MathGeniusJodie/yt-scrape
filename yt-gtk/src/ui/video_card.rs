@@ -129,7 +129,11 @@ pub fn create_video_card(
     meta_box.pack_start(&channel_label, true, true, 0);
 
     let time_ago = format_time_ago(&video.published);
-    let time_label = Label::new(Some(&time_ago));
+    let time_and_duration = match video.duration_seconds {
+        Some(seconds) => format!("{} • {}", time_ago, format_video_duration(seconds)),
+        None => time_ago,
+    };
+    let time_label = Label::new(Some(&time_and_duration));
     time_label.set_widget_name("time-ago");
     meta_box.pack_end(&time_label, false, false, 0);
 
@@ -231,5 +235,17 @@ fn format_time_ago(dt: &chrono::DateTime<Utc>) -> String {
         format!("{}m ago", duration.num_minutes())
     } else {
         "just now".to_string()
+    }
+}
+
+fn format_video_duration(total_seconds: u32) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{}:{:02}", minutes, seconds)
     }
 }

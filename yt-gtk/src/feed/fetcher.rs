@@ -3,12 +3,13 @@ use crate::urls;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 
 const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
+const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
 const PLAYLIST_ITEMS_MAX_RESULTS: &str = "25";
 const MAX_FETCH_ATTEMPTS: usize = 3;
 const INITIAL_BACKOFF_MS: u64 = 15_000;
@@ -59,6 +60,24 @@ struct PlaylistItemsResponse {
 struct ChannelsResponse {
     #[serde(default)]
     items: Vec<ChannelItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideosResponse {
+    #[serde(default)]
+    items: Vec<YoutubeVideoItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YoutubeVideoItem {
+    id: Option<String>,
+    #[serde(rename = "contentDetails")]
+    content_details: Option<YoutubeVideoContentDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YoutubeVideoContentDetails {
+    duration: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,7 +348,23 @@ async fn fetch_channel_once(
 
     let response = response.error_for_status()?;
     let payload = response.json::<PlaylistItemsResponse>().await?;
-    Ok(videos_from_playlist_items(payload, channel_id))
+    let video_ids = video_ids_from_playlist_items(&payload);
+    let durations_by_video_id = match fetch_video_durations(client, api_key, &video_ids).await {
+        Ok(durations) => durations,
+        Err(error) => {
+            eprintln!(
+                "Failed fetching durations for channel {}: {}",
+                channel_id, error
+            );
+            HashMap::new()
+        }
+    };
+
+    Ok(videos_from_playlist_items(
+        payload,
+        channel_id,
+        &durations_by_video_id,
+    ))
 }
 
 async fn resolve_uploads_playlist_id(
@@ -359,6 +394,7 @@ async fn resolve_uploads_playlist_id(
 fn videos_from_playlist_items(
     response: PlaylistItemsResponse,
     fallback_channel_id: &str,
+    durations_by_video_id: &HashMap<String, u32>,
 ) -> Vec<Video> {
     response
         .items
@@ -380,6 +416,7 @@ fn videos_from_playlist_items(
                 .as_ref()
                 .and_then(PlaylistThumbnails::best_url)
                 .unwrap_or_else(|| urls::thumbnail_url(&video_id));
+            let duration_seconds = durations_by_video_id.get(&video_id).copied();
 
             Some(Video {
                 video_id,
@@ -388,10 +425,108 @@ fn videos_from_playlist_items(
                 title,
                 published,
                 thumbnail_url,
+                duration_seconds,
                 transcript: None,
             })
         })
         .collect()
+}
+
+fn video_ids_from_playlist_items(response: &PlaylistItemsResponse) -> Vec<String> {
+    response
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.snippet
+                .as_ref()?
+                .resource_id
+                .as_ref()?
+                .video_id
+                .clone()
+        })
+        .collect()
+}
+
+async fn fetch_video_durations(
+    client: &reqwest::Client,
+    api_key: &str,
+    video_ids: &[String],
+) -> Result<HashMap<String, u32>, reqwest::Error> {
+    if video_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let video_ids_csv = video_ids.join(",");
+    let response = client
+        .get(YOUTUBE_VIDEOS_API_URL)
+        .query(&[
+            ("part", "contentDetails"),
+            ("id", video_ids_csv.as_str()),
+            ("key", api_key),
+        ])
+        .send()
+        .await?;
+
+    let response = response.error_for_status()?;
+    let payload = response.json::<VideosResponse>().await?;
+    Ok(payload
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let video_id = item.id?;
+            let iso_duration = item.content_details?.duration?;
+            let seconds = parse_iso8601_duration_seconds(&iso_duration)?;
+            Some((video_id, seconds))
+        })
+        .collect())
+}
+
+fn parse_iso8601_duration_seconds(input: &str) -> Option<u32> {
+    let mut chars = input.chars();
+    if chars.next()? != 'P' {
+        return None;
+    }
+
+    let mut in_time = false;
+    let mut saw_component = false;
+    let mut total_seconds = 0u64;
+    let mut current_number: Option<u64> = None;
+
+    for ch in chars {
+        if ch == 'T' {
+            in_time = true;
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let digit = ch.to_digit(10)? as u64;
+            current_number = Some(
+                current_number
+                    .unwrap_or(0)
+                    .saturating_mul(10)
+                    .saturating_add(digit),
+            );
+            continue;
+        }
+
+        let value = current_number.take()?;
+        let unit_seconds = match (ch, in_time) {
+            ('W', false) => 7 * 24 * 60 * 60,
+            ('D', false) => 24 * 60 * 60,
+            ('H', true) => 60 * 60,
+            ('M', true) => 60,
+            ('S', true) => 1,
+            _ => return None,
+        };
+        total_seconds = total_seconds.saturating_add(value.saturating_mul(unit_seconds));
+        saw_component = true;
+    }
+
+    if current_number.is_some() || !saw_component {
+        return None;
+    }
+
+    u32::try_from(total_seconds).ok()
 }
 
 fn uploads_playlist_id_for_channel(channel_id: &str) -> Option<String> {
@@ -457,4 +592,23 @@ pub fn load_channel_ids(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && !s.starts_with('#'))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_iso8601_duration_seconds;
+
+    #[test]
+    fn parses_common_iso_durations() {
+        assert_eq!(parse_iso8601_duration_seconds("PT15M33S"), Some(933));
+        assert_eq!(parse_iso8601_duration_seconds("PT2H"), Some(7_200));
+        assert_eq!(parse_iso8601_duration_seconds("P1DT2H3M4S"), Some(93_784));
+    }
+
+    #[test]
+    fn rejects_unsupported_or_invalid_durations() {
+        assert_eq!(parse_iso8601_duration_seconds("15M"), None);
+        assert_eq!(parse_iso8601_duration_seconds("P1M"), None);
+        assert_eq!(parse_iso8601_duration_seconds("PT"), None);
+    }
 }
