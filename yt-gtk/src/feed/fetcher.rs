@@ -136,11 +136,11 @@ struct PlaylistThumbnails {
 
 impl PlaylistThumbnails {
     fn best_url(&self) -> Option<String> {
-        self.maxres
+        self.medium//maxres
             .as_ref()
-            .or(self.standard.as_ref())
-            .or(self.high.as_ref())
-            .or(self.medium.as_ref())
+            //.or(self.standard.as_ref())
+            //.or(self.high.as_ref())
+            //.or(self.medium.as_ref())
             .or(self.default_thumbnail.as_ref())
             .map(|t| t.url.clone())
     }
