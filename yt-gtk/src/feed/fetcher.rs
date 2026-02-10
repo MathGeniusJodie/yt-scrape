@@ -2,8 +2,9 @@ use crate::data::Video;
 use crate::urls;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use futures::stream::{self, StreamExt};
 use serde::Deserialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 
@@ -12,9 +13,10 @@ const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/ch
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
 const PLAYLIST_ITEMS_MAX_RESULTS: &str = "25";
 const MAX_FETCH_ATTEMPTS: usize = 3;
-const INITIAL_BACKOFF_MS: u64 = 15_000;
-const MAX_BACKOFF_MS: u64 = 300_000;
-const MAX_BACKOFF_JITTER_MS: u64 = 2_000;
+const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
+const INITIAL_BACKOFF_MS: u64 = 1_000;
+const MAX_BACKOFF_MS: u64 = 4_000;
+const MAX_BACKOFF_JITTER_MS: u64 = 100;
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
 
@@ -157,6 +159,11 @@ struct PendingChannel {
     not_before: Instant,
 }
 
+enum ChannelFetchResult {
+    Success { videos: Vec<Video> },
+    Failed,
+}
+
 /// Fetch all feeds from the given channel IDs
 pub async fn fetch_all_feeds(
     channel_ids: Vec<String>,
@@ -177,17 +184,15 @@ pub async fn fetch_all_feeds(
     let mut all_videos = Vec::new();
     let mut successful_channels = 0usize;
     let mut failed_channels = 0usize;
-
-    let now = Instant::now();
-    let mut queue = VecDeque::new();
+    let mut pending_channels = Vec::new();
 
     for channel_id in channel_ids {
         match uploads_playlist_id_for_channel(&channel_id) {
-            Some(uploads_playlist_id) => queue.push_back(PendingChannel {
+            Some(uploads_playlist_id) => pending_channels.push(PendingChannel {
                 channel_id,
                 uploads_playlist_id,
                 attempt: 1,
-                not_before: now,
+                not_before: Instant::now(),
             }),
             None => {
                 failed_channels += 1;
@@ -201,21 +206,56 @@ pub async fn fetch_all_feeds(
         }
     }
 
-    while !queue.is_empty() {
-        if !move_next_ready_channel_to_front(&mut queue) {
-            if let Some(next_ready_at) = queue.iter().map(|entry| entry.not_before).min() {
-                let now = Instant::now();
-                if next_ready_at > now {
-                    sleep(next_ready_at - now).await;
-                }
-            }
-            continue;
-        }
+    let mut fetches = stream::iter(pending_channels.into_iter().map(|pending| {
+        let client = client.clone();
+        let api_key = api_key.clone();
+        let tx = tx.clone();
 
-        let mut pending = match queue.pop_front() {
-            Some(entry) => entry,
-            None => continue,
-        };
+        async move { fetch_channel_with_retries(client, api_key, pending, tx).await }
+    }))
+    .buffer_unordered(MAX_CONCURRENT_CHANNEL_FETCHES);
+
+    while let Some(result) = fetches.next().await {
+        match result {
+            ChannelFetchResult::Success { videos } => {
+                successful_channels += 1;
+                all_videos.extend(videos);
+            }
+            ChannelFetchResult::Failed => {
+                failed_channels += 1;
+            }
+        }
+    }
+
+    // Sort by published date (newest first)
+    all_videos.sort_by(|a, b| b.published.cmp(&a.published));
+
+    // Keep only the most recent 400
+    all_videos.truncate(400);
+
+    let total_videos = all_videos.len();
+    let _ = tx
+        .send(FetchProgress::AllComplete {
+            total_videos,
+            successful_channels,
+            failed_channels,
+        })
+        .await;
+
+    Ok(all_videos)
+}
+
+async fn fetch_channel_with_retries(
+    client: reqwest::Client,
+    api_key: String,
+    mut pending: PendingChannel,
+    tx: mpsc::Sender<FetchProgress>,
+) -> ChannelFetchResult {
+    loop {
+        let now = Instant::now();
+        if pending.not_before > now {
+            sleep(pending.not_before - now).await;
+        }
 
         let fetch_result = fetch_channel_once(
             &client,
@@ -227,14 +267,13 @@ pub async fn fetch_all_feeds(
 
         match fetch_result {
             Ok(videos) => {
-                successful_channels += 1;
                 let _ = tx
                     .send(FetchProgress::ChannelComplete {
                         channel: pending.channel_id.clone(),
                         count: videos.len(),
                     })
                     .await;
-                all_videos.extend(videos);
+                return ChannelFetchResult::Success { videos };
             }
             Err(error) => {
                 if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
@@ -257,7 +296,6 @@ pub async fn fetch_all_feeds(
 
                             pending.uploads_playlist_id = resolved_uploads_playlist_id;
                             pending.not_before = Instant::now();
-                            queue.push_back(pending);
                             continue;
                         }
                         Ok(_) => {}
@@ -285,47 +323,18 @@ pub async fn fetch_all_feeds(
 
                     pending.attempt += 1;
                     pending.not_before = Instant::now() + Duration::from_millis(delay_ms);
-                    queue.push_back(pending);
                     continue;
                 }
 
-                failed_channels += 1;
                 let _ = tx
                     .send(FetchProgress::Error {
                         channel_id: pending.channel_id,
                         error: error.to_string(),
                     })
                     .await;
+                return ChannelFetchResult::Failed;
             }
         }
-    }
-
-    // Sort by published date (newest first)
-    all_videos.sort_by(|a, b| b.published.cmp(&a.published));
-
-    // Keep only the most recent 400
-    all_videos.truncate(400);
-
-    let total_videos = all_videos.len();
-    let _ = tx
-        .send(FetchProgress::AllComplete {
-            total_videos,
-            successful_channels,
-            failed_channels,
-        })
-        .await;
-
-    Ok(all_videos)
-}
-
-fn move_next_ready_channel_to_front(queue: &mut VecDeque<PendingChannel>) -> bool {
-    let now = Instant::now();
-    let ready_index = queue.iter().position(|entry| entry.not_before <= now);
-    if let Some(index) = ready_index {
-        queue.rotate_left(index);
-        true
-    } else {
-        false
     }
 }
 
