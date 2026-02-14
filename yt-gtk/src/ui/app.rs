@@ -15,7 +15,7 @@ use gtk::{
     Popover, ScrolledWindow, Spinner, Stack,
 };
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 struct AppState {
     videos: Vec<Video>,
     watch_later: HashSet<String>,
+    summaries_in_progress: HashSet<String>,
     current_tab: Tab,
     storage: Storage,
     subs_file: PathBuf,
@@ -53,6 +54,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let state = Rc::new(RefCell::new(AppState {
         videos,
         watch_later,
+        summaries_in_progress: HashSet::new(),
         current_tab: Tab::Feed,
         storage,
         subs_file,
@@ -463,7 +465,9 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             let wl_badge2 = wl_badge.clone();
             videos_rx.attach(None, move |videos| {
                 // Save to storage and update state
+                let mut videos = videos;
                 let mut state = state_clone.borrow_mut();
+                merge_cached_video_fields(&mut videos, &state.videos);
                 let _ = state.storage.save_videos(&videos);
                 state.videos = videos;
 
@@ -571,12 +575,14 @@ fn create_context_menu(
         let badge = badge.clone();
         watch_later_button.connect_clicked(move |_| {
             if let Some(ref video) = selected_video.borrow().clone() {
+                let mut added_to_watch_later = false;
                 {
                     let mut state = state_rc.borrow_mut();
                     if state.watch_later.contains(&video.video_id) {
                         state.watch_later.remove(&video.video_id);
                     } else {
                         state.watch_later.insert(video.video_id.clone());
+                        added_to_watch_later = true;
 
                         // Start download if not already downloaded
                         if !state.storage.has_video(&video.video_id) {
@@ -628,6 +634,24 @@ fn create_context_menu(
                     &selected_video,
                     &badge,
                 );
+                drop(state_ref);
+
+                if added_to_watch_later {
+                    maybe_prefetch_summary_for_watch_later(
+                        &state_rc,
+                        &window,
+                        &popover_clone,
+                        runtime.clone(),
+                        feed_flow.clone(),
+                        watch_later_flow.clone(),
+                        selected_video.clone(),
+                        badge.clone(),
+                        video.video_id.clone(),
+                        video.video_url.clone(),
+                        video.video_title.clone(),
+                        video.channel_name.clone(),
+                    );
+                }
             }
         });
     }
@@ -638,18 +662,25 @@ fn create_context_menu(
         let popover = popover.clone();
         let window = window.clone();
         let runtime = runtime.clone();
+        let feed_flow = feed_flow.clone();
+        let watch_later_flow = watch_later_flow.clone();
+        let badge = badge.clone();
         summary_button.connect_clicked(move |_| {
             if let Some(ref video) = *selected_video.borrow() {
-                let transcripts_work_dir = state_rc.borrow().storage.transcripts_work_dir().clone();
                 popover.popdown();
                 show_summary_dialog(
                     &window,
+                    &state_rc,
+                    &popover,
+                    runtime.clone(),
+                    feed_flow.clone(),
+                    watch_later_flow.clone(),
+                    selected_video.clone(),
+                    badge.clone(),
                     &video.video_id,
                     &video.video_url,
                     &video.video_title,
                     &video.channel_name,
-                    transcripts_work_dir,
-                    runtime.clone(),
                 );
             }
         });
@@ -709,9 +740,15 @@ fn populate_flow_box(
         let thumbnail_path = state.storage.thumbnail_path(&video.video_id);
         let is_watch_later = state.watch_later.contains(&video.video_id);
         let is_downloaded = state.storage.has_video(&video.video_id);
+        let has_ai_summary = has_cached_summary(video);
 
-        let (card, watch_later_toggle) =
-            create_video_card(video, &thumbnail_path, is_watch_later, is_downloaded);
+        let (card, watch_later_toggle, ai_summary_button) = create_video_card(
+            video,
+            &thumbnail_path,
+            is_watch_later,
+            is_downloaded,
+            has_ai_summary,
+        );
 
         let video_id = video.video_id.clone();
         let video_title = video.title.clone();
@@ -724,6 +761,8 @@ fn populate_flow_box(
         // Clone for watch later toggle (before button_press_event moves them)
         let wl_video_id = video_id.clone();
         let wl_video_title = video_title.clone();
+        let wl_video_url = video_url.clone();
+        let wl_channel_name = channel_name.clone();
         let wl_state_rc = state_rc.clone();
         let wl_runtime = runtime.clone();
         let wl_feed_flow = feed_flow.clone();
@@ -732,6 +771,38 @@ fn populate_flow_box(
         let wl_window = _window.clone();
         let wl_selected_video = selected_video.clone();
         let wl_badge = badge.clone();
+
+        if let Some(ai_summary_button) = ai_summary_button {
+            let summary_window = _window.clone();
+            let summary_state_rc = state_rc.clone();
+            let summary_context_menu = context_menu.clone();
+            let summary_runtime = runtime.clone();
+            let summary_feed_flow = feed_flow.clone();
+            let summary_watch_later_flow = watch_later_flow.clone();
+            let summary_selected_video = selected_video.clone();
+            let summary_badge = badge.clone();
+            let summary_video_id = video_id.clone();
+            let summary_video_url = video_url.clone();
+            let summary_video_title = video_title.clone();
+            let summary_channel_name = channel_name.clone();
+
+            ai_summary_button.connect_clicked(move |_| {
+                show_summary_dialog(
+                    &summary_window,
+                    &summary_state_rc,
+                    &summary_context_menu,
+                    summary_runtime.clone(),
+                    summary_feed_flow.clone(),
+                    summary_watch_later_flow.clone(),
+                    summary_selected_video.clone(),
+                    summary_badge.clone(),
+                    &summary_video_id,
+                    &summary_video_url,
+                    &summary_video_title,
+                    &summary_channel_name,
+                );
+            });
+        }
 
         // Double-click to play, right-click for context menu
         card.connect_button_press_event(
@@ -765,12 +836,14 @@ fn populate_flow_box(
 
         // Watch later toggle button handler
         watch_later_toggle.connect_clicked(move |_| {
+            let mut added_to_watch_later = false;
             {
                 let mut state = wl_state_rc.borrow_mut();
                 if state.watch_later.contains(&wl_video_id) {
                     state.watch_later.remove(&wl_video_id);
                 } else {
                     state.watch_later.insert(wl_video_id.clone());
+                    added_to_watch_later = true;
 
                     // Start download if not already downloaded
                     if !state.storage.has_video(&wl_video_id) {
@@ -819,6 +892,24 @@ fn populate_flow_box(
                 &wl_selected_video,
                 &wl_badge,
             );
+            drop(state_ref);
+
+            if added_to_watch_later {
+                maybe_prefetch_summary_for_watch_later(
+                    &wl_state_rc,
+                    &wl_window,
+                    &wl_context_menu,
+                    wl_runtime.clone(),
+                    wl_feed_flow.clone(),
+                    wl_watch_later_flow.clone(),
+                    wl_selected_video.clone(),
+                    wl_badge.clone(),
+                    wl_video_id.clone(),
+                    wl_video_url.clone(),
+                    wl_video_title.clone(),
+                    wl_channel_name.clone(),
+                );
+            }
         });
 
         flow_box.add(&card);
@@ -842,6 +933,73 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
     } else {
         badge.hide();
     }
+}
+
+fn has_cached_summary(video: &Video) -> bool {
+    video
+        .ai_summary
+        .as_ref()
+        .map(|summary| !summary.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn merge_cached_video_fields(videos: &mut [Video], cached_videos: &[Video]) {
+    let cached_by_id: HashMap<&str, &Video> = cached_videos
+        .iter()
+        .map(|video| (video.video_id.as_str(), video))
+        .collect();
+
+    for video in videos {
+        if let Some(cached) = cached_by_id.get(video.video_id.as_str()) {
+            if video.transcript.is_none() {
+                video.transcript = cached.transcript.clone();
+            }
+            if video.ai_summary.is_none() {
+                video.ai_summary = cached.ai_summary.clone();
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_video_lists(
+    state_rc: &Rc<RefCell<AppState>>,
+    context_menu: &Popover,
+    window: &ApplicationWindow,
+    runtime: Arc<Runtime>,
+    feed_flow: &FlowBox,
+    watch_later_flow: &FlowBox,
+    selected_video: &Rc<RefCell<Option<SelectedVideo>>>,
+    badge: &Label,
+) {
+    let state_ref = state_rc.borrow();
+    update_watch_later_badge(badge, state_ref.watch_later.len());
+    populate_flow_box(
+        feed_flow,
+        &state_ref,
+        Tab::Feed,
+        context_menu,
+        state_rc,
+        window,
+        runtime.clone(),
+        feed_flow.clone(),
+        watch_later_flow.clone(),
+        selected_video,
+        badge,
+    );
+    populate_flow_box(
+        watch_later_flow,
+        &state_ref,
+        Tab::WatchLater,
+        context_menu,
+        state_rc,
+        window,
+        runtime,
+        feed_flow.clone(),
+        watch_later_flow.clone(),
+        selected_video,
+        badge,
+    );
 }
 
 fn download_missing_thumbnails(videos: &[Video], storage: &Storage, runtime: Arc<Runtime>) {
@@ -910,14 +1068,264 @@ fn download_missing_thumbnails(videos: &[Video], storage: &Storage, runtime: Arc
     });
 }
 
+#[allow(deprecated)]
+fn spawn_summary_generation(
+    runtime: Arc<Runtime>,
+    video_id: String,
+    video_url: String,
+    video_title: String,
+    channel_name: String,
+    transcripts_work_dir: PathBuf,
+) -> glib::Receiver<Result<String, String>> {
+    let (gtx, grx) = glib::MainContext::channel::<Result<String, String>>(glib::Priority::DEFAULT);
+
+    std::thread::spawn(move || {
+        let result = runtime.block_on(async {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            summarize_video_streaming(
+                &video_id,
+                &video_url,
+                &video_title,
+                &channel_name,
+                &transcripts_work_dir,
+                tx,
+            )
+            .await;
+
+            let mut summary = String::new();
+            let mut error: Option<String> = None;
+
+            while let Some(message) = rx.recv().await {
+                match message {
+                    StreamingMessage::Chunk(text) => summary.push_str(&text),
+                    StreamingMessage::Done => {}
+                    StreamingMessage::Error(err) => error = Some(err),
+                }
+            }
+
+            if let Some(err) = error {
+                Err(err)
+            } else {
+                let summary = summary.trim().to_string();
+                if summary.is_empty() {
+                    Err("Summary was empty".to_string())
+                } else {
+                    Ok(summary)
+                }
+            }
+        });
+
+        let _ = gtx.send(result);
+    });
+
+    grx
+}
+
+fn persist_summary_to_cache(
+    state_rc: &Rc<RefCell<AppState>>,
+    video_id: &str,
+    summary: String,
+) -> bool {
+    let mut state = state_rc.borrow_mut();
+    state.summaries_in_progress.remove(video_id);
+
+    let mut updated = false;
+    if let Some(video) = state
+        .videos
+        .iter_mut()
+        .find(|video| video.video_id == video_id)
+    {
+        video.ai_summary = Some(summary);
+        updated = true;
+    }
+
+    if updated {
+        let _ = state.storage.save_videos(&state.videos);
+    }
+
+    updated
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maybe_prefetch_summary_for_watch_later(
+    state_rc: &Rc<RefCell<AppState>>,
+    window: &ApplicationWindow,
+    context_menu: &Popover,
+    runtime: Arc<Runtime>,
+    feed_flow: FlowBox,
+    watch_later_flow: FlowBox,
+    selected_video: Rc<RefCell<Option<SelectedVideo>>>,
+    badge: Label,
+    video_id: String,
+    video_url: String,
+    video_title: String,
+    channel_name: String,
+) {
+    let should_prefetch = {
+        let mut state = state_rc.borrow_mut();
+        let has_summary = state
+            .videos
+            .iter()
+            .find(|video| video.video_id == video_id)
+            .map(has_cached_summary)
+            .unwrap_or(false);
+
+        if has_summary || state.summaries_in_progress.contains(&video_id) {
+            false
+        } else {
+            state.summaries_in_progress.insert(video_id.clone());
+            true
+        }
+    };
+
+    if !should_prefetch {
+        return;
+    }
+
+    let transcripts_work_dir = state_rc.borrow().storage.transcripts_work_dir().clone();
+    let result_rx = spawn_summary_generation(
+        runtime.clone(),
+        video_id.clone(),
+        video_url,
+        video_title,
+        channel_name,
+        transcripts_work_dir,
+    );
+
+    let state_for_result = state_rc.clone();
+    let window_for_result = window.clone();
+    let context_menu_for_result = context_menu.clone();
+    let feed_flow_for_result = feed_flow.clone();
+    let watch_later_flow_for_result = watch_later_flow.clone();
+    let selected_video_for_result = selected_video.clone();
+    let badge_for_result = badge.clone();
+    let video_id_for_result = video_id.clone();
+
+    result_rx.attach(None, move |result| {
+        match result {
+            Ok(summary) => {
+                if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+                    refresh_video_lists(
+                        &state_for_result,
+                        &context_menu_for_result,
+                        &window_for_result,
+                        runtime.clone(),
+                        &feed_flow_for_result,
+                        &watch_later_flow_for_result,
+                        &selected_video_for_result,
+                        &badge_for_result,
+                    );
+                }
+            }
+            Err(error) => {
+                state_for_result
+                    .borrow_mut()
+                    .summaries_in_progress
+                    .remove(&video_id_for_result);
+                eprintln!(
+                    "Failed to prefetch summary for {}: {}",
+                    video_id_for_result, error
+                );
+            }
+        }
+
+        glib::ControlFlow::Break
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_summary_generation_for_dialog(
+    state_rc: Rc<RefCell<AppState>>,
+    window: ApplicationWindow,
+    context_menu: Popover,
+    runtime: Arc<Runtime>,
+    feed_flow: FlowBox,
+    watch_later_flow: FlowBox,
+    selected_video: Rc<RefCell<Option<SelectedVideo>>>,
+    badge: Label,
+    video_id: String,
+    video_url: String,
+    video_title: String,
+    channel_name: String,
+    buffer: gtk::TextBuffer,
+    regenerate_button: Button,
+    loading_text: &str,
+) {
+    buffer.set_text(loading_text);
+    regenerate_button.set_sensitive(false);
+
+    state_rc
+        .borrow_mut()
+        .summaries_in_progress
+        .insert(video_id.clone());
+
+    let transcripts_work_dir = state_rc.borrow().storage.transcripts_work_dir().clone();
+    let result_rx = spawn_summary_generation(
+        runtime.clone(),
+        video_id.clone(),
+        video_url,
+        video_title,
+        channel_name,
+        transcripts_work_dir,
+    );
+
+    let state_for_result = state_rc.clone();
+    let window_for_result = window.clone();
+    let context_menu_for_result = context_menu.clone();
+    let feed_flow_for_result = feed_flow.clone();
+    let watch_later_flow_for_result = watch_later_flow.clone();
+    let selected_video_for_result = selected_video.clone();
+    let badge_for_result = badge.clone();
+    let video_id_for_result = video_id.clone();
+    let buffer_for_result = buffer.clone();
+    let button_for_result = regenerate_button.clone();
+
+    result_rx.attach(None, move |result| {
+        button_for_result.set_sensitive(true);
+
+        match result {
+            Ok(summary) => {
+                buffer_for_result.set_text(&summary);
+                if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+                    refresh_video_lists(
+                        &state_for_result,
+                        &context_menu_for_result,
+                        &window_for_result,
+                        runtime.clone(),
+                        &feed_flow_for_result,
+                        &watch_later_flow_for_result,
+                        &selected_video_for_result,
+                        &badge_for_result,
+                    );
+                }
+            }
+            Err(error) => {
+                state_for_result
+                    .borrow_mut()
+                    .summaries_in_progress
+                    .remove(&video_id_for_result);
+                buffer_for_result.set_text(&format!("Error: {}", error));
+            }
+        }
+
+        glib::ControlFlow::Break
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn show_summary_dialog(
     window: &ApplicationWindow,
+    state_rc: &Rc<RefCell<AppState>>,
+    context_menu: &Popover,
+    runtime: Arc<Runtime>,
+    feed_flow: FlowBox,
+    watch_later_flow: FlowBox,
+    selected_video: Rc<RefCell<Option<SelectedVideo>>>,
+    badge: Label,
     video_id: &str,
     video_url: &str,
     video_title: &str,
     channel_name: &str,
-    transcripts_work_dir: PathBuf,
-    runtime: Arc<Runtime>,
 ) {
     let dialog = gtk::Dialog::with_buttons(
         Some(&format!("Summary: {}", video_title)),
@@ -928,6 +1336,19 @@ fn show_summary_dialog(
     dialog.set_default_size(700, 500);
 
     let content_area = dialog.content_area();
+
+    let controls_row = GtkBox::new(Orientation::Horizontal, 8);
+    controls_row.set_margin_start(8);
+    controls_row.set_margin_end(8);
+    controls_row.set_margin_top(8);
+
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    controls_row.pack_start(&spacer, true, true, 0);
+
+    let regenerate_button = Button::with_label("Regenerate Summary");
+    controls_row.pack_end(&regenerate_button, false, false, 0);
+    content_area.pack_start(&controls_row, false, false, 0);
 
     let scrolled = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
@@ -942,65 +1363,89 @@ fn show_summary_dialog(
     text_view.set_bottom_margin(12);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-    buffer.set_text("Loading summary...");
     text_view.set_buffer(Some(&buffer));
 
     scrolled.add(&text_view);
     content_area.pack_start(&scrolled, true, true, 0);
 
-    dialog.show_all();
-
-    // Start streaming summary
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state_rc_for_dialog = state_rc.clone();
+    let context_menu_for_dialog = context_menu.clone();
+    let window_for_dialog = window.clone();
     let video_id = video_id.to_string();
     let video_url = video_url.to_string();
     let video_title = video_title.to_string();
     let channel_name = channel_name.to_string();
 
-    std::thread::spawn(move || {
-        runtime.block_on(async {
-            summarize_video_streaming(
-                &video_id,
-                &video_url,
-                &video_title,
-                &channel_name,
-                &transcripts_work_dir,
-                tx,
-            )
-            .await;
+    let cached_summary = {
+        let state = state_rc.borrow();
+        state
+            .videos
+            .iter()
+            .find(|video| video.video_id == video_id)
+            .and_then(|video| video.ai_summary.clone())
+            .filter(|summary| !summary.trim().is_empty())
+    };
+
+    if let Some(summary) = cached_summary {
+        buffer.set_text(&summary);
+    } else {
+        start_summary_generation_for_dialog(
+            state_rc_for_dialog.clone(),
+            window_for_dialog.clone(),
+            context_menu_for_dialog.clone(),
+            runtime.clone(),
+            feed_flow.clone(),
+            watch_later_flow.clone(),
+            selected_video.clone(),
+            badge.clone(),
+            video_id.clone(),
+            video_url.clone(),
+            video_title.clone(),
+            channel_name.clone(),
+            buffer.clone(),
+            regenerate_button.clone(),
+            "Loading summary...",
+        );
+    }
+
+    {
+        let state_rc_for_click = state_rc_for_dialog.clone();
+        let window_for_click = window_for_dialog.clone();
+        let context_menu_for_click = context_menu_for_dialog.clone();
+        let runtime_for_click = runtime.clone();
+        let feed_flow_for_click = feed_flow.clone();
+        let watch_later_flow_for_click = watch_later_flow.clone();
+        let selected_video_for_click = selected_video.clone();
+        let badge_for_click = badge.clone();
+        let buffer_for_click = buffer.clone();
+        let regenerate_button_for_click = regenerate_button.clone();
+        let video_id_for_click = video_id.clone();
+        let video_url_for_click = video_url.clone();
+        let video_title_for_click = video_title.clone();
+        let channel_name_for_click = channel_name.clone();
+
+        regenerate_button.connect_clicked(move |_| {
+            start_summary_generation_for_dialog(
+                state_rc_for_click.clone(),
+                window_for_click.clone(),
+                context_menu_for_click.clone(),
+                runtime_for_click.clone(),
+                feed_flow_for_click.clone(),
+                watch_later_flow_for_click.clone(),
+                selected_video_for_click.clone(),
+                badge_for_click.clone(),
+                video_id_for_click.clone(),
+                video_url_for_click.clone(),
+                video_title_for_click.clone(),
+                channel_name_for_click.clone(),
+                buffer_for_click.clone(),
+                regenerate_button_for_click.clone(),
+                "Regenerating summary...",
+            );
         });
-    });
+    }
 
-    // Handle streaming updates
-    #[allow(deprecated)]
-    let (gtx, grx) = glib::MainContext::channel(glib::Priority::DEFAULT);
-
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            while let Some(msg) = rx.recv().await {
-                let _ = gtx.send(msg);
-            }
-        });
-    });
-
-    let accumulated = Rc::new(RefCell::new(String::new()));
-
-    grx.attach(None, move |msg| {
-        match msg {
-            StreamingMessage::Chunk(text) => {
-                accumulated.borrow_mut().push_str(&text);
-                buffer.set_text(&accumulated.borrow());
-            }
-            StreamingMessage::Done => {
-                // Summary complete
-            }
-            StreamingMessage::Error(e) => {
-                buffer.set_text(&format!("Error: {}", e));
-            }
-        }
-        glib::ControlFlow::Continue
-    });
+    dialog.show_all();
 
     dialog.connect_response(|dialog, _| {
         dialog.close();

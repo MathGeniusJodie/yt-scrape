@@ -16,6 +16,8 @@ pub struct Video {
     pub duration_seconds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_summary: Option<String>,
 }
 
 impl Video {

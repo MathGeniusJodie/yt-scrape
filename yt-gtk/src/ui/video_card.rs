@@ -8,13 +8,14 @@ use std::path::Path;
 use std::rc::Rc;
 
 /// Create a video card widget
-/// Returns the card EventBox and the watch later toggle button
+/// Returns the card EventBox, watch later toggle button, and optional AI summary button
 pub fn create_video_card(
     video: &Video,
     thumbnail_path: &Path,
     is_watch_later: bool,
     is_downloaded: bool,
-) -> (EventBox, gtk::Button) {
+    has_ai_summary: bool,
+) -> (EventBox, gtk::Button, Option<gtk::Button>) {
     let event_box = EventBox::new();
     event_box.set_above_child(false);
     event_box.set_hexpand(false);
@@ -169,12 +170,23 @@ pub fn create_video_card(
         status_box.pack_end(&downloaded_label, false, false, 0);
     }
 
+    let mut ai_summary_button = None;
+    if has_ai_summary {
+        let summary_button = gtk::Button::with_label("AI");
+        summary_button.set_widget_name("status-ai-summary-button");
+        summary_button.set_relief(gtk::ReliefStyle::None);
+        summary_button.set_can_focus(false);
+        summary_button.set_tooltip_text(Some("Show cached AI summary"));
+        status_box.pack_end(&summary_button, false, false, 0);
+        ai_summary_button = Some(summary_button);
+    }
+
     content_box.pack_start(&status_box, false, false, 0);
 
     card.pack_start(&content_box, false, false, 0);
 
     event_box.add(&card);
-    (event_box, watch_later_toggle)
+    (event_box, watch_later_toggle, ai_summary_button)
 }
 
 /// Crop a pixbuf to 16:9 aspect ratio (center crop)

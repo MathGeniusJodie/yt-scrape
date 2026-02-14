@@ -136,7 +136,7 @@ struct PlaylistThumbnails {
 
 impl PlaylistThumbnails {
     fn best_url(&self) -> Option<String> {
-        self.medium//maxres
+        self.medium //maxres
             .as_ref()
             .or(self.high.as_ref())
             .or(self.standard.as_ref())
@@ -437,6 +437,7 @@ fn videos_from_playlist_items(
                 thumbnail_url,
                 duration_seconds,
                 transcript: None,
+                ai_summary: None,
             })
         })
         .collect()
