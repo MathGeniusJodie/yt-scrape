@@ -6,6 +6,7 @@ use crate::player::play_video;
 use crate::ui::dialogs::show_text_dialog;
 use crate::ui::video_card::create_video_card;
 
+use futures::stream::{self, StreamExt};
 use gio::prelude::*;
 use glib::clone;
 use gtk::prelude::*;
@@ -467,7 +468,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 state.videos = videos;
 
                 // Start thumbnail downloads
-                download_missing_thumbnails(&state.videos, &state.storage);
+                download_missing_thumbnails(&state.videos, &state.storage, runtime.clone());
 
                 // Repopulate flow boxes
                 drop(state);
@@ -498,7 +499,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     // Start thumbnail downloads for visible videos
     {
         let state_ref = state.borrow();
-        download_missing_thumbnails(&state_ref.videos, &state_ref.storage);
+        download_missing_thumbnails(&state_ref.videos, &state_ref.storage, runtime.clone());
     }
 
     window.show_all();
@@ -843,30 +844,70 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
     }
 }
 
-fn download_missing_thumbnails(videos: &[Video], storage: &Storage) {
-    let client = reqwest::Client::new();
+fn download_missing_thumbnails(videos: &[Video], storage: &Storage, runtime: Arc<Runtime>) {
+    const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
 
-    for video in videos.iter().take(50) {
-        let thumbnail_path = storage.thumbnail_path(&video.video_id);
-        if thumbnail_path.exists() {
-            continue;
-        }
+    let pending_downloads: Vec<(String, PathBuf)> = videos
+        .iter()
+        .filter_map(|video| {
+            let path = storage.thumbnail_path(&video.video_id);
+            if path.exists() {
+                None
+            } else {
+                Some((video.thumbnail_url.clone(), path))
+            }
+        })
+        .collect();
 
-        let url = video.thumbnail_url.clone();
-        let path = thumbnail_path.clone();
-        let client = client.clone();
+    if pending_downloads.is_empty() {
+        return;
+    }
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                if let Ok(response) = client.get(&url).send().await {
-                    if let Ok(bytes) = response.bytes().await {
-                        let _ = std::fs::write(&path, &bytes);
+    runtime.spawn(async move {
+        let client = reqwest::Client::new();
+
+        stream::iter(pending_downloads)
+            .for_each_concurrent(THUMBNAIL_DOWNLOAD_CONCURRENCY, move |(url, path)| {
+                let client = client.clone();
+                async move {
+                    if path.exists() {
+                        return;
+                    }
+
+                    let response = match client.get(&url).send().await {
+                        Ok(response) => response,
+                        Err(error) => {
+                            eprintln!("Thumbnail request failed for {}: {}", url, error);
+                            return;
+                        }
+                    };
+
+                    let response = match response.error_for_status() {
+                        Ok(response) => response,
+                        Err(error) => {
+                            eprintln!("Thumbnail response failed for {}: {}", url, error);
+                            return;
+                        }
+                    };
+
+                    match response.bytes().await {
+                        Ok(bytes) => {
+                            if let Err(error) = tokio::fs::write(&path, &bytes).await {
+                                eprintln!(
+                                    "Failed writing thumbnail to {}: {}",
+                                    path.display(),
+                                    error
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Failed reading thumbnail bytes for {}: {}", url, error);
+                        }
                     }
                 }
-            });
-        });
-    }
+            })
+            .await;
+    });
 }
 
 fn show_summary_dialog(
