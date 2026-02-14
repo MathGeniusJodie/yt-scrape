@@ -165,9 +165,15 @@ pub fn create_video_card(
     status_box.pack_start(&spacer, true, true, 0);
 
     if is_downloaded {
-        let downloaded_label = Label::new(Some("Downloaded"));
-        downloaded_label.set_widget_name("status-downloaded");
-        status_box.pack_end(&downloaded_label, false, false, 0);
+        let downloaded_badge = gtk::Box::new(Orientation::Horizontal, 0);
+        downloaded_badge.set_widget_name("status-downloaded");
+        downloaded_badge.set_tooltip_text(Some("Downloaded"));
+
+        let downloaded_icon =
+            gtk::Image::from_icon_name(Some("media-floppy-symbolic"), gtk::IconSize::Menu);
+        downloaded_badge.pack_start(&downloaded_icon, false, false, 0);
+
+        status_box.pack_end(&downloaded_badge, false, false, 0);
     }
 
     let mut ai_summary_button = None;
