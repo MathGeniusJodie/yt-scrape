@@ -414,22 +414,18 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 }
             };
 
-            // Create channel for progress updates
+            // Channel for progress updates: tokio mpsc → async_channel → glib main context
             let (tx, mut rx) = mpsc::channel::<FetchProgress>(100);
+            let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
 
-            // Channel to send fetched videos back to main thread
-            #[allow(deprecated)]
-            let (videos_tx, videos_rx) =
-                glib::MainContext::channel::<Vec<Video>>(glib::Priority::DEFAULT);
-
-            // Spawn the fetch task
+            // Spawn the fetch task on a background thread (tokio block_on)
             let runtime_clone = ui_context.runtime.clone();
             let tx_for_errors = tx.clone();
             std::thread::spawn(move || {
                 runtime_clone.block_on(async {
                     match fetch_all_feeds(channel_ids, tx).await {
                         Ok(videos) => {
-                            let _ = videos_tx.send(videos);
+                            let _ = videos_tx.send(videos).await;
                         }
                         Err(e) => {
                             let _ = tx_for_errors
@@ -442,119 +438,122 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 });
             });
 
-            // Handle progress updates on main thread
-            #[allow(deprecated)]
-            let (gtx, grx) = glib::MainContext::channel(glib::Priority::DEFAULT);
-
+            // Relay progress from tokio mpsc to async_channel so the glib main context can await it
+            let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
             ui_context.runtime.spawn(async move {
                 while let Some(progress) = rx.recv().await {
-                    if gtx.send(progress).is_err() {
+                    if progress_tx.send(progress).await.is_err() {
                         break;
                     }
                 }
             });
 
-            let mut total_channels = 0usize;
-            let mut completed_channels = 0usize;
-            let mut failed_channels = 0usize;
+            // Drive progress updates on the glib main context (GTK is single-threaded)
+            let spinner_p = spinner.clone();
+            let status_label_p = status_label.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let mut total_channels = 0usize;
+                let mut completed_channels = 0usize;
+                let mut failed_channels = 0usize;
 
-            grx.attach(None, move |progress| {
-                match progress {
-                    FetchProgress::Started { total } => {
-                        total_channels = total;
-                        completed_channels = 0;
-                        failed_channels = 0;
-                        status_label.set_text(&format!("Fetching feeds (0/{total})..."));
-                    }
-                    FetchProgress::ChannelComplete { channel, count } => {
-                        completed_channels += 1;
-                        if failed_channels == 0 {
-                            status_label.set_text(&format!(
-                                "Fetching feeds ({completed_channels}/{total_channels})..."
-                            ));
-                        } else {
-                            status_label.set_text(&format!(
-                                "Fetching feeds ({completed_channels}/{total_channels}, {failed_channels} failed)..."
-                            ));
+                while let Ok(progress) = progress_rx.recv().await {
+                    match progress {
+                        FetchProgress::Started { total } => {
+                            total_channels = total;
+                            completed_channels = 0;
+                            failed_channels = 0;
+                            status_label_p.set_text(&format!("Fetching feeds (0/{total})..."));
                         }
-                        info!("Fetched {} videos for channel {}", count, channel);
-                    }
-                    FetchProgress::RetryScheduled {
-                        channel_id,
-                        next_attempt,
-                        max_attempts,
-                        delay_secs,
-                        reason,
-                    } => {
-                        status_label.set_text(&format!(
-                            "Retrying {} ({}/{}) in {}s...",
-                            channel_id, next_attempt, max_attempts, delay_secs
-                        ));
-                        warn!(
-                            "Retrying channel {} ({}/{}) in {}s: {}",
-                            channel_id, next_attempt, max_attempts, delay_secs, reason
-                        );
-                    }
-                    FetchProgress::Error { channel_id, error } => {
-                        completed_channels += 1;
-                        failed_channels += 1;
-                        status_label.set_text(&format!(
-                            "Failed {} of {} channels (last: {})",
-                            failed_channels, total_channels, channel_id
-                        ));
-                        error!("Error fetching {}: {}", channel_id, error);
-                    }
-                    FetchProgress::Fatal { error } => {
-                        spinner.stop();
-                        status_label.set_text(&format!("Refresh failed: {}", error));
-                        error!("Fatal refresh error: {}", error);
-                        return glib::ControlFlow::Break;
-                    }
-                    FetchProgress::AllComplete {
-                        total_videos,
-                        successful_channels,
-                        failed_channels: final_failed_channels,
-                    } => {
-                        spinner.stop();
-                        if final_failed_channels > 0 {
-                            status_label.set_text(&format!(
-                                "{} videos loaded ({} channels ok, {} failed)",
-                                total_videos, successful_channels, final_failed_channels
-                            ));
-                        } else {
-                            status_label.set_text(&format!("{} videos loaded", total_videos));
+                        FetchProgress::ChannelComplete { channel, count } => {
+                            completed_channels += 1;
+                            if failed_channels == 0 {
+                                status_label_p.set_text(&format!(
+                                    "Fetching feeds ({completed_channels}/{total_channels})..."
+                                ));
+                            } else {
+                                status_label_p.set_text(&format!(
+                                    "Fetching feeds ({completed_channels}/{total_channels}, {failed_channels} failed)..."
+                                ));
+                            }
+                            info!("Fetched {} videos for channel {}", count, channel);
                         }
-                        return glib::ControlFlow::Break;
+                        FetchProgress::RetryScheduled {
+                            channel_id,
+                            next_attempt,
+                            max_attempts,
+                            delay_secs,
+                            reason,
+                        } => {
+                            status_label_p.set_text(&format!(
+                                "Retrying {} ({}/{}) in {}s...",
+                                channel_id, next_attempt, max_attempts, delay_secs
+                            ));
+                            warn!(
+                                "Retrying channel {} ({}/{}) in {}s: {}",
+                                channel_id, next_attempt, max_attempts, delay_secs, reason
+                            );
+                        }
+                        FetchProgress::Error { channel_id, error } => {
+                            completed_channels += 1;
+                            failed_channels += 1;
+                            status_label_p.set_text(&format!(
+                                "Failed {} of {} channels (last: {})",
+                                failed_channels, total_channels, channel_id
+                            ));
+                            error!("Error fetching {}: {}", channel_id, error);
+                        }
+                        FetchProgress::Fatal { error } => {
+                            spinner_p.stop();
+                            status_label_p.set_text(&format!("Refresh failed: {}", error));
+                            error!("Fatal refresh error: {}", error);
+                            break;
+                        }
+                        FetchProgress::AllComplete {
+                            total_videos,
+                            successful_channels,
+                            failed_channels: final_failed,
+                        } => {
+                            spinner_p.stop();
+                            if final_failed > 0 {
+                                status_label_p.set_text(&format!(
+                                    "{} videos loaded ({} channels ok, {} failed)",
+                                    total_videos, successful_channels, final_failed
+                                ));
+                            } else {
+                                status_label_p
+                                    .set_text(&format!("{} videos loaded", total_videos));
+                            }
+                            break;
+                        }
                     }
                 }
-                glib::ControlFlow::Continue
             });
 
-            // Handle fetched videos
-            let ui_context_for_timeout = ui_context.clone();
-            videos_rx.attach(None, move |videos| {
-                // Save to storage and update state
-                let mut videos = videos;
-                let mut state = state_clone.borrow_mut();
-                merge_cached_video_fields(&mut videos, &state.videos);
-                let _ = state.storage.save_videos(&videos);
-                state.videos = videos;
+            // Receive fetched videos on the glib main context and update state
+            let state_for_videos = state_clone.clone();
+            let ui_context_for_videos = ui_context.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Ok(mut videos) = videos_rx.recv().await {
+                    let mut state = state_for_videos.borrow_mut();
+                    merge_cached_video_fields(&mut videos, &state.videos);
+                    let _ = state.storage.save_videos(&videos);
+                    state.videos = videos;
 
-                // Start thumbnail downloads
-                download_missing_thumbnails(&state.videos, &state.storage, ui_context.runtime.clone());
+                    download_missing_thumbnails(
+                        &state.videos,
+                        &state.storage,
+                        ui_context_for_videos.runtime.clone(),
+                    );
+                    drop(state);
+                    refresh_video_lists(&state_for_videos, &ui_context_for_videos);
 
-                // Repopulate flow boxes
-                drop(state);
-                refresh_video_lists(&state_clone, &ui_context);
-
-                // Schedule a refresh after thumbnails have had time to download
-                let state_clone2 = state_clone.clone();
-                let ui_context2 = ui_context_for_timeout.clone();
-                glib::timeout_add_seconds_local_once(3, move || {
-                    refresh_video_lists(&state_clone2, &ui_context2);
-                });
-
-                glib::ControlFlow::Continue
+                    // Schedule a refresh after thumbnails have had time to download
+                    let state2 = state_for_videos.clone();
+                    let ui2 = ui_context_for_videos.clone();
+                    glib::timeout_add_seconds_local_once(3, move || {
+                        refresh_video_lists(&state2, &ui2);
+                    });
+                }
             });
         });
     }

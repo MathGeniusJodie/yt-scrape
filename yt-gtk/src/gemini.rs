@@ -281,11 +281,8 @@ async fn call_gemini_streaming(
     while let Some(result) = stream.next().await {
         let chunk = result?;
         let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
-
-        // Process complete SSE events - normalize line endings first
-        let normalized = buffer.replace("\r\n", "\n");
-        buffer = normalized;
+        // Normalize CRLF → LF by dropping bare carriage returns
+        buffer.extend(text.chars().filter(|&c| c != '\r'));
 
         // Process complete SSE events (data: {...}\n\n)
         while let Some(event_end) = buffer.find("\n\n") {

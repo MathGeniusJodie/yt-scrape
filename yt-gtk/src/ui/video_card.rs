@@ -1,5 +1,9 @@
 use crate::data::Video;
 use chrono::Utc;
+
+const CARD_WIDTH: i32 = 320;
+// 16:9 thumbnail height derived from card width
+const THUMBNAIL_HEIGHT: i32 = CARD_WIDTH * 9 / 16;
 use gdk_pixbuf::Pixbuf;
 use gtk::prelude::*;
 use gtk::{Align, DrawingArea, EventBox, Label, Orientation};
@@ -34,13 +38,13 @@ pub fn create_video_card(
 
     let card = gtk::Box::new(Orientation::Vertical, 0);
     card.set_widget_name("video-card");
-    card.set_size_request(320, -1);
+    card.set_size_request(CARD_WIDTH, -1);
     card.set_hexpand(false);
     card.set_halign(Align::Start);
 
     // Thumbnail - 16:9 aspect ratio, fills card width using DrawingArea
     let thumbnail = DrawingArea::new();
-    thumbnail.set_size_request(-1, 180); // Let width be determined by card
+    thumbnail.set_size_request(-1, THUMBNAIL_HEIGHT); // Let width be determined by card
     thumbnail.set_widget_name("thumbnail");
     thumbnail.set_hexpand(true); // Expand to fill card width
     thumbnail.set_vexpand(false);
@@ -114,7 +118,7 @@ pub fn create_video_card(
     content_box.set_margin_top(8);
     content_box.set_margin_bottom(8);
     content_box.set_hexpand(false);
-    content_box.set_size_request(304, -1); // 320 - 16px margins
+    content_box.set_size_request(CARD_WIDTH - 16, -1); // card width minus 8px start/end margins
 
     // Title - always 2 lines
     let title_text = format_two_line_title(&video.title);

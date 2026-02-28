@@ -1,9 +1,9 @@
 use crate::urls;
 
 use serde::Deserialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, io::Write};
 
 #[derive(Debug, Deserialize)]
 struct InfoJson {
@@ -24,27 +24,6 @@ fn secs_to_ms(seconds: f64) -> i64 {
     (seconds.max(0.0) * 1000.0).round() as i64
 }
 
-fn log_chapter_debug(message: &str) {
-    let mut log_paths = vec![PathBuf::from("/tmp/yt-gtk-chapters.log")];
-    if let Ok(home) = std::env::var("HOME") {
-        log_paths.push(PathBuf::from(home).join(".cache/yt-gtk/yt-gtk-chapters.log"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        log_paths.push(cwd.join("yt-gtk-chapters.log"));
-    }
-
-    for path in log_paths {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(file, "{}", message);
-            return;
-        }
-    }
-
-    log::error!("yt-gtk chapter debug: {}", message);
-}
 
 fn escape_ffmetadata(value: &str) -> String {
     value
@@ -180,11 +159,7 @@ fn load_info_json(path: &Path) -> Option<InfoJson> {
     let info_json = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) => {
-            log_chapter_debug(&format!(
-                "load_info_json: failed to read {}: {}",
-                path.display(),
-                error
-            ));
+            log::debug!("load_info_json: failed to read {}: {}", path.display(), error);
             return None;
         }
     };
@@ -192,11 +167,7 @@ fn load_info_json(path: &Path) -> Option<InfoJson> {
     match serde_json::from_str(&info_json) {
         Ok(info) => Some(info),
         Err(error) => {
-            log_chapter_debug(&format!(
-                "load_info_json: failed to parse {}: {}",
-                path.display(),
-                error
-            ));
+            log::debug!("load_info_json: failed to parse {}: {}", path.display(), error);
             None
         }
     }
@@ -221,32 +192,26 @@ fn fetch_info_json(video_id: &str) -> Option<InfoJson> {
     {
         Ok(output) => output,
         Err(error) => {
-            log_chapter_debug(&format!(
-                "fetch_info_json: failed to run yt-dlp for {}: {}",
-                video_id, error
-            ));
+            log::debug!("fetch_info_json: failed to run yt-dlp for {}: {}", video_id, error);
             return None;
         }
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log_chapter_debug(&format!(
+        log::debug!(
             "fetch_info_json: yt-dlp failed for {} with {:?}: {}",
             video_id,
             output.status.code(),
             stderr.trim()
-        ));
+        );
         return None;
     }
 
     match serde_json::from_slice(&output.stdout) {
         Ok(info) => Some(info),
         Err(error) => {
-            log_chapter_debug(&format!(
-                "fetch_info_json: failed to parse yt-dlp json for {}: {}",
-                video_id, error
-            ));
+            log::debug!("fetch_info_json: failed to parse yt-dlp json for {}: {}", video_id, error);
             None
         }
     }
@@ -254,41 +219,31 @@ fn fetch_info_json(video_id: &str) -> Option<InfoJson> {
 
 pub(super) fn ensure_chapters_file(local_path: &Path, video_id: &str) -> Option<PathBuf> {
     let chapters_path = local_path.with_extension("chapters.ffmeta");
-    log_chapter_debug(&format!(
+    log::debug!(
         "ensure_chapters_file: video={} local={} chapters={}",
         video_id,
         local_path.display(),
         chapters_path.display()
-    ));
+    );
     if chapters_path.exists() {
-        log_chapter_debug(&format!(
-            "ensure_chapters_file: chapters file already exists for {}",
-            video_id
-        ));
+        log::debug!("ensure_chapters_file: chapters file already exists for {}", video_id);
         return Some(chapters_path);
     }
 
     let info_json_path = local_path.with_extension("info.json");
     let info = load_info_json(&info_json_path).or_else(|| fetch_info_json(video_id))?;
-    log_chapter_debug(&format!(
+    log::debug!(
         "ensure_chapters_file: resolved info for {} with {} chapters",
         video_id,
         info.chapters.len()
-    ));
+    );
     let ffmeta = build_ffmetadata(&info)?;
 
     if let Err(error) = fs::write(&chapters_path, ffmeta) {
-        log_chapter_debug(&format!(
-            "ensure_chapters_file: failed to write {}: {}",
-            chapters_path.display(),
-            error
-        ));
+        log::debug!("ensure_chapters_file: failed to write {}: {}", chapters_path.display(), error);
         return None;
     }
 
-    log_chapter_debug(&format!(
-        "ensure_chapters_file: wrote {}",
-        chapters_path.display()
-    ));
+    log::debug!("ensure_chapters_file: wrote {}", chapters_path.display());
     Some(chapters_path)
 }

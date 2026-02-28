@@ -17,7 +17,6 @@ const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 const MAX_BACKOFF_MS: u64 = 4_000;
-const MAX_BACKOFF_JITTER_MS: u64 = 100;
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
 
@@ -309,8 +308,7 @@ async fn fetch_channel_with_retries(
                 }
 
                 if should_retry(&error) && pending.attempt < MAX_FETCH_ATTEMPTS {
-                    let delay_ms =
-                        backoff_ms_for_attempt(pending.attempt, &pending.channel_id, &error);
+                    let delay_ms = backoff_ms_for_attempt(pending.attempt, &error);
                     let _ = tx
                         .send(FetchProgress::RetryScheduled {
                             channel_id: pending.channel_id.clone(),
@@ -563,35 +561,27 @@ fn should_retry(error: &reqwest::Error) -> bool {
     }
 }
 
-fn backoff_ms_for_attempt(attempt: usize, channel_id: &str, error: &reqwest::Error) -> u64 {
-    let base_ms = match error.status() {
-        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => 30_000,
-        Some(reqwest::StatusCode::FORBIDDEN) => 30_000,
-        Some(reqwest::StatusCode::UNAUTHORIZED) => 30_000,
-        Some(reqwest::StatusCode::NOT_FOUND) => 20_000,
-        Some(reqwest::StatusCode::REQUEST_TIMEOUT) => 12_000,
-        Some(status) if status.is_server_error() => 20_000,
-        _ if error.is_timeout() => 12_000,
-        _ if error.is_connect() => 12_000,
-        _ => INITIAL_BACKOFF_MS,
+fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
+    let base_ms = if error.is_timeout() || error.is_connect() {
+        12_000
+    } else {
+        match error.status() {
+            Some(s)
+                if s == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || s == reqwest::StatusCode::FORBIDDEN
+                    || s == reqwest::StatusCode::UNAUTHORIZED =>
+            {
+                30_000
+            }
+            Some(s) if s == reqwest::StatusCode::NOT_FOUND || s.is_server_error() => 20_000,
+            Some(s) if s == reqwest::StatusCode::REQUEST_TIMEOUT => 12_000,
+            _ => INITIAL_BACKOFF_MS,
+        }
     };
 
-    let shift = attempt.saturating_sub(1).min(6) as u32;
-    let exponential = base_ms.saturating_mul(1u64 << shift);
-    let jitter = deterministic_jitter_ms(channel_id, attempt + 13, MAX_BACKOFF_JITTER_MS);
-    exponential.saturating_add(jitter).min(MAX_BACKOFF_MS)
-}
-
-fn deterministic_jitter_ms(channel_id: &str, attempt: usize, max_jitter_ms: u64) -> u64 {
-    if max_jitter_ms == 0 {
-        return 0;
-    }
-
-    let seed = channel_id
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(131).wrapping_add(b as u64))
-        .wrapping_add((attempt as u64).wrapping_mul(97));
-    seed % (max_jitter_ms + 1)
+    base_ms
+        .saturating_mul(1u64 << attempt.saturating_sub(1).min(4))
+        .min(MAX_BACKOFF_MS)
 }
 
 /// Load channel IDs from a file (one per line)

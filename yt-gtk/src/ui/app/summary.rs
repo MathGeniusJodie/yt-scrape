@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
-#[allow(deprecated)]
 fn spawn_summary_generation(
     runtime: Arc<Runtime>,
     video_id: String,
@@ -22,26 +21,26 @@ fn spawn_summary_generation(
     video_title: String,
     channel_name: String,
     transcripts_work_dir: PathBuf,
-) -> glib::Receiver<Result<String, String>> {
-    let (gtx, grx) = glib::MainContext::channel::<Result<String, String>>(glib::Priority::DEFAULT);
+) -> async_channel::Receiver<Result<String, String>> {
+    let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
 
     std::thread::spawn(move || {
         let result = runtime.block_on(async {
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
             summarize_video_streaming(
                 &video_id,
                 &video_url,
                 &video_title,
                 &channel_name,
                 &transcripts_work_dir,
-                tx,
+                chunk_tx,
             )
             .await;
 
             let mut summary = String::new();
             let mut error: Option<String> = None;
 
-            while let Some(message) = rx.recv().await {
+            while let Some(message) = chunk_rx.recv().await {
                 match message {
                     StreamingMessage::Chunk(text) => summary.push_str(&text),
                     StreamingMessage::Done => {}
@@ -61,10 +60,10 @@ fn spawn_summary_generation(
             }
         });
 
-        let _ = gtx.send(result);
+        let _ = tx.send_blocking(result);
     });
 
-    grx
+    rx
 }
 
 fn persist_summary_to_cache(
@@ -134,26 +133,26 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
     let ui_context_for_result = ui_context.clone();
     let video_id_for_result = request.video_id.clone();
 
-    result_rx.attach(None, move |result| {
-        match result {
-            Ok(summary) => {
-                if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
-                    refresh_video_lists(&state_for_result, &ui_context_for_result);
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(result) = result_rx.recv().await {
+            match result {
+                Ok(summary) => {
+                    if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+                        refresh_video_lists(&state_for_result, &ui_context_for_result);
+                    }
+                }
+                Err(summary_error) => {
+                    state_for_result
+                        .borrow_mut()
+                        .summaries_in_progress
+                        .remove(&video_id_for_result);
+                    error!(
+                        "Failed to prefetch summary for {}: {}",
+                        video_id_for_result, summary_error
+                    );
                 }
             }
-            Err(summary_error) => {
-                state_for_result
-                    .borrow_mut()
-                    .summaries_in_progress
-                    .remove(&video_id_for_result);
-                error!(
-                    "Failed to prefetch summary for {}: {}",
-                    video_id_for_result, summary_error
-                );
-            }
         }
-
-        glib::ControlFlow::Break
     });
 }
 
@@ -193,26 +192,26 @@ fn start_summary_generation_for_dialog(
     let buffer_for_result = buffer.clone();
     let button_for_result = regenerate_button.clone();
 
-    result_rx.attach(None, move |result| {
-        button_for_result.set_sensitive(true);
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(result) = result_rx.recv().await {
+            button_for_result.set_sensitive(true);
 
-        match result {
-            Ok(summary) => {
-                buffer_for_result.set_text(&summary);
-                if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
-                    refresh_video_lists(&state_for_result, &ui_context_for_result);
+            match result {
+                Ok(summary) => {
+                    buffer_for_result.set_text(&summary);
+                    if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+                        refresh_video_lists(&state_for_result, &ui_context_for_result);
+                    }
+                }
+                Err(summary_error) => {
+                    state_for_result
+                        .borrow_mut()
+                        .summaries_in_progress
+                        .remove(&video_id_for_result);
+                    buffer_for_result.set_text(&format!("Error: {}", summary_error));
                 }
             }
-            Err(summary_error) => {
-                state_for_result
-                    .borrow_mut()
-                    .summaries_in_progress
-                    .remove(&video_id_for_result);
-                buffer_for_result.set_text(&format!("Error: {}", summary_error));
-            }
         }
-
-        glib::ControlFlow::Break
     });
 }
 
@@ -343,9 +342,7 @@ pub(super) fn show_transcript_dialog(
         .transcripts_work_dir()
         .to_path_buf();
 
-    #[allow(deprecated)]
-    let (gtx, grx) =
-        glib::MainContext::channel::<(String, Result<String, String>)>(glib::Priority::DEFAULT);
+    let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
 
     let video_id_for_thread = video_id.to_string();
     let runtime = ui_context.runtime.clone();
@@ -353,37 +350,37 @@ pub(super) fn show_transcript_dialog(
         runtime.block_on(async {
             match fetch_transcript(&video_id_for_thread, &work_dir).await {
                 Ok(transcript) => {
-                    let _ = gtx.send((video_id_for_thread, Ok(transcript)));
+                    let _ = tx.send(Ok(transcript)).await;
                 }
                 Err(transcript_error) => {
-                    let _ = gtx.send((video_id_for_thread, Err(transcript_error.to_string())));
+                    let _ = tx.send(Err(transcript_error.to_string())).await;
                 }
             }
         });
     });
 
+    let video_id = video_id.to_string();
     let state_rc = state_rc.clone();
-    grx.attach(None, move |result| {
-        let (video_id, transcript_result) = result;
-        match transcript_result {
-            Ok(transcript) => {
-                buffer.set_text(&transcript);
-                // Save to cache on main thread
-                let mut state = state_rc.borrow_mut();
-                if let Some(video) = state
-                    .videos
-                    .iter_mut()
-                    .find(|video| video.video_id == video_id)
-                {
-                    video.transcript = Some(transcript);
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(result) = rx.recv().await {
+            match result {
+                Ok(transcript) => {
+                    buffer.set_text(&transcript);
+                    let mut state = state_rc.borrow_mut();
+                    if let Some(video) = state
+                        .videos
+                        .iter_mut()
+                        .find(|v| v.video_id == video_id)
+                    {
+                        video.transcript = Some(transcript);
+                    }
+                    let _ = state.storage.save_videos(&state.videos);
                 }
-                let _ = state.storage.save_videos(&state.videos);
-            }
-            Err(transcript_error) => {
-                buffer.set_text(&format!("Error: {}", transcript_error));
+                Err(transcript_error) => {
+                    buffer.set_text(&format!("Error: {}", transcript_error));
+                }
             }
         }
-        glib::ControlFlow::Continue
     });
 
     dialog.connect_response(|dialog, _| {
