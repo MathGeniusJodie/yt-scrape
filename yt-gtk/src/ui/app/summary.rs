@@ -367,11 +367,7 @@ pub(super) fn show_transcript_dialog(
                 Ok(transcript) => {
                     buffer.set_text(&transcript);
                     let mut state = state_rc.borrow_mut();
-                    if let Some(video) = state
-                        .videos
-                        .iter_mut()
-                        .find(|v| v.video_id == video_id)
-                    {
+                    if let Some(video) = state.videos.iter_mut().find(|v| v.video_id == video_id) {
                         video.transcript = Some(transcript);
                     }
                     let _ = state.storage.save_videos(&state.videos);

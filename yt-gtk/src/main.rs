@@ -10,8 +10,8 @@ use anyhow::Context;
 use gtk::prelude::*;
 use gtk::Application;
 use log::{error, Level, LevelFilter, Metadata, Record};
-use std::path::PathBuf;
 use std::io::Write;
+use std::path::PathBuf;
 
 struct StderrLogger;
 

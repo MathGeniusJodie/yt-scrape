@@ -9,6 +9,33 @@ const WATCH_LATER_FILE: &str = "watch_later.json";
 const VIDEOS_CACHE_FILE: &str = "videos.json";
 const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
 
+fn video_id_from_stem(stem: &str) -> Option<&str> {
+    // Split from the right so underscores in titles do not affect ID extraction.
+    let (_, video_id) = stem.rsplit_once('_')?;
+    (!video_id.is_empty()).then_some(video_id)
+}
+
+fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
+    let entries = match std::fs::read_dir(videos_dir) {
+        Ok(entries) => entries,
+        Err(_) => return HashSet::new(),
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let extension = path.extension().and_then(OsStr::to_str)?;
+            if !VIDEO_EXTENSIONS.contains(&extension) {
+                return None;
+            }
+
+            let stem = path.file_stem().and_then(OsStr::to_str)?;
+            video_id_from_stem(stem).map(str::to_string)
+        })
+        .collect()
+}
+
 /// Sanitizes free-form title text into a stable filename-safe component.
 fn sanitize_filename(input: &str) -> String {
     // Map invalid characters first so the trim operates on the final character set.
@@ -117,7 +144,6 @@ impl Storage {
     ///
     /// Matched local file path, if present.
     pub fn find_video_path(&self, video_id: &str) -> Option<PathBuf> {
-        let suffix = format!("_{video_id}");
         let entries = std::fs::read_dir(&self.videos_dir).ok()?;
 
         entries.filter_map(Result::ok).find_map(|entry| {
@@ -128,21 +154,17 @@ impl Storage {
             }
 
             let stem = path.file_stem().and_then(OsStr::to_str)?;
-            stem.ends_with(&suffix).then_some(path)
+            (video_id_from_stem(stem) == Some(video_id)).then_some(path)
         })
     }
 
-    /// Checks whether a local video file exists for the given video ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `video_id` - YouTube video identifier.
+    /// Scans the local videos directory and returns all discovered downloaded video IDs.
     ///
     /// # Returns
     ///
-    /// `true` when a local file exists.
-    pub fn has_video(&self, video_id: &str) -> bool {
-        self.find_video_path(video_id).is_some()
+    /// A set of video IDs extracted from cached video filenames.
+    pub fn cached_video_ids(&self) -> HashSet<String> {
+        collect_cached_video_ids_from_dir(&self.videos_dir)
     }
 
     /// Loads watch-later IDs from disk.
@@ -213,7 +235,25 @@ impl Storage {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_filename, MAX_TITLE_LENGTH};
+    use super::{
+        collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem, MAX_TITLE_LENGTH,
+    };
+    use std::fs::File;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_unique_temp_dir() -> std::path::PathBuf {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System clock should be after UNIX epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "yt_gtk_storage_tests_{}_{}",
+            std::process::id(),
+            unique_suffix
+        ));
+        std::fs::create_dir_all(&path).expect("Failed to create temp directory");
+        path
+    }
 
     #[test]
     fn sanitize_filename_replaces_invalid_characters() {
@@ -228,5 +268,33 @@ mod tests {
         assert!(output.len() <= MAX_TITLE_LENGTH);
         assert!(!output.starts_with(' '));
         assert!(!output.ends_with(' '));
+    }
+
+    #[test]
+    fn video_id_from_stem_extracts_suffix_after_last_underscore() {
+        assert_eq!(
+            video_id_from_stem("title_with_underscores_abc123"),
+            Some("abc123")
+        );
+        assert_eq!(video_id_from_stem("_abc123"), Some("abc123"));
+        assert_eq!(video_id_from_stem("single_separator"), Some("separator"));
+        assert_eq!(video_id_from_stem("missing_suffix_"), None);
+    }
+
+    #[test]
+    fn collect_cached_video_ids_from_dir_only_keeps_supported_video_files() {
+        let temp_dir = create_unique_temp_dir();
+
+        File::create(temp_dir.join("my_title_abc123.mkv")).expect("Failed to create mkv file");
+        File::create(temp_dir.join("another_title_xyz789.mp4")).expect("Failed to create mp4 file");
+        File::create(temp_dir.join("skip_me.txt")).expect("Failed to create text file");
+        File::create(temp_dir.join("missing_suffix_.webm")).expect("Failed to create webm file");
+
+        let ids = collect_cached_video_ids_from_dir(&temp_dir);
+        assert!(ids.contains("abc123"));
+        assert!(ids.contains("xyz789"));
+        assert_eq!(ids.len(), 2);
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 }

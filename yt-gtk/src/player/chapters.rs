@@ -70,7 +70,11 @@ fn parse_description_chapters(description: &str) -> Vec<Chapter> {
                 .trim_start()
                 .trim_start_matches(['-', '|', ':', ' ']);
             let title = if title.is_empty() { "Chapter" } else { title };
-            Some(Chapter { start, end: None, title: escape_ffmetadata(title) })
+            Some(Chapter {
+                start,
+                end: None,
+                title: escape_ffmetadata(title),
+            })
         })
         .collect();
 
@@ -91,7 +95,11 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
                     .as_deref()
                     .map(escape_ffmetadata)
                     .unwrap_or_else(|| "Chapter".to_string());
-                Some(Chapter { start, end: c.end_time, title })
+                Some(Chapter {
+                    start,
+                    end: c.end_time,
+                    title,
+                })
             })
             .collect()
     } else {

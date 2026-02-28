@@ -9,6 +9,7 @@ use gtk::prelude::*;
 use gtk::{ApplicationWindow, Box as GtkBox, Button, FlowBox, Label, Orientation, Popover};
 use log::error;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -142,6 +143,7 @@ pub(super) fn populate_flow_box(
     flow_box: &FlowBox,
     state: &AppState,
     tab: Tab,
+    downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
 ) {
@@ -162,7 +164,7 @@ pub(super) fn populate_flow_box(
     for video in videos {
         let thumbnail_path = state.storage.thumbnail_path(&video.video_id);
         let is_watch_later = state.watch_later.contains(&video.video_id);
-        let is_downloaded = state.storage.has_video(&video.video_id);
+        let is_downloaded = downloaded_video_ids.contains(&video.video_id);
 
         let (card, watch_later_toggle, ai_summary_button) = create_video_card(
             video,
