@@ -7,10 +7,11 @@ use tokio::sync::mpsc;
 
 const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_MODELS: [&str; 3] = [
-    "moonshotai/kimi-k2:free",
-    "deepseek/deepseek-r1-0528:free",
-    "tngtech/deepseek-r1t2-chimera:free",
+const OPENROUTER_MODELS: [&str; 4] = [
+    "openrouter/free",
+    "moonshotai/kimi-k2",
+    "deepseek/deepseek-r1-0528",
+    "tngtech/deepseek-r1t2-chimera",
 ];
 const SUMMARY_PROMPT: &str = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections";
 
@@ -108,6 +109,8 @@ struct GeminiError {
 
 #[derive(Serialize)]
 struct OpenRouterRequest {
+    model: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
     messages: Vec<OpenRouterMessage>,
 }
@@ -148,6 +151,25 @@ pub enum StreamingMessage {
     Done,
     /// Error occurred
     Error(String),
+}
+
+fn configured_openrouter_models() -> Vec<String> {
+    if let Ok(models_raw) = std::env::var("OPENROUTER_MODELS") {
+        let models = models_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if !models.is_empty() {
+            return models;
+        }
+    }
+
+    OPENROUTER_MODELS
+        .iter()
+        .map(|model| model.to_string())
+        .collect()
 }
 
 pub async fn summarize_video_streaming(
@@ -318,11 +340,14 @@ async fn call_openrouter_with_transcript(
         anyhow::bail!("Transcript is empty");
     }
 
+    let openrouter_models = configured_openrouter_models();
+    if openrouter_models.is_empty() {
+        anyhow::bail!("No OpenRouter models configured");
+    }
+
     let request = OpenRouterRequest {
-        models: OPENROUTER_MODELS
-            .iter()
-            .map(|model| model.to_string())
-            .collect(),
+        model: openrouter_models[0].clone(),
+        models: openrouter_models.iter().skip(1).cloned().collect(),
         messages: vec![OpenRouterMessage {
             role: "user".to_string(),
             content: format!(

@@ -13,6 +13,8 @@ use super::modals::{render_help, render_summary, render_transcript};
 use super::scrollbar::{SmoothScrollbar, SmoothScrollbarState};
 use super::selection::SelectionIndicator;
 
+const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
+
 /// Render the entire UI
 pub fn render(
     frame: &mut Frame,
@@ -61,6 +63,18 @@ pub fn render(
     if state.show_transcript {
         render_transcript(frame, state, area);
     }
+}
+
+fn is_video_downloaded(videos_dir: &Path, video_id: &str) -> bool {
+    VIDEO_EXTENSIONS.iter().any(|ext| {
+        let pattern = format!("*_{}.{}", video_id, ext);
+        videos_dir
+            .join(&pattern)
+            .to_str()
+            .and_then(|p| glob::glob(p).ok())
+            .map(|mut g| g.next().is_some())
+            .unwrap_or(false)
+    })
 }
 
 fn render_grid(
@@ -118,12 +132,7 @@ fn render_grid(
             };
 
             let is_watch_later = state.watch_later.contains(&video.video_id);
-            let is_downloaded = videos_dir
-                .join(format!("*_{}.mp4", video.video_id))
-                .to_str()
-                .and_then(|p| glob::glob(p).ok())
-                .map(|mut g| g.next().is_some())
-                .unwrap_or(false);
+            let is_downloaded = is_video_downloaded(videos_dir, &video.video_id);
             let has_transcript = video.transcript.is_some();
 
             render_video_card(

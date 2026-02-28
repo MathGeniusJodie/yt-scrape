@@ -6,29 +6,69 @@ use tokio::process::Command;
 /// Download a video using yt-dlp
 pub async fn download_video(video_id: &str, output_path: &PathBuf) -> anyhow::Result<()> {
     let url = urls::watch_url(video_id);
+    let output_template = output_path.with_extension("%(ext)s");
 
-    // Use yt-dlp to download the video
-    // Format: best quality up to 720p, merge to mp4
-    let status = Command::new("yt-dlp")
-        .arg("--extractor-args=youtube:player_client=default,ios,-android_sdkless")
+    // Phase 1: Always download video + chapter/info metadata.
+    // Keep this independent from subtitle fetching so subtitle rate limits don't fail downloads.
+    let output = Command::new("yt-dlp")
         .arg("-f")
         .arg("bestvideo[height<=720]+bestaudio/best[height<=720]")
+        .arg("--add-metadata")
+        .arg("--embed-chapters")
+        .arg("--write-info-json")
+        .arg("--embed-info-json")
+        .arg("--write-thumbnail")
+        .arg("--embed-thumbnail")
         .arg("--merge-output-format")
-        .arg("mp4")
+        .arg("mkv")
         .arg("-o")
-        .arg(output_path)
+        .arg(&output_template)
         .arg("--no-playlist")
         .arg("--no-warnings")
         .arg(&url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .await?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        anyhow::bail!("yt-dlp failed with exit code: {:?}", status.code())
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "yt-dlp failed with exit code {:?}: {}",
+            output.status.code(),
+            stderr.trim()
+        );
     }
+
+    // Phase 2: Fetch subtitles as best effort. Failure here should not break local playback.
+    let subs_output = Command::new("yt-dlp")
+        .arg("--write-subs")
+        .arg("--write-auto-subs")
+        .arg("--sub-langs")
+        .arg("en.*,en,-live_chat")
+        .arg("--convert-subs")
+        .arg("vtt")
+        .arg("--skip-download")
+        .arg("-o")
+        .arg(&output_template)
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg(&url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    if !subs_output.status.success() {
+        let stderr = String::from_utf8_lossy(&subs_output.stderr);
+        eprintln!(
+            "Subtitle download failed for {} (continuing): {}",
+            video_id,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
 }

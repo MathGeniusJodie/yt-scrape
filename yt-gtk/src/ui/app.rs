@@ -16,6 +16,7 @@ use gtk::{
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -38,6 +39,46 @@ struct SelectedVideo {
     video_title: String,
     video_url: String,
     channel_name: String,
+}
+
+fn is_legacy_download(path: &Path) -> bool {
+    !matches!(path.extension().and_then(|ext| ext.to_str()), Some("mkv"))
+}
+
+fn needs_download_upgrade(storage: &Storage, video_id: &str) -> bool {
+    match storage.find_video_path(video_id) {
+        Some(path) => is_legacy_download(&path),
+        None => true,
+    }
+}
+
+fn spawn_video_download(runtime: Arc<Runtime>, video_id: String, video_path: PathBuf) {
+    std::thread::spawn(move || {
+        runtime.block_on(async {
+            if let Err(e) = download_video(&video_id, &video_path).await {
+                eprintln!("Failed to download video: {}", e);
+            }
+        });
+    });
+}
+
+fn resolve_playback_path(
+    storage: &Storage,
+    runtime: Arc<Runtime>,
+    video_id: &str,
+    video_title: &str,
+) -> Option<PathBuf> {
+    let local_path = storage.find_video_path(video_id);
+    match local_path {
+        Some(path) if is_legacy_download(&path) => {
+            // Legacy downloads lack embedded chapter/caption metadata. Upgrade in background
+            // but still play the local file.
+            let upgraded_path = storage.video_path(video_id, video_title);
+            spawn_video_download(runtime, video_id.to_string(), upgraded_path);
+            Some(path)
+        }
+        other => other,
+    }
 }
 
 pub fn build_ui(app: &Application, subs_file: PathBuf) {
@@ -550,10 +591,16 @@ fn create_context_menu(
         let selected_video = selected_video.clone();
         let state_rc = state_rc.clone();
         let popover = popover.clone();
+        let runtime = runtime.clone();
         play_button.connect_clicked(move |_| {
             if let Some(ref video) = *selected_video.borrow() {
                 let state = state_rc.borrow();
-                let local_path = state.storage.find_video_path(&video.video_id);
+                let local_path = resolve_playback_path(
+                    &state.storage,
+                    runtime.clone(),
+                    &video.video_id,
+                    &video.video_title,
+                );
                 if let Err(e) =
                     play_video(&video.video_id, &video.video_title, local_path.as_deref())
                 {
@@ -584,21 +631,13 @@ fn create_context_menu(
                         state.watch_later.insert(video.video_id.clone());
                         added_to_watch_later = true;
 
-                        // Start download if not already downloaded
-                        if !state.storage.has_video(&video.video_id) {
+                        // Start download if missing or from the legacy downloader.
+                        if needs_download_upgrade(&state.storage, &video.video_id) {
                             let video_path = state
                                 .storage
                                 .video_path(&video.video_id, &video.video_title);
                             let video_id = video.video_id.clone();
-                            let runtime = runtime.clone();
-
-                            std::thread::spawn(move || {
-                                runtime.block_on(async {
-                                    if let Err(e) = download_video(&video_id, &video_path).await {
-                                        eprintln!("Failed to download video: {}", e);
-                                    }
-                                });
-                            });
+                            spawn_video_download(runtime.clone(), video_id, video_path);
                         }
                     }
                     let _ = state.storage.save_watch_later(&state.watch_later);
@@ -806,11 +845,16 @@ fn populate_flow_box(
 
         // Double-click to play, right-click for context menu
         card.connect_button_press_event(
-            clone!(@strong video_id, @strong video_title, @strong state_rc => move |widget, event| {
+            clone!(@strong video_id, @strong video_title, @strong state_rc, @strong runtime => move |widget, event| {
                 if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
                     // Play video
                     let state = state_rc.borrow();
-                    let local_path = state.storage.find_video_path(&video_id);
+                    let local_path = resolve_playback_path(
+                        &state.storage,
+                        runtime.clone(),
+                        &video_id,
+                        &video_title,
+                    );
                     if let Err(e) = play_video(&video_id, &video_title, local_path.as_deref()) {
                         eprintln!("Failed to play video: {}", e);
                     }
@@ -845,19 +889,11 @@ fn populate_flow_box(
                     state.watch_later.insert(wl_video_id.clone());
                     added_to_watch_later = true;
 
-                    // Start download if not already downloaded
-                    if !state.storage.has_video(&wl_video_id) {
+                    // Start download if missing or from the legacy downloader.
+                    if needs_download_upgrade(&state.storage, &wl_video_id) {
                         let video_path = state.storage.video_path(&wl_video_id, &wl_video_title);
                         let video_id = wl_video_id.clone();
-                        let runtime = wl_runtime.clone();
-
-                        std::thread::spawn(move || {
-                            runtime.block_on(async {
-                                if let Err(e) = download_video(&video_id, &video_path).await {
-                                    eprintln!("Failed to download video: {}", e);
-                                }
-                            });
-                        });
+                        spawn_video_download(wl_runtime.clone(), video_id, video_path);
                     }
                 }
                 let _ = state.storage.save_watch_later(&state.watch_later);

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 const MAX_TITLE_LENGTH: usize = 100;
+const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
 
 /// Sanitize a string for use in a filename
 fn sanitize_filename(s: &str) -> String {
@@ -67,16 +68,18 @@ impl Storage {
     pub fn video_path(&self, video_id: &str, title: &str) -> PathBuf {
         let sanitized_title = sanitize_filename(title);
         self.videos_dir
-            .join(format!("{}_{}.mp4", sanitized_title, video_id))
+            .join(format!("{}_{}.mkv", sanitized_title, video_id))
     }
 
     /// Find an existing video file by video_id (regardless of title in filename)
     pub fn find_video_path(&self, video_id: &str) -> Option<PathBuf> {
-        let pattern = format!("*_{}.mp4", video_id);
-        glob::glob(self.videos_dir.join(&pattern).to_str()?)
-            .ok()?
-            .filter_map(Result::ok)
-            .next()
+        VIDEO_EXTENSIONS.iter().find_map(|ext| {
+            let pattern = format!("*_{}.{}", video_id, ext);
+            glob::glob(self.videos_dir.join(&pattern).to_str()?)
+                .ok()?
+                .filter_map(Result::ok)
+                .next()
+        })
     }
 
     /// Check if a video is downloaded

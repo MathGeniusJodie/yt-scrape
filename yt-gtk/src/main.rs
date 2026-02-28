@@ -8,9 +8,41 @@ mod urls;
 
 use gtk::prelude::*;
 use gtk::Application;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{fs, io::Write};
+
+fn append_startup_log(path: &Path, message: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", message);
+    }
+}
+
+fn log_startup_marker() {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown-exe>".to_string());
+    let msg = format!("yt-gtk startup exe={}", exe);
+
+    append_startup_log(Path::new("/tmp/yt-gtk-chapters.log"), &msg);
+    if let Ok(home) = std::env::var("HOME") {
+        append_startup_log(
+            Path::new(&home)
+                .join(".cache/yt-gtk/yt-gtk-chapters.log")
+                .as_path(),
+            &msg,
+        );
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        append_startup_log(cwd.join("yt-gtk-chapters.log").as_path(), &msg);
+    }
+}
 
 fn main() {
+    log_startup_marker();
+
     // Set program name for desktop environment integration
     glib::set_prgname(Some("yt-gtk"));
     glib::set_application_name("yt-gtk");
