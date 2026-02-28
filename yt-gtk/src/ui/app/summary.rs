@@ -24,8 +24,8 @@ fn spawn_summary_generation(
 ) -> async_channel::Receiver<Result<String, String>> {
     let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
 
-    std::thread::spawn(move || {
-        let result = runtime.block_on(async {
+    runtime.spawn(async move {
+        let result = {
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
             summarize_video_streaming(
                 &video_id,
@@ -58,9 +58,9 @@ fn spawn_summary_generation(
                     Ok(summary)
                 }
             }
-        });
+        };
 
-        let _ = tx.send_blocking(result);
+        let _ = tx.send(result).await;
     });
 
     rx
@@ -346,17 +346,15 @@ pub(super) fn show_transcript_dialog(
 
     let video_id_for_thread = video_id.to_string();
     let runtime = ui_context.runtime.clone();
-    std::thread::spawn(move || {
-        runtime.block_on(async {
-            match fetch_transcript(&video_id_for_thread, &work_dir).await {
-                Ok(transcript) => {
-                    let _ = tx.send(Ok(transcript)).await;
-                }
-                Err(transcript_error) => {
-                    let _ = tx.send(Err(transcript_error.to_string())).await;
-                }
+    runtime.spawn(async move {
+        match fetch_transcript(&video_id_for_thread, &work_dir).await {
+            Ok(transcript) => {
+                let _ = tx.send(Ok(transcript)).await;
             }
-        });
+            Err(transcript_error) => {
+                let _ = tx.send(Err(transcript_error.to_string())).await;
+            }
+        }
     });
 
     let video_id = video_id.to_string();

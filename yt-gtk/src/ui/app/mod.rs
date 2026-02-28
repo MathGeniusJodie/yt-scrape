@@ -89,12 +89,10 @@ fn needs_download_upgrade(storage: &Storage, video_id: &str) -> bool {
 }
 
 fn spawn_video_download(runtime: Arc<Runtime>, video_id: String, video_path: PathBuf) {
-    std::thread::spawn(move || {
-        runtime.block_on(async {
-            if let Err(download_error) = download_video(&video_id, &video_path).await {
-                error!("Failed to download video {}: {}", video_id, download_error);
-            }
-        });
+    runtime.spawn(async move {
+        if let Err(download_error) = download_video(&video_id, &video_path).await {
+            error!("Failed to download video {}: {}", video_id, download_error);
+        }
     });
 }
 
@@ -437,24 +435,21 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             let (tx, mut rx) = mpsc::channel::<FetchProgress>(100);
             let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
 
-            // Spawn the fetch task on a background thread (tokio block_on)
-            let runtime_clone = ui_context.runtime.clone();
+            // Spawn the fetch task on the Tokio runtime.
             let tx_for_errors = tx.clone();
-            std::thread::spawn(move || {
-                runtime_clone.block_on(async {
-                    match fetch_all_feeds(channel_ids, tx).await {
-                        Ok(videos) => {
-                            let _ = videos_tx.send(videos).await;
-                        }
-                        Err(e) => {
-                            let _ = tx_for_errors
-                                .send(FetchProgress::Fatal {
-                                    error: e.to_string(),
-                                })
-                                .await;
-                        }
+            ui_context.runtime.spawn(async move {
+                match fetch_all_feeds(channel_ids, tx).await {
+                    Ok(videos) => {
+                        let _ = videos_tx.send(videos).await;
                     }
-                });
+                    Err(e) => {
+                        let _ = tx_for_errors
+                            .send(FetchProgress::Fatal {
+                                error: e.to_string(),
+                            })
+                            .await;
+                    }
+                }
             });
 
             // Relay progress from tokio mpsc to async_channel so the glib main context can await it
