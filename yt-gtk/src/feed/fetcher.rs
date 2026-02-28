@@ -571,9 +571,19 @@ fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
         }
     };
 
-    base_ms
-        .saturating_mul(1u64 << attempt.saturating_sub(1).min(4))
-        .min(MAX_BACKOFF_MS)
+    backoff_ms_with_base(base_ms, attempt)
+}
+
+fn backoff_ms_with_base(base_ms: u64, attempt: usize) -> u64 {
+    let attempt_multiplier = 1u64 << attempt.saturating_sub(1).min(4);
+    // Cap exponential growth via the multiplier so large base delays (e.g. 20-30s) are preserved.
+    let max_multiplier = if INITIAL_BACKOFF_MS == 0 {
+        1
+    } else {
+        (MAX_BACKOFF_MS / INITIAL_BACKOFF_MS).max(1)
+    };
+
+    base_ms.saturating_mul(attempt_multiplier.min(max_multiplier))
 }
 
 /// Load channel IDs from a file (one per line)
@@ -600,7 +610,7 @@ pub fn load_channel_ids(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_iso8601_duration_seconds;
+    use super::{backoff_ms_with_base, parse_iso8601_duration_seconds, INITIAL_BACKOFF_MS};
 
     #[test]
     fn parses_common_iso_durations() {
@@ -614,5 +624,20 @@ mod tests {
         assert_eq!(parse_iso8601_duration_seconds("15M"), None);
         assert_eq!(parse_iso8601_duration_seconds("P1M"), None);
         assert_eq!(parse_iso8601_duration_seconds("PT"), None);
+    }
+
+    #[test]
+    fn caps_growth_for_small_base() {
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 1), 1_000);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 2), 2_000);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 3), 4_000);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 4), 4_000);
+    }
+
+    #[test]
+    fn preserves_large_base_backoff() {
+        assert_eq!(backoff_ms_with_base(20_000, 1), 20_000);
+        assert_eq!(backoff_ms_with_base(20_000, 2), 40_000);
+        assert_eq!(backoff_ms_with_base(30_000, 2), 60_000);
     }
 }

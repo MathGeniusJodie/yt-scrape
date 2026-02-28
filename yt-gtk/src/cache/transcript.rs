@@ -101,6 +101,8 @@ fn find_subtitle_path(
     work_dir: &Path,
     video_id: &str,
 ) -> Result<std::path::PathBuf, TranscriptError> {
+    let expected_prefix = format!("{video_id}.");
+
     std::fs::read_dir(work_dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -109,7 +111,7 @@ fn find_subtitle_path(
                 && path
                     .file_name()
                     .and_then(OsStr::to_str)
-                    .map(|name| name.starts_with(video_id))
+                    .map(|name| name.starts_with(&expected_prefix))
                     .unwrap_or(false)
         })
         .ok_or_else(|| TranscriptError::SubtitleFileNotFound {
@@ -174,7 +176,22 @@ fn clean_transcript(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_transcript, parse_json3, TranscriptError};
+    use super::{clean_transcript, find_subtitle_path, parse_json3, TranscriptError};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn create_temp_test_dir(name: &str) -> PathBuf {
+        let unique_id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "yt_gtk_{name}_{}_{}",
+            std::process::id(),
+            unique_id
+        ));
+        std::fs::create_dir_all(&path).expect("temporary test directory should be created");
+        path
+    }
 
     #[test]
     fn clean_transcript_removes_duplicate_adjacent_lines() {
@@ -201,5 +218,36 @@ mod tests {
         let json = r#"{"foo": "bar"}"#;
         let error = parse_json3(json).expect_err("missing events should fail");
         assert!(matches!(error, TranscriptError::MissingSubtitleEvents));
+    }
+
+    #[test]
+    fn find_subtitle_path_rejects_non_delimited_prefix_match() {
+        let temp_dir = create_temp_test_dir("subtitle_prefix_reject");
+        let video_id = "abc123";
+        let wrong_file = temp_dir.join("abc123xyz.en.json3");
+        std::fs::write(&wrong_file, "{}").expect("test subtitle file should be written");
+
+        let error =
+            find_subtitle_path(&temp_dir, video_id).expect_err("non-delimited prefix should fail");
+
+        assert!(matches!(
+            error,
+            TranscriptError::SubtitleFileNotFound { video_id: id } if id == video_id
+        ));
+        std::fs::remove_dir_all(&temp_dir).expect("temporary test directory should be removed");
+    }
+
+    #[test]
+    fn find_subtitle_path_accepts_dot_delimited_prefix_match() {
+        let temp_dir = create_temp_test_dir("subtitle_prefix_accept");
+        let video_id = "abc123";
+        let expected_file = temp_dir.join("abc123.en.json3");
+        std::fs::write(&expected_file, "{}").expect("test subtitle file should be written");
+
+        let found_path =
+            find_subtitle_path(&temp_dir, video_id).expect("dot-delimited prefix should resolve");
+
+        assert_eq!(found_path, expected_file);
+        std::fs::remove_dir_all(&temp_dir).expect("temporary test directory should be removed");
     }
 }
