@@ -1,8 +1,5 @@
 use super::summary::{show_summary_dialog, show_transcript_dialog};
-use super::{
-    apply_watch_later_action, has_cached_summary, resolve_playback_path, summary_request, AppState,
-    SelectedVideo, SummaryRequest, UiContext,
-};
+use super::{apply_watch_later_action, resolve_playback_path, AppState, SelectedVideo, UiContext};
 use crate::data::{Tab, Video};
 use crate::player::play_video;
 use crate::ui::video_card::create_video_card;
@@ -91,15 +88,9 @@ pub(super) fn create_context_menu(
         let state_rc = state_rc.clone();
         let ui_context = ui_context.clone();
         watch_later_button.connect_clicked(move |_| {
-            if let Some(ref video) = selected_video.borrow().clone() {
-                let request = summary_request(
-                    &video.video_id,
-                    &video.video_url,
-                    &video.video_title,
-                    &video.channel_name,
-                );
+            if let Some(video) = selected_video.borrow().clone() {
                 ui_context.context_menu.popdown();
-                apply_watch_later_action(&state_rc, &ui_context, request);
+                apply_watch_later_action(&state_rc, &ui_context, video);
             }
         });
     }
@@ -111,16 +102,7 @@ pub(super) fn create_context_menu(
         summary_button.connect_clicked(move |_| {
             if let Some(ref video) = *selected_video.borrow() {
                 ui_context.context_menu.popdown();
-                show_summary_dialog(
-                    &state_rc,
-                    &ui_context,
-                    &summary_request(
-                        &video.video_id,
-                        &video.video_url,
-                        &video.video_title,
-                        &video.channel_name,
-                    ),
-                );
+                show_summary_dialog(&state_rc, &ui_context, video);
             }
         });
     }
@@ -165,25 +147,16 @@ pub(super) fn populate_flow_box(
         let thumbnail_path = state.storage.thumbnail_path(&video.video_id);
         let is_watch_later = state.watch_later.contains(&video.video_id);
         let is_downloaded = state.storage.has_video(&video.video_id);
-        let has_ai_summary = has_cached_summary(video);
 
         let (card, watch_later_toggle, ai_summary_button) = create_video_card(
             video,
             &thumbnail_path,
             is_watch_later,
             is_downloaded,
-            has_ai_summary,
+            video.has_ai_summary(),
         );
 
-        let video_id = video.video_id.clone();
-        let video_title = video.title.clone();
-        let request = SummaryRequest {
-            video_id: video_id.clone(),
-            video_url: video.watch_url(),
-            video_title: video_title.clone(),
-            channel_name: video.channel_name.clone(),
-        };
-
+        let video_ref = SelectedVideo::from(video);
         let state_rc = state_rc.clone();
         let runtime = ui_context.runtime.clone();
         let selected_video = ui_context.selected_video.clone();
@@ -191,44 +164,37 @@ pub(super) fn populate_flow_box(
 
         let wl_state_rc = state_rc.clone();
         let wl_ui_context = ui_context.clone();
-        let wl_request = request.clone();
+        let wl_ref = video_ref.clone();
 
         if let Some(ai_summary_button) = ai_summary_button {
             let summary_state_rc = state_rc.clone();
             let summary_ui_context = ui_context.clone();
-            let summary_request = request.clone();
+            let summary_ref = video_ref.clone();
 
             ai_summary_button.connect_clicked(move |_| {
-                show_summary_dialog(&summary_state_rc, &summary_ui_context, &summary_request);
+                show_summary_dialog(&summary_state_rc, &summary_ui_context, &summary_ref);
             });
         }
 
         // Double-click to play, right-click for context menu
         card.connect_button_press_event(
-            clone!(@strong video_id, @strong video_title, @strong state_rc, @strong runtime => move |widget, event| {
+            clone!(@strong video_ref, @strong state_rc, @strong runtime => move |widget, event| {
                 if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
-                    // Play video
                     let state = state_rc.borrow();
                     let local_path = resolve_playback_path(
                         &state.storage,
                         runtime.clone(),
-                        &video_id,
-                        &video_title,
+                        &video_ref.video_id,
+                        &video_ref.video_title,
                     );
-                    if let Err(play_error) = play_video(&video_id, &video_title, local_path.as_deref()) {
-                        error!("Failed to play video {}: {}", video_id, play_error);
+                    if let Err(play_error) = play_video(&video_ref.video_id, &video_ref.video_title, local_path.as_deref()) {
+                        error!("Failed to play video {}: {}", video_ref.video_id, play_error);
                     }
                     return glib::Propagation::Stop;
                 }
 
                 if event.button() == 3 {
-                    // Right-click - set selected video and show context menu
-                    *selected_video.borrow_mut() = Some(SelectedVideo {
-                        video_id: video_id.clone(),
-                        video_title: video_title.clone(),
-                        video_url: request.video_url.clone(),
-                        channel_name: request.channel_name.clone(),
-                    });
+                    *selected_video.borrow_mut() = Some(video_ref.clone());
                     card_ui_context.context_menu.set_relative_to(Some(widget));
                     card_ui_context.context_menu.popup();
                     return glib::Propagation::Stop;
@@ -238,9 +204,8 @@ pub(super) fn populate_flow_box(
             }),
         );
 
-        // Watch later toggle button handler
         watch_later_toggle.connect_clicked(move |_| {
-            apply_watch_later_action(&wl_state_rc, &wl_ui_context, wl_request.clone());
+            apply_watch_later_action(&wl_state_rc, &wl_ui_context, wl_ref.clone());
         });
 
         flow_box.add(&card);

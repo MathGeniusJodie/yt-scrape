@@ -11,20 +11,19 @@ const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
 
 /// Sanitizes free-form title text into a stable filename-safe component.
 fn sanitize_filename(input: &str) -> String {
-    let sanitized = input
+    // Map invalid characters first so the trim operates on the final character set.
+    // We trim_end after take() because truncation can land on a trailing space.
+    let s: String = input
+        .trim()
         .chars()
         .map(|character| match character {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
             c if c.is_control() => '_',
             c => c,
         })
-        .collect::<String>()
-        .trim()
-        .chars()
         .take(MAX_TITLE_LENGTH)
-        .collect::<String>();
-
-    sanitized.trim().to_string()
+        .collect();
+    s.trim_end().to_string()
 }
 
 /// Manages filesystem-backed persistence for video metadata and cached assets.

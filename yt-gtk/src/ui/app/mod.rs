@@ -32,13 +32,24 @@ struct AppState {
     subs_file: PathBuf,
 }
 
-/// Info about the currently selected video (for context menu actions)
+/// Info about the currently selected video, shared by context menu actions and summary requests.
 #[derive(Clone)]
 struct SelectedVideo {
     video_id: String,
     video_title: String,
     video_url: String,
     channel_name: String,
+}
+
+impl From<&Video> for SelectedVideo {
+    fn from(video: &Video) -> Self {
+        Self {
+            video_id: video.video_id.clone(),
+            video_title: video.title.clone(),
+            video_url: video.watch_url(),
+            channel_name: video.channel_name.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -52,31 +63,9 @@ struct UiContext {
     badge: Label,
 }
 
-#[derive(Clone)]
-struct SummaryRequest {
-    video_id: String,
-    video_url: String,
-    video_title: String,
-    channel_name: String,
-}
-
 const CARD_WIDTH: i32 = 320;
 const CARD_SPACING: i32 = 16;
 const GRID_PADDING: i32 = 16;
-
-fn summary_request(
-    video_id: &str,
-    video_url: &str,
-    video_title: &str,
-    channel_name: &str,
-) -> SummaryRequest {
-    SummaryRequest {
-        video_id: video_id.to_string(),
-        video_url: video_url.to_string(),
-        video_title: video_title.to_string(),
-        channel_name: channel_name.to_string(),
-    }
-}
 
 fn is_legacy_download(path: &Path) -> bool {
     !matches!(path.extension().and_then(|ext| ext.to_str()), Some("mkv"))
@@ -204,7 +193,7 @@ fn toggle_watch_later_and_download(
 fn apply_watch_later_action(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
-    request: SummaryRequest,
+    request: SelectedVideo,
 ) {
     let added = toggle_watch_later_and_download(
         state_rc,
@@ -586,12 +575,4 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
     } else {
         badge.hide();
     }
-}
-
-fn has_cached_summary(video: &Video) -> bool {
-    video
-        .ai_summary
-        .as_ref()
-        .map(|summary| !summary.trim().is_empty())
-        .unwrap_or(false)
 }

@@ -1,7 +1,5 @@
 use super::refresh::refresh_video_lists;
-use super::{
-    create_readonly_text_scroller, has_cached_summary, AppState, SummaryRequest, UiContext,
-};
+use super::{create_readonly_text_scroller, AppState, SelectedVideo, UiContext};
 use crate::cache::fetch_transcript;
 use crate::gemini::{summarize_video_streaming, StreamingMessage};
 use crate::ui::dialogs::show_text_dialog;
@@ -97,16 +95,14 @@ fn persist_summary_to_cache(
 pub(super) fn maybe_prefetch_summary_for_watch_later(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
-    request: SummaryRequest,
+    request: SelectedVideo,
 ) {
     let should_prefetch = {
         let mut state = state_rc.borrow_mut();
         let has_summary = state
             .videos
             .iter()
-            .find(|video| video.video_id == request.video_id)
-            .map(has_cached_summary)
-            .unwrap_or(false);
+            .any(|video| video.video_id == request.video_id && video.has_ai_summary());
 
         if has_summary || state.summaries_in_progress.contains(&request.video_id) {
             false
@@ -164,7 +160,7 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
 fn start_summary_generation_for_dialog(
     state_rc: Rc<RefCell<AppState>>,
     ui_context: UiContext,
-    request: SummaryRequest,
+    request: SelectedVideo,
     buffer: gtk::TextBuffer,
     regenerate_button: Button,
     loading_text: &str,
@@ -223,7 +219,7 @@ fn start_summary_generation_for_dialog(
 pub(super) fn show_summary_dialog(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
-    request: &SummaryRequest,
+    request: &SelectedVideo,
 ) {
     let dialog = gtk::Dialog::with_buttons(
         Some(&format!("Summary: {}", request.video_title)),

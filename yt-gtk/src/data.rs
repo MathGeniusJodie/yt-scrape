@@ -24,6 +24,14 @@ impl Video {
     pub fn watch_url(&self) -> String {
         urls::watch_url(&self.video_id)
     }
+
+    /// Returns `true` when a non-empty AI summary is cached for this video.
+    pub fn has_ai_summary(&self) -> bool {
+        self.ai_summary
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
 }
 
 /// Which tab is currently active
