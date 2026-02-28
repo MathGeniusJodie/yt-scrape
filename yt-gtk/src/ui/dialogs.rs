@@ -1,7 +1,6 @@
 use gtk::prelude::*;
 use gtk::{
-    ApplicationWindow, Dialog, DialogFlags, Label, ResponseType, ScrolledWindow, TextBuffer,
-    TextView,
+    ApplicationWindow, Dialog, DialogFlags, ResponseType, ScrolledWindow, TextBuffer, TextView,
 };
 
 /// Show a scrollable text dialog (for transcripts/summaries)
@@ -43,48 +42,6 @@ pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) 
         dialog.close();
     });
 
-    dialog.run();
-    dialog.close();
-}
-
-/// Show a loading dialog that can be updated
-#[allow(dead_code)]
-pub fn create_loading_dialog(parent: &ApplicationWindow, title: &str) -> (Dialog, Label) {
-    let dialog = Dialog::with_buttons(
-        Some(title),
-        Some(parent),
-        DialogFlags::MODAL | DialogFlags::DESTROY_WITH_PARENT,
-        &[("Cancel", ResponseType::Cancel)],
-    );
-
-    dialog.set_default_size(400, 100);
-
-    let content_area = dialog.content_area();
-    content_area.set_margin_start(20);
-    content_area.set_margin_end(20);
-    content_area.set_margin_top(20);
-    content_area.set_margin_bottom(20);
-
-    let label = Label::new(Some("Loading..."));
-    label.set_line_wrap(true);
-    content_area.pack_start(&label, true, true, 0);
-
-    dialog.show_all();
-
-    (dialog, label)
-}
-
-/// Show an error dialog
-#[allow(dead_code)]
-pub fn show_error_dialog(parent: &ApplicationWindow, title: &str, message: &str) {
-    let dialog = gtk::MessageDialog::new(
-        Some(parent),
-        DialogFlags::MODAL | DialogFlags::DESTROY_WITH_PARENT,
-        gtk::MessageType::Error,
-        gtk::ButtonsType::Ok,
-        message,
-    );
-    dialog.set_title(title);
     dialog.run();
     dialog.close();
 }

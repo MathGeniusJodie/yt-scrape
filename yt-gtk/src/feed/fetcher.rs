@@ -23,7 +23,6 @@ const BROWSER_USER_AGENT: &str =
 
 /// Progress updates during feed fetching
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum FetchProgress {
     Started {
         total: usize,

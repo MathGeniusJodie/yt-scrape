@@ -15,16 +15,6 @@ const OPENROUTER_MODELS: [&str; 4] = [
 ];
 const SUMMARY_PROMPT: &str = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections";
 
-/// High-level status of a summary request for UI state handling.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum SummaryState {
-    Loading,
-    Streaming(String),
-    Ready(String),
-    Error(String),
-}
-
 #[derive(Serialize)]
 struct GeminiRequest {
     contents: Vec<Content>,
@@ -104,8 +94,6 @@ struct ResponsePart {
 #[derive(Deserialize)]
 struct GeminiError {
     message: String,
-    #[allow(dead_code)]
-    status: Option<String>,
 }
 
 #[derive(Serialize)]

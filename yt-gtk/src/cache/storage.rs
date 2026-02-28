@@ -72,24 +72,6 @@ impl Storage {
         })
     }
 
-    /// Returns the cache directory path.
-    #[allow(dead_code)]
-    pub fn cache_dir(&self) -> &Path {
-        self.cache_dir.as_path()
-    }
-
-    /// Returns the thumbnail cache directory path.
-    #[allow(dead_code)]
-    pub fn thumbnails_dir(&self) -> &Path {
-        self.thumbnails_dir.as_path()
-    }
-
-    /// Returns the local videos directory path.
-    #[allow(dead_code)]
-    pub fn videos_dir(&self) -> &Path {
-        self.videos_dir.as_path()
-    }
-
     /// Returns the transcript extraction work directory path.
     pub fn transcripts_work_dir(&self) -> &Path {
         self.transcripts_work_dir.as_path()
@@ -226,31 +208,6 @@ impl Storage {
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
         let json = serde_json::to_string_pretty(videos)?;
         std::fs::write(path, json)?;
-        Ok(())
-    }
-
-    /// Updates a video's transcript and persists the video cache.
-    ///
-    /// # Arguments
-    ///
-    /// * `videos` - Mutable in-memory video list.
-    /// * `video_id` - Target video identifier.
-    /// * `transcript` - Transcript payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if writing the updated cache fails.
-    #[allow(dead_code)]
-    pub fn save_transcript(
-        &self,
-        videos: &mut [Video],
-        video_id: &str,
-        transcript: String,
-    ) -> Result<()> {
-        if let Some(video) = videos.iter_mut().find(|video| video.video_id == video_id) {
-            video.transcript = Some(transcript);
-            self.save_videos(videos)?;
-        }
         Ok(())
     }
 }

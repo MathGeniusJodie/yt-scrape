@@ -28,7 +28,6 @@ struct AppState {
     videos: Vec<Video>,
     watch_later: HashSet<String>,
     summaries_in_progress: HashSet<String>,
-    current_tab: Tab,
     storage: Storage,
     subs_file: PathBuf,
 }
@@ -59,6 +58,24 @@ struct SummaryRequest {
     video_url: String,
     video_title: String,
     channel_name: String,
+}
+
+const CARD_WIDTH: i32 = 320;
+const CARD_SPACING: i32 = 16;
+const GRID_PADDING: i32 = 16;
+
+fn summary_request(
+    video_id: &str,
+    video_url: &str,
+    video_title: &str,
+    channel_name: &str,
+) -> SummaryRequest {
+    SummaryRequest {
+        video_id: video_id.to_string(),
+        video_url: video_url.to_string(),
+        video_title: video_title.to_string(),
+        channel_name: channel_name.to_string(),
+    }
 }
 
 fn is_legacy_download(path: &Path) -> bool {
@@ -101,6 +118,106 @@ fn resolve_playback_path(
     }
 }
 
+fn configure_video_flow(flow: &FlowBox) {
+    flow.set_widget_name("video-grid");
+    flow.set_valign(gtk::Align::Start);
+    flow.set_halign(gtk::Align::Center);
+    flow.set_max_children_per_line(10);
+    flow.set_min_children_per_line(1);
+    flow.set_selection_mode(gtk::SelectionMode::Single);
+    flow.set_homogeneous(false);
+    flow.set_column_spacing(CARD_SPACING as u32);
+    flow.set_row_spacing(CARD_SPACING as u32);
+}
+
+fn create_video_grid() -> (ScrolledWindow, FlowBox) {
+    let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+
+    let container = GtkBox::new(Orientation::Horizontal, 0);
+    container.set_halign(gtk::Align::Center);
+    container.set_valign(gtk::Align::Start);
+
+    let flow = FlowBox::new();
+    configure_video_flow(&flow);
+    container.pack_start(&flow, false, false, 0);
+
+    let flow_for_resize = flow.clone();
+    scroll.connect_size_allocate(move |_widget, allocation| {
+        let available_width = allocation.width() - GRID_PADDING * 2;
+        let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
+        let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
+        flow_for_resize.set_size_request(optimal_width, -1);
+    });
+
+    scroll.add(&container);
+    (scroll, flow)
+}
+
+fn create_readonly_text_scroller(initial_text: &str) -> (ScrolledWindow, gtk::TextBuffer) {
+    let scrolled = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scrolled.set_vexpand(true);
+
+    let text_view = gtk::TextView::new();
+    text_view.set_editable(false);
+    text_view.set_wrap_mode(gtk::WrapMode::Word);
+    text_view.set_left_margin(12);
+    text_view.set_right_margin(12);
+    text_view.set_top_margin(12);
+    text_view.set_bottom_margin(12);
+
+    let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    buffer.set_text(initial_text);
+    text_view.set_buffer(Some(&buffer));
+
+    scrolled.add(&text_view);
+    (scrolled, buffer)
+}
+
+fn toggle_watch_later_and_download(
+    state_rc: &Rc<RefCell<AppState>>,
+    runtime: &Arc<Runtime>,
+    video_id: &str,
+    video_title: &str,
+) -> bool {
+    let mut state = state_rc.borrow_mut();
+    let added = if state.watch_later.remove(video_id) {
+        false
+    } else {
+        state.watch_later.insert(video_id.to_string());
+        true
+    };
+
+    if added && needs_download_upgrade(&state.storage, video_id) {
+        let video_path = state.storage.video_path(video_id, video_title);
+        spawn_video_download(runtime.clone(), video_id.to_string(), video_path);
+    }
+
+    if let Err(save_error) = state.storage.save_watch_later(&state.watch_later) {
+        error!("Failed to persist watch-later list: {}", save_error);
+    }
+
+    added
+}
+
+fn apply_watch_later_action(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &UiContext,
+    request: SummaryRequest,
+) {
+    let added = toggle_watch_later_and_download(
+        state_rc,
+        &ui_context.runtime,
+        &request.video_id,
+        &request.video_title,
+    );
+    refresh_video_lists(state_rc, ui_context);
+    if added {
+        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, request);
+    }
+}
+
 /// Builds and presents the primary GTK application window.
 ///
 /// # Arguments
@@ -134,7 +251,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         videos,
         watch_later,
         summaries_in_progress: HashSet::new(),
-        current_tab: Tab::Feed,
         storage,
         subs_file,
     }));
@@ -193,77 +309,10 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let stack = Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
 
-    // Card dimensions for layout calculation
-    const CARD_WIDTH: i32 = 320;
-    const CARD_SPACING: i32 = 16;
-    const GRID_PADDING: i32 = 16;
-
-    // Feed tab
-    let feed_scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    feed_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-
-    // Container to center the FlowBox
-    let feed_container = GtkBox::new(Orientation::Horizontal, 0);
-    feed_container.set_halign(gtk::Align::Center);
-    feed_container.set_valign(gtk::Align::Start);
-
-    let feed_flow = FlowBox::new();
-    feed_flow.set_widget_name("video-grid");
-    feed_flow.set_valign(gtk::Align::Start);
-    feed_flow.set_halign(gtk::Align::Center);
-    feed_flow.set_max_children_per_line(10);
-    feed_flow.set_min_children_per_line(1);
-    feed_flow.set_selection_mode(gtk::SelectionMode::Single);
-    feed_flow.set_homogeneous(false);
-    feed_flow.set_column_spacing(CARD_SPACING as u32);
-    feed_flow.set_row_spacing(CARD_SPACING as u32);
-
-    feed_container.pack_start(&feed_flow, false, false, 0);
-
-    // Dynamically adjust FlowBox width based on available space
-    let feed_flow_for_resize = feed_flow.clone();
-    feed_scroll.connect_size_allocate(move |_widget, allocation| {
-        let available_width = allocation.width() - GRID_PADDING * 2;
-        let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
-        let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
-        feed_flow_for_resize.set_size_request(optimal_width, -1);
-    });
-
-    feed_scroll.add(&feed_container);
+    let (feed_scroll, feed_flow) = create_video_grid();
     stack.add_titled(&feed_scroll, "feed", "Feed");
 
-    // Watch Later tab
-    let watch_later_scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    watch_later_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-
-    // Container to center the FlowBox
-    let watch_later_container = GtkBox::new(Orientation::Horizontal, 0);
-    watch_later_container.set_halign(gtk::Align::Center);
-    watch_later_container.set_valign(gtk::Align::Start);
-
-    let watch_later_flow = FlowBox::new();
-    watch_later_flow.set_widget_name("video-grid");
-    watch_later_flow.set_valign(gtk::Align::Start);
-    watch_later_flow.set_halign(gtk::Align::Center);
-    watch_later_flow.set_max_children_per_line(10);
-    watch_later_flow.set_min_children_per_line(1);
-    watch_later_flow.set_selection_mode(gtk::SelectionMode::Single);
-    watch_later_flow.set_homogeneous(false);
-    watch_later_flow.set_column_spacing(CARD_SPACING as u32);
-    watch_later_flow.set_row_spacing(CARD_SPACING as u32);
-
-    watch_later_container.pack_start(&watch_later_flow, false, false, 0);
-
-    // Dynamically adjust FlowBox width based on available space
-    let watch_later_flow_for_resize = watch_later_flow.clone();
-    watch_later_scroll.connect_size_allocate(move |_widget, allocation| {
-        let available_width = allocation.width() - GRID_PADDING * 2;
-        let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
-        let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
-        watch_later_flow_for_resize.set_size_request(optimal_width, -1);
-    });
-
-    watch_later_scroll.add(&watch_later_container);
+    let (watch_later_scroll, watch_later_flow) = create_video_grid();
     stack.add_titled(&watch_later_scroll, "watch-later", "Watch Later");
 
     // Custom tab bar with stylish badge
@@ -348,21 +397,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     // Set initial badge and populate videos
     refresh_video_lists(&state, &ui_context);
-
-    // Track tab changes
-    {
-        let state = state.clone();
-        stack.connect_visible_child_notify(move |stack| {
-            let mut state = state.borrow_mut();
-            if let Some(name) = stack.visible_child_name() {
-                state.current_tab = if name == "watch-later" {
-                    Tab::WatchLater
-                } else {
-                    Tab::Feed
-                };
-            }
-        });
-    }
 
     // Refresh button handler
     {
@@ -623,41 +657,14 @@ fn create_context_menu(
         let ui_context = ui_context.clone();
         watch_later_button.connect_clicked(move |_| {
             if let Some(ref video) = selected_video.borrow().clone() {
-                let mut added_to_watch_later = false;
-                {
-                    let mut state = state_rc.borrow_mut();
-                    if state.watch_later.contains(&video.video_id) {
-                        state.watch_later.remove(&video.video_id);
-                    } else {
-                        state.watch_later.insert(video.video_id.clone());
-                        added_to_watch_later = true;
-
-                        // Start download if missing or from the legacy downloader.
-                        if needs_download_upgrade(&state.storage, &video.video_id) {
-                            let video_path = state
-                                .storage
-                                .video_path(&video.video_id, &video.video_title);
-                            let video_id = video.video_id.clone();
-                            spawn_video_download(ui_context.runtime.clone(), video_id, video_path);
-                        }
-                    }
-                    let _ = state.storage.save_watch_later(&state.watch_later);
-                }
+                let request = summary_request(
+                    &video.video_id,
+                    &video.video_url,
+                    &video.video_title,
+                    &video.channel_name,
+                );
                 ui_context.context_menu.popdown();
-                refresh_video_lists(&state_rc, &ui_context);
-
-                if added_to_watch_later {
-                    maybe_prefetch_summary_for_watch_later(
-                        &state_rc,
-                        &ui_context,
-                        SummaryRequest {
-                            video_id: video.video_id.clone(),
-                            video_url: video.video_url.clone(),
-                            video_title: video.video_title.clone(),
-                            channel_name: video.channel_name.clone(),
-                        },
-                    );
-                }
+                apply_watch_later_action(&state_rc, &ui_context, request);
             }
         });
     }
@@ -672,12 +679,12 @@ fn create_context_menu(
                 show_summary_dialog(
                     &state_rc,
                     &ui_context,
-                    &SummaryRequest {
-                        video_id: video.video_id.clone(),
-                        video_url: video.video_url.clone(),
-                        video_title: video.video_title.clone(),
-                        channel_name: video.channel_name.clone(),
-                    },
+                    &summary_request(
+                        &video.video_id,
+                        &video.video_url,
+                        &video.video_title,
+                        &video.channel_name,
+                    ),
                 );
             }
         });
@@ -735,31 +742,25 @@ fn populate_flow_box(
 
         let video_id = video.video_id.clone();
         let video_title = video.title.clone();
-        let video_url = video.watch_url();
-        let channel_name = video.channel_name.clone();
+        let request = SummaryRequest {
+            video_id: video_id.clone(),
+            video_url: video.watch_url(),
+            video_title: video_title.clone(),
+            channel_name: video.channel_name.clone(),
+        };
         let state_rc = state_rc.clone();
         let runtime = ui_context.runtime.clone();
         let selected_video = ui_context.selected_video.clone();
         let card_ui_context = ui_context.clone();
 
-        // Clone for watch later toggle (before button_press_event moves them)
-        let wl_video_id = video_id.clone();
-        let wl_video_title = video_title.clone();
-        let wl_video_url = video_url.clone();
-        let wl_channel_name = channel_name.clone();
         let wl_state_rc = state_rc.clone();
-        let wl_runtime = runtime.clone();
         let wl_ui_context = ui_context.clone();
+        let wl_request = request.clone();
 
         if let Some(ai_summary_button) = ai_summary_button {
             let summary_state_rc = state_rc.clone();
             let summary_ui_context = ui_context.clone();
-            let summary_request = SummaryRequest {
-                video_id: video_id.clone(),
-                video_url: video_url.clone(),
-                video_title: video_title.clone(),
-                channel_name: channel_name.clone(),
-            };
+            let summary_request = request.clone();
 
             ai_summary_button.connect_clicked(move |_| {
                 show_summary_dialog(&summary_state_rc, &summary_ui_context, &summary_request);
@@ -789,8 +790,8 @@ fn populate_flow_box(
                     *selected_video.borrow_mut() = Some(SelectedVideo {
                         video_id: video_id.clone(),
                         video_title: video_title.clone(),
-                        video_url: video_url.clone(),
-                        channel_name: channel_name.clone(),
+                        video_url: request.video_url.clone(),
+                        channel_name: request.channel_name.clone(),
                     });
                     card_ui_context.context_menu.set_relative_to(Some(widget));
                     card_ui_context.context_menu.popup();
@@ -803,40 +804,7 @@ fn populate_flow_box(
 
         // Watch later toggle button handler
         watch_later_toggle.connect_clicked(move |_| {
-            let mut added_to_watch_later = false;
-            {
-                let mut state = wl_state_rc.borrow_mut();
-                if state.watch_later.contains(&wl_video_id) {
-                    state.watch_later.remove(&wl_video_id);
-                } else {
-                    state.watch_later.insert(wl_video_id.clone());
-                    added_to_watch_later = true;
-
-                    // Start download if missing or from the legacy downloader.
-                    if needs_download_upgrade(&state.storage, &wl_video_id) {
-                        let video_path = state.storage.video_path(&wl_video_id, &wl_video_title);
-                        let video_id = wl_video_id.clone();
-                        spawn_video_download(wl_runtime.clone(), video_id, video_path);
-                    }
-                }
-                let _ = state.storage.save_watch_later(&state.watch_later);
-            }
-
-            // Update badge and refresh UI
-            refresh_video_lists(&wl_state_rc, &wl_ui_context);
-
-            if added_to_watch_later {
-                maybe_prefetch_summary_for_watch_later(
-                    &wl_state_rc,
-                    &wl_ui_context,
-                    SummaryRequest {
-                        video_id: wl_video_id.clone(),
-                        video_url: wl_video_url.clone(),
-                        video_title: wl_video_title.clone(),
-                        channel_name: wl_channel_name.clone(),
-                    },
-                );
-            }
+            apply_watch_later_action(&wl_state_rc, &wl_ui_context, wl_request.clone());
         });
 
         flow_box.add(&card);
@@ -1201,22 +1169,7 @@ fn show_summary_dialog(
     controls_row.pack_end(&regenerate_button, false, false, 0);
     content_area.pack_start(&controls_row, false, false, 0);
 
-    let scrolled = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scrolled.set_vexpand(true);
-
-    let text_view = gtk::TextView::new();
-    text_view.set_editable(false);
-    text_view.set_wrap_mode(gtk::WrapMode::Word);
-    text_view.set_left_margin(12);
-    text_view.set_right_margin(12);
-    text_view.set_top_margin(12);
-    text_view.set_bottom_margin(12);
-
-    let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-    text_view.set_buffer(Some(&buffer));
-
-    scrolled.add(&text_view);
+    let (scrolled, buffer) = create_readonly_text_scroller("");
     content_area.pack_start(&scrolled, true, true, 0);
 
     let state_rc_for_dialog = state_rc.clone();
@@ -1303,24 +1256,7 @@ fn show_transcript_dialog(
     dialog.set_default_size(700, 500);
 
     let content_area = dialog.content_area();
-
-    let scrolled = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scrolled.set_vexpand(true);
-
-    let text_view = gtk::TextView::new();
-    text_view.set_editable(false);
-    text_view.set_wrap_mode(gtk::WrapMode::Word);
-    text_view.set_left_margin(12);
-    text_view.set_right_margin(12);
-    text_view.set_top_margin(12);
-    text_view.set_bottom_margin(12);
-
-    let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-    buffer.set_text("Loading transcript...");
-    text_view.set_buffer(Some(&buffer));
-
-    scrolled.add(&text_view);
+    let (scrolled, buffer) = create_readonly_text_scroller("Loading transcript...");
     content_area.pack_start(&scrolled, true, true, 0);
 
     dialog.show_all();
