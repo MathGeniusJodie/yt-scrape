@@ -13,7 +13,13 @@ const OPENROUTER_MODELS: [&str; 4] = [
     "deepseek/deepseek-r1-0528",
     "tngtech/deepseek-r1t2-chimera",
 ];
-const SUMMARY_PROMPT: &str = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections";
+const SUMMARY_PROMPT: &str = concat!(
+    "Summarize this YouTube video with all the relevant information so I don't have to watch ",
+    "it. Don't use nested unordered lists. Don't use underlines. Use headings and bullet ",
+    "points where appropriate. Use fancy typography if appropriate, and use italics for ",
+    "emphasis or important points. Include memorable quotes in blockquotes. Use * for ",
+    "Markdown lists, not -. Include timestamps for sections."
+);
 
 #[derive(Serialize)]
 struct GeminiRequest {
@@ -142,6 +148,15 @@ pub enum StreamingMessage {
     Error(String),
 }
 
+struct OpenRouterSummaryInput<'a> {
+    video_id: &'a str,
+    video_url: &'a str,
+    video_title: &'a str,
+    channel_name: &'a str,
+    prompt: &'a str,
+    transcripts_work_dir: &'a Path,
+}
+
 fn configured_openrouter_models() -> Vec<String> {
     if let Ok(models_raw) = std::env::var("OPENROUTER_MODELS") {
         let models = models_raw
@@ -182,13 +197,31 @@ pub async fn summarize_video_streaming(
     transcripts_work_dir: &Path,
     tx: mpsc::UnboundedSender<StreamingMessage>,
 ) {
-    let prompt = SUMMARY_PROMPT.to_string();
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = tx.send(StreamingMessage::Error(format!(
+                "Failed to initialize HTTP client: {error}"
+            )));
+            return;
+        }
+    };
 
     // Try Gemini flash first, then OpenRouter with transcript fallback.
     let gemini_result = match std::env::var("GEMINI_API_KEY") {
         Ok(api_key) => {
-            call_gemini_streaming(&api_key, GEMINI_FLASH_MODEL, video_url, &prompt, tx.clone())
-                .await
+            call_gemini_streaming(
+                &client,
+                &api_key,
+                GEMINI_FLASH_MODEL,
+                video_url,
+                SUMMARY_PROMPT,
+                tx.clone(),
+            )
+            .await
         }
         Err(_) => Err(anyhow::anyhow!(
             "GEMINI_API_KEY environment variable not set"
@@ -197,12 +230,15 @@ pub async fn summarize_video_streaming(
 
     if let Err(gemini_error) = gemini_result {
         if let Err(openrouter_error) = call_openrouter_with_transcript(
-            video_id,
-            video_url,
-            video_title,
-            channel_name,
-            &prompt,
-            transcripts_work_dir,
+            &client,
+            OpenRouterSummaryInput {
+                video_id,
+                video_url,
+                video_title,
+                channel_name,
+                prompt: SUMMARY_PROMPT,
+                transcripts_work_dir,
+            },
             tx.clone(),
         )
         .await
@@ -216,16 +252,13 @@ pub async fn summarize_video_streaming(
 }
 
 async fn call_gemini_streaming(
+    client: &reqwest::Client,
     api_key: &str,
     model: &str,
     video_url: &str,
     prompt: &str,
     tx: mpsc::UnboundedSender<StreamingMessage>,
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
-
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
         model, api_key
@@ -320,14 +353,19 @@ async fn call_gemini_streaming(
 }
 
 async fn call_openrouter_with_transcript(
-    video_id: &str,
-    video_url: &str,
-    video_title: &str,
-    channel_name: &str,
-    prompt: &str,
-    transcripts_work_dir: &Path,
+    client: &reqwest::Client,
+    input: OpenRouterSummaryInput<'_>,
     tx: mpsc::UnboundedSender<StreamingMessage>,
 ) -> Result<()> {
+    let OpenRouterSummaryInput {
+        video_id,
+        video_url,
+        video_title,
+        channel_name,
+        prompt,
+        transcripts_work_dir,
+    } = input;
+
     let api_key = std::env::var("OPENROUTER_API_KEY")
         .map_err(|_| anyhow::anyhow!("OPENROUTER_API_KEY environment variable not set"))?;
 
@@ -354,10 +392,6 @@ async fn call_openrouter_with_transcript(
             ),
         }],
     };
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
 
     let response = client
         .post(OPENROUTER_URL)

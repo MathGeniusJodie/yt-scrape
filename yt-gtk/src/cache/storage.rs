@@ -231,11 +231,32 @@ impl Storage {
     /// Saved IDs. If file loading or parsing fails, an empty set is returned.
     pub fn load_watch_later(&self) -> HashSet<String> {
         let path = self.data_dir.join(WATCH_LATER_FILE);
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|content| serde_json::from_str::<WatchLaterData>(&content).ok())
-            .map(|data| data.video_ids.into_iter().collect())
-            .unwrap_or_default()
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return HashSet::new();
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to read watch-later file {}: {}",
+                    path.display(),
+                    error
+                );
+                return HashSet::new();
+            }
+        };
+
+        match serde_json::from_str::<WatchLaterData>(&content) {
+            Ok(data) => data.video_ids.into_iter().collect(),
+            Err(error) => {
+                warn!(
+                    "Failed to parse watch-later file {}: {}",
+                    path.display(),
+                    error
+                );
+                HashSet::new()
+            }
+        }
     }
 
     /// Saves watch-later IDs to disk using deterministic ordering.
@@ -269,10 +290,22 @@ impl Storage {
     /// Cached videos, or an empty vector if cache loading/parsing fails.
     pub fn load_videos(&self) -> Vec<Video> {
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
-        let mut videos: Vec<Video> = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                warn!("Failed to read videos cache {}: {}", path.display(), error);
+                return Vec::new();
+            }
+        };
+
+        let mut videos: Vec<Video> = match serde_json::from_str(&content) {
+            Ok(videos) => videos,
+            Err(error) => {
+                warn!("Failed to parse videos cache {}: {}", path.display(), error);
+                return Vec::new();
+            }
+        };
 
         for video in &mut videos {
             if let Some(sidecar) = self.read_video_sidecar(&video.video_id) {

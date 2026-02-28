@@ -167,11 +167,8 @@ fn clean_transcript(text: &str) -> String {
         }
     }
 
-    // Join with spaces, then normalize multiple spaces
-    let joined = lines.join(" ");
-    let normalized: String = joined.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    normalized
+    // Trimmed non-empty lines can be joined directly.
+    lines.join(" ")
 }
 
 #[cfg(test)]

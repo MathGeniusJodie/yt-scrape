@@ -39,8 +39,9 @@ fn escape_ffmetadata(value: &str) -> String {
 /// Parse a MM:SS or HH:MM:SS token, stripping common surrounding punctuation.
 fn parse_time_token(raw: &str) -> Option<f64> {
     let token = raw
-        .trim_matches(['[', ']', '(', ')', '{', '}'])
-        .trim_end_matches(['-', '|', ',', '.']);
+        .trim()
+        .trim_start_matches(['[', '(', '{'])
+        .trim_end_matches([']', ')', '}', '-', '|', ',', '.']);
 
     let mut parts = token.split(':');
     let a: u64 = parts.next()?.parse().ok()?;
@@ -172,4 +173,41 @@ pub(super) fn ensure_chapters_file(local_path: &Path) -> Option<PathBuf> {
     let ffmeta = build_ffmetadata(&info)?;
     fs::write(&chapters_path, ffmeta).ok()?;
     Some(chapters_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_description_chapters, parse_time_token};
+
+    #[test]
+    fn parse_time_token_strips_common_punctuation() {
+        assert_eq!(parse_time_token("[01:23],"), Some(83.0));
+        assert_eq!(parse_time_token("(1:02:03)-"), Some(3_723.0));
+    }
+
+    #[test]
+    fn parse_time_token_rejects_more_than_three_components() {
+        assert_eq!(parse_time_token("1:02:03:04"), None);
+    }
+
+    #[test]
+    fn parse_description_chapters_sorts_and_deduplicates_identical_starts() {
+        let description = "00:10 - First\n[00:05] Intro\n00:10 | Duplicate\n";
+        let chapters = parse_description_chapters(description);
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].start, 5.0);
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[1].start, 10.0);
+        assert_eq!(chapters[1].title, "First");
+    }
+
+    #[test]
+    fn parse_description_chapters_uses_default_title_when_missing() {
+        let description = "00:00";
+        let chapters = parse_description_chapters(description);
+
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "Chapter");
+    }
 }

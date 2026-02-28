@@ -17,8 +17,6 @@ const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 const MAX_BACKOFF_MS: u64 = 4_000;
-const BROWSER_USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
 
 /// Progress updates during feed fetching
 #[derive(Debug, Clone)]
@@ -175,7 +173,6 @@ pub async fn fetch_all_feeds(
         .context("GOOGLE_API_KEY is not set. Set it before refreshing feeds.")?;
 
     let client = reqwest::Client::builder()
-        .user_agent(BROWSER_USER_AGENT)
         .timeout(Duration::from_secs(30))
         .gzip(true)
         .build()?;
@@ -603,8 +600,9 @@ pub fn load_channel_ids(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
     let content = std::fs::read_to_string(path)?;
     Ok(content
         .lines()
-        .map(|s| s.trim().to_string())
+        .map(str::trim)
         .filter(|s| !s.is_empty() && !s.starts_with('#'))
+        .map(ToString::to_string)
         .collect())
 }
 
