@@ -51,6 +51,20 @@ pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: 
     );
 }
 
+pub(super) fn refresh_watch_later_tab(state_rc: &Rc<RefCell<AppState>>, ui_context: &UiContext) {
+    let state_ref = state_rc.borrow();
+    let downloaded_video_ids = state_ref.storage.cached_video_ids();
+    update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
+    populate_flow_box(
+        &ui_context.watch_later_flow,
+        &state_ref,
+        Tab::WatchLater,
+        &downloaded_video_ids,
+        state_rc,
+        ui_context,
+    );
+}
+
 pub(super) fn download_missing_thumbnails(
     videos: &[Video],
     storage: &Storage,

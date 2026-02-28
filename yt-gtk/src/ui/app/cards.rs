@@ -6,25 +6,19 @@ use crate::ui::video_card::create_video_card;
 
 use glib::clone;
 use gtk::prelude::*;
-use gtk::{ApplicationWindow, Box as GtkBox, Button, FlowBox, Label, Orientation, Popover};
+use gtk::{Box as GtkBox, Button, FlowBox, Orientation, Popover};
 use log::error;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
 
 pub(super) fn create_context_menu(
-    selected_video: Rc<RefCell<Option<SelectedVideo>>>,
+    popover: &Popover,
     state_rc: Rc<RefCell<AppState>>,
-    window: ApplicationWindow,
-    runtime: Arc<Runtime>,
-    feed_flow: FlowBox,
-    watch_later_flow: FlowBox,
-    badge: Label,
-) -> Popover {
-    let popover = Popover::new(None::<&gtk::Widget>);
-
+    ui_context: &UiContext,
+) {
+    let popover = popover.clone();
+    let selected_video = ui_context.selected_video.clone();
     let menu_box = GtkBox::new(Orientation::Vertical, 0);
     menu_box.set_margin_start(8);
     menu_box.set_margin_end(8);
@@ -54,15 +48,7 @@ pub(super) fn create_context_menu(
     popover.add(&menu_box);
     menu_box.show_all();
 
-    let ui_context = UiContext {
-        window: window.clone(),
-        context_menu: popover.clone(),
-        runtime: runtime.clone(),
-        feed_flow: feed_flow.clone(),
-        watch_later_flow: watch_later_flow.clone(),
-        selected_video: selected_video.clone(),
-        badge: badge.clone(),
-    };
+    let ui_context = ui_context.clone();
 
     // Connect handlers once - they read from selected_video
     {
@@ -135,8 +121,6 @@ pub(super) fn create_context_menu(
             }
         });
     }
-
-    popover
 }
 
 pub(super) fn populate_flow_box(
@@ -151,6 +135,9 @@ pub(super) fn populate_flow_box(
     flow_box.foreach(|child| {
         flow_box.remove(child);
     });
+    if tab == Tab::Feed {
+        ui_context.card_button_index.borrow_mut().feed.clear();
+    }
 
     let videos: Vec<&Video> = match tab {
         Tab::Feed => state.videos.iter().collect(),
@@ -173,6 +160,13 @@ pub(super) fn populate_flow_box(
             is_downloaded,
             video.has_ai_summary(),
         );
+        if tab == Tab::Feed {
+            ui_context
+                .card_button_index
+                .borrow_mut()
+                .feed
+                .insert(video.video_id.clone(), watch_later_toggle.clone());
+        }
 
         let video_ref = SelectedVideo::from(video);
         let state_rc = state_rc.clone();

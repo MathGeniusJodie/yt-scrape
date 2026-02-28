@@ -161,17 +161,7 @@ pub fn create_video_card(
 
     // Watch later toggle button
     let watch_later_toggle = gtk::Button::new();
-    watch_later_toggle.set_widget_name(if is_watch_later {
-        "watch-later-toggle-active"
-    } else {
-        "watch-later-toggle"
-    });
-    watch_later_toggle.set_label(if is_watch_later { "x" } else { "+" });
-    watch_later_toggle.set_tooltip_text(Some(if is_watch_later {
-        "Remove from Watch Later"
-    } else {
-        "Add to Watch Later"
-    }));
+    set_watch_later_toggle_state(&watch_later_toggle, is_watch_later);
     status_box.pack_start(&watch_later_toggle, false, false, 0);
 
     // Spacer
@@ -208,6 +198,26 @@ pub fn create_video_card(
 
     event_box.add(&card);
     (event_box, watch_later_toggle, ai_summary_button)
+}
+
+/// Update the Watch Later toggle visuals for a card button.
+///
+/// # Arguments
+///
+/// * `button` - Toggle button rendered inside a video card.
+/// * `is_watch_later` - `true` when the associated video is in Watch Later.
+pub fn set_watch_later_toggle_state(button: &gtk::Button, is_watch_later: bool) {
+    button.set_widget_name(if is_watch_later {
+        "watch-later-toggle-active"
+    } else {
+        "watch-later-toggle"
+    });
+    button.set_label(if is_watch_later { "x" } else { "+" });
+    button.set_tooltip_text(Some(if is_watch_later {
+        "Remove from Watch Later"
+    } else {
+        "Add to Watch Later"
+    }));
 }
 
 /// Crop a pixbuf to 16:9 aspect ratio (center crop)

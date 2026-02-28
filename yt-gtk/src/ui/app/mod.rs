@@ -5,6 +5,7 @@ mod summary;
 use crate::cache::{download_video, Storage};
 use crate::data::Video;
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
+use crate::ui::video_card::set_watch_later_toggle_state;
 
 use gtk::prelude::*;
 use gtk::{
@@ -13,7 +14,7 @@ use gtk::{
 };
 use log::{error, info, warn};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -21,7 +22,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
 use cards::create_context_menu;
-use refresh::{download_missing_thumbnails, merge_cached_video_fields, refresh_video_lists};
+use refresh::{
+    download_missing_thumbnails, merge_cached_video_fields, refresh_video_lists,
+    refresh_watch_later_tab,
+};
 use summary::maybe_prefetch_summary_for_watch_later;
 
 struct AppState {
@@ -61,6 +65,12 @@ struct UiContext {
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<SelectedVideo>>>,
     badge: Label,
+    card_button_index: Rc<RefCell<CardButtonIndex>>,
+}
+
+#[derive(Default)]
+struct CardButtonIndex {
+    feed: HashMap<String, Button>,
 }
 
 const CARD_WIDTH: i32 = 320;
@@ -201,9 +211,22 @@ fn apply_watch_later_action(
         &request.video_id,
         &request.video_title,
     );
-    refresh_video_lists(state_rc, ui_context);
+    update_feed_watch_later_toggle(ui_context, &request.video_id, added);
+    refresh_watch_later_tab(state_rc, ui_context);
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, request);
+    }
+}
+
+fn update_feed_watch_later_toggle(ui_context: &UiContext, video_id: &str, is_watch_later: bool) {
+    let feed_toggle = ui_context
+        .card_button_index
+        .borrow()
+        .feed
+        .get(video_id)
+        .cloned();
+    if let Some(button) = feed_toggle {
+        set_watch_later_toggle_state(&button, is_watch_later);
     }
 }
 
@@ -363,16 +386,10 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     main_box.pack_start(&stack, true, true, 0);
     window.add(&main_box);
 
+    let card_button_index = Rc::new(RefCell::new(CardButtonIndex::default()));
+
     // Create context menu with handlers connected once
-    let context_menu = create_context_menu(
-        selected_video.clone(),
-        state.clone(),
-        window.clone(),
-        runtime.clone(),
-        feed_flow.clone(),
-        watch_later_flow.clone(),
-        wl_badge.clone(),
-    );
+    let context_menu = Popover::new(None::<&gtk::Widget>);
 
     let ui_context = UiContext {
         window: window.clone(),
@@ -382,7 +399,9 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
         badge: wl_badge.clone(),
+        card_button_index: card_button_index.clone(),
     };
+    create_context_menu(&context_menu, state.clone(), &ui_context);
 
     // Set initial badge and populate videos
     refresh_video_lists(&state, &ui_context);
