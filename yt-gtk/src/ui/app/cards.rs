@@ -56,18 +56,29 @@ pub(super) fn create_context_menu(
         let state_rc = state_rc.clone();
         let ui_context = ui_context.clone();
         play_button.connect_clicked(move |_| {
-            if let Some(ref video) = *selected_video.borrow() {
-                let state = state_rc.borrow();
-                let local_path = resolve_playback_path(
-                    &state.storage,
-                    ui_context.runtime.clone(),
-                    &video.video_id,
-                    &video.video_title,
-                );
-                if let Err(play_error) =
-                    play_video(&video.video_id, &video.video_title, local_path.as_deref())
-                {
-                    error!("Failed to play video {}: {}", video.video_id, play_error);
+            if let Some(video) = selected_video.borrow().clone() {
+                let playback = {
+                    let state = state_rc.borrow();
+                    state.video_by_id(&video.video_id).map(|current_video| {
+                        let video_title = current_video.title.clone();
+                        let local_path = resolve_playback_path(
+                            &state.storage,
+                            ui_context.runtime.clone(),
+                            &video.video_id,
+                            &video_title,
+                        );
+                        (video_title, local_path)
+                    })
+                };
+
+                if let Some((video_title, local_path)) = playback {
+                    if let Err(play_error) =
+                        play_video(&video.video_id, &video_title, local_path.as_deref())
+                    {
+                        error!("Failed to play video {}: {}", video.video_id, play_error);
+                    }
+                } else {
+                    error!("Cannot play missing video {}", video.video_id);
                 }
             }
             ui_context.context_menu.popdown();
@@ -90,9 +101,10 @@ pub(super) fn create_context_menu(
         let selected_video = selected_video.clone();
         let ui_context = ui_context.clone();
         copy_url_button.connect_clicked(move |_| {
-            if let Some(ref video) = *selected_video.borrow() {
+            if let Some(video) = selected_video.borrow().clone() {
                 // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
-                gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD).set_text(&video.video_url);
+                gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD)
+                    .set_text(&crate::urls::watch_url(&video.video_id));
             }
             ui_context.context_menu.popdown();
         });
@@ -117,7 +129,7 @@ pub(super) fn create_context_menu(
         transcript_button.connect_clicked(move |_| {
             if let Some(ref video) = *selected_video.borrow() {
                 ui_context.context_menu.popdown();
-                show_transcript_dialog(&state_rc, &ui_context, &video.video_id, &video.video_title);
+                show_transcript_dialog(&state_rc, &ui_context, &video.video_id);
             }
         });
     }
@@ -168,7 +180,9 @@ pub(super) fn populate_flow_box(
                 .insert(video.video_id.clone(), watch_later_toggle.clone());
         }
 
-        let video_ref = SelectedVideo::from(video);
+        let video_ref = SelectedVideo {
+            video_id: video.video_id.clone(),
+        };
         let state_rc = state_rc.clone();
         let runtime = ui_context.runtime.clone();
         let selected_video = ui_context.selected_video.clone();
@@ -192,15 +206,27 @@ pub(super) fn populate_flow_box(
         card.connect_button_press_event(
             clone!(@strong video_ref, @strong state_rc, @strong runtime => move |widget, event| {
                 if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
-                    let state = state_rc.borrow();
-                    let local_path = resolve_playback_path(
-                        &state.storage,
-                        runtime.clone(),
-                        &video_ref.video_id,
-                        &video_ref.video_title,
-                    );
-                    if let Err(play_error) = play_video(&video_ref.video_id, &video_ref.video_title, local_path.as_deref()) {
-                        error!("Failed to play video {}: {}", video_ref.video_id, play_error);
+                    let video_id = video_ref.video_id.clone();
+                    let playback = {
+                        let state = state_rc.borrow();
+                        state.video_by_id(&video_id).map(|current_video| {
+                            let video_title = current_video.title.clone();
+                            let local_path = resolve_playback_path(
+                                &state.storage,
+                                runtime.clone(),
+                                &video_id,
+                                &video_title,
+                            );
+                            (video_title, local_path)
+                        })
+                    };
+
+                    if let Some((video_title, local_path)) = playback {
+                        if let Err(play_error) = play_video(&video_id, &video_title, local_path.as_deref()) {
+                            error!("Failed to play video {}: {}", video_id, play_error);
+                        }
+                    } else {
+                        error!("Cannot play missing video {}", video_id);
                     }
                     return glib::Propagation::Stop;
                 }

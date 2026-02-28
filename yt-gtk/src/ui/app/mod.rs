@@ -35,24 +35,16 @@ struct AppState {
     subs_file: PathBuf,
 }
 
-/// Info about the currently selected video, shared by context menu actions and summary requests.
+impl AppState {
+    fn video_by_id(&self, video_id: &str) -> Option<&Video> {
+        self.videos.iter().find(|video| video.video_id == video_id)
+    }
+}
+
+/// Identifier for the currently selected video, shared by context menu actions.
 #[derive(Clone)]
 struct SelectedVideo {
     video_id: String,
-    video_title: String,
-    video_url: String,
-    channel_name: String,
-}
-
-impl From<&Video> for SelectedVideo {
-    fn from(video: &Video) -> Self {
-        Self {
-            video_id: video.video_id.clone(),
-            video_title: video.title.clone(),
-            video_url: video.watch_url(),
-            channel_name: video.channel_name.clone(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -202,16 +194,30 @@ fn apply_watch_later_action(
     ui_context: &UiContext,
     request: SelectedVideo,
 ) {
+    let video_title = {
+        let state = state_rc.borrow();
+        state
+            .video_by_id(&request.video_id)
+            .map(|video| video.title.clone())
+    };
+    let Some(video_title) = video_title else {
+        error!(
+            "Cannot toggle watch-later for missing video {}",
+            request.video_id
+        );
+        return;
+    };
+
     let added = toggle_watch_later_and_download(
         state_rc,
         &ui_context.runtime,
         &request.video_id,
-        &request.video_title,
+        &video_title,
     );
     update_feed_watch_later_toggle(ui_context, &request.video_id, added);
     refresh_watch_later_tab(state_rc, ui_context);
     if added {
-        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, request);
+        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &request.video_id);
     }
 }
 

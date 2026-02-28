@@ -1,6 +1,7 @@
 use super::refresh::refresh_video_lists;
 use super::{create_readonly_text_scroller, AppState, SelectedVideo, UiContext};
 use crate::cache::fetch_transcript;
+use crate::data::Video;
 use crate::gemini::{summarize_video_streaming, StreamingMessage};
 use crate::ui::dialogs::show_text_dialog;
 
@@ -13,6 +14,34 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+
+#[derive(Clone)]
+struct SummaryGenerationRequest {
+    video_id: String,
+    video_url: String,
+    video_title: String,
+    channel_name: String,
+}
+
+impl SummaryGenerationRequest {
+    fn from_video(video: &Video) -> Self {
+        Self {
+            video_id: video.video_id.clone(),
+            video_url: video.watch_url(),
+            video_title: video.title.clone(),
+            channel_name: video.channel_name.clone(),
+        }
+    }
+}
+
+fn summary_generation_request(
+    state: &AppState,
+    video_id: &str,
+) -> Option<SummaryGenerationRequest> {
+    state
+        .video_by_id(video_id)
+        .map(SummaryGenerationRequest::from_video)
+}
 
 fn spawn_summary_generation(
     runtime: Arc<Runtime>,
@@ -96,26 +125,27 @@ fn persist_summary_to_cache(
 pub(super) fn maybe_prefetch_summary_for_watch_later(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
-    request: SelectedVideo,
+    video_id: &str,
 ) {
-    let should_prefetch = {
+    let summary_request = {
         let mut state = state_rc.borrow_mut();
-        let has_summary = state
-            .videos
-            .iter()
-            .any(|video| video.video_id == request.video_id && video.has_ai_summary());
+        let Some(video) = state.video_by_id(video_id) else {
+            error!("Cannot prefetch summary for missing video {}", video_id);
+            return;
+        };
+        let has_summary = video.has_ai_summary();
+        let request = SummaryGenerationRequest::from_video(video);
 
-        if has_summary || state.summaries_in_progress.contains(&request.video_id) {
-            false
+        if has_summary || state.summaries_in_progress.contains(video_id) {
+            None
         } else {
-            state.summaries_in_progress.insert(request.video_id.clone());
-            true
+            state.summaries_in_progress.insert(video_id.to_string());
+            Some(request)
         }
     };
-
-    if !should_prefetch {
+    let Some(request) = summary_request else {
         return;
-    }
+    };
 
     let transcripts_work_dir = state_rc
         .borrow()
@@ -169,10 +199,23 @@ fn start_summary_generation_for_dialog(
     buffer.set_text(loading_text);
     regenerate_button.set_sensitive(false);
 
-    state_rc
-        .borrow_mut()
-        .summaries_in_progress
-        .insert(request.video_id.clone());
+    let summary_request = {
+        let mut state = state_rc.borrow_mut();
+        let request_data = summary_generation_request(&state, &request.video_id);
+        if request_data.is_some() {
+            state.summaries_in_progress.insert(request.video_id.clone());
+        }
+        request_data
+    };
+    let Some(summary_request) = summary_request else {
+        buffer.set_text("Error: Video is no longer available.");
+        regenerate_button.set_sensitive(true);
+        error!(
+            "Cannot generate summary for missing video {}",
+            request.video_id
+        );
+        return;
+    };
 
     let transcripts_work_dir = state_rc
         .borrow()
@@ -181,16 +224,16 @@ fn start_summary_generation_for_dialog(
         .to_path_buf();
     let result_rx = spawn_summary_generation(
         ui_context.runtime.clone(),
-        request.video_id.clone(),
-        request.video_url,
-        request.video_title,
-        request.channel_name,
+        summary_request.video_id.clone(),
+        summary_request.video_url,
+        summary_request.video_title,
+        summary_request.channel_name,
         transcripts_work_dir,
     );
 
     let state_for_result = state_rc.clone();
     let ui_context_for_result = ui_context.clone();
-    let video_id_for_result = request.video_id.clone();
+    let video_id_for_result = summary_request.video_id.clone();
     let buffer_for_result = buffer.clone();
     let button_for_result = regenerate_button.clone();
 
@@ -222,8 +265,26 @@ pub(super) fn show_summary_dialog(
     ui_context: &UiContext,
     request: &SelectedVideo,
 ) {
+    let (video_title, cached_summary) = {
+        let state = state_rc.borrow();
+        let Some(video) = state.video_by_id(&request.video_id) else {
+            error!(
+                "Cannot open summary dialog for missing video {}",
+                request.video_id
+            );
+            return;
+        };
+        (
+            video.title.clone(),
+            video
+                .ai_summary
+                .clone()
+                .filter(|summary| !summary.trim().is_empty()),
+        )
+    };
+
     let dialog = gtk::Dialog::with_buttons(
-        Some(&format!("Summary: {}", request.video_title)),
+        Some(&format!("Summary: {}", video_title)),
         Some(&ui_context.window),
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
         &[("Close", gtk::ResponseType::Close)],
@@ -251,16 +312,6 @@ pub(super) fn show_summary_dialog(
     let state_rc_for_dialog = state_rc.clone();
     let ui_context_for_dialog = ui_context.clone();
     let request = request.clone();
-
-    let cached_summary = {
-        let state = state_rc.borrow();
-        state
-            .videos
-            .iter()
-            .find(|video| video.video_id == request.video_id)
-            .and_then(|video| video.ai_summary.clone())
-            .filter(|summary| !summary.trim().is_empty())
-    };
 
     if let Some(summary) = cached_summary {
         buffer.set_text(&summary);
@@ -305,21 +356,27 @@ pub(super) fn show_transcript_dialog(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
     video_id: &str,
-    video_title: &str,
 ) {
-    // Check if we already have the transcript cached
-    {
+    let (video_title, cached_transcript) = {
         let state = state_rc.borrow();
-        if let Some(video) = state.videos.iter().find(|video| video.video_id == video_id) {
-            if let Some(transcript) = &video.transcript {
-                show_text_dialog(
-                    &ui_context.window,
-                    &format!("Transcript: {}", video_title),
-                    transcript,
-                );
-                return;
-            }
-        }
+        let Some(video) = state.video_by_id(video_id) else {
+            error!(
+                "Cannot open transcript dialog for missing video {}",
+                video_id
+            );
+            return;
+        };
+        (video.title.clone(), video.transcript.clone())
+    };
+
+    // Check if we already have the transcript cached
+    if let Some(transcript) = cached_transcript {
+        show_text_dialog(
+            &ui_context.window,
+            &format!("Transcript: {}", video_title),
+            &transcript,
+        );
+        return;
     }
 
     // Need to fetch transcript
