@@ -1,12 +1,12 @@
 use crate::data::Video;
 use crate::urls;
 use anyhow::Context;
+use async_channel::Sender;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use log::warn;
 use serde::Deserialize;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 
 const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
@@ -166,7 +166,7 @@ enum ChannelFetchResult {
 /// Fetch all feeds from the given channel IDs
 pub async fn fetch_all_feeds(
     channel_ids: Vec<String>,
-    tx: mpsc::Sender<FetchProgress>,
+    tx: Sender<FetchProgress>,
 ) -> anyhow::Result<Vec<Video>> {
     let total = channel_ids.len();
     let _ = tx.send(FetchProgress::Started { total }).await;
@@ -248,7 +248,7 @@ async fn fetch_channel_with_retries(
     client: reqwest::Client,
     api_key: String,
     mut pending: PendingChannel,
-    tx: mpsc::Sender<FetchProgress>,
+    tx: Sender<FetchProgress>,
 ) -> ChannelFetchResult {
     loop {
         let now = Instant::now();

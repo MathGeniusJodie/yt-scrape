@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
 
 use cards::create_context_menu;
 use refresh::{
@@ -431,33 +430,23 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 }
             };
 
-            // Channel for progress updates: tokio mpsc → async_channel → glib main context
-            let (tx, mut rx) = mpsc::channel::<FetchProgress>(100);
+            // Progress and result channels consumed by tasks on the GTK main context.
+            let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
             let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
 
             // Spawn the fetch task on the Tokio runtime.
-            let tx_for_errors = tx.clone();
+            let progress_tx_for_errors = progress_tx.clone();
             ui_context.runtime.spawn(async move {
-                match fetch_all_feeds(channel_ids, tx).await {
+                match fetch_all_feeds(channel_ids, progress_tx).await {
                     Ok(videos) => {
                         let _ = videos_tx.send(videos).await;
                     }
                     Err(e) => {
-                        let _ = tx_for_errors
+                        let _ = progress_tx_for_errors
                             .send(FetchProgress::Fatal {
                                 error: e.to_string(),
                             })
                             .await;
-                    }
-                }
-            });
-
-            // Relay progress from tokio mpsc to async_channel so the glib main context can await it
-            let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
-            ui_context.runtime.spawn(async move {
-                while let Some(progress) = rx.recv().await {
-                    if progress_tx.send(progress).await.is_err() {
-                        break;
                     }
                 }
             });
