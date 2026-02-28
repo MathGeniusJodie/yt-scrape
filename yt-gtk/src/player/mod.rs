@@ -51,7 +51,7 @@ pub fn play_video(
     if let Some(path) = local_path {
         if path.exists() {
             let mut command = mpv_base_command(title);
-            let chapters_file = ensure_chapters_file(path, video_id);
+            let chapters_file = ensure_chapters_file(path);
             if let Some(ref chapters_file) = chapters_file {
                 log::info!(
                     "Using chapters file for {}: {}",

@@ -1,9 +1,6 @@
-use crate::urls;
-
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Deserialize)]
 struct InfoJson {
@@ -20,10 +17,15 @@ struct InfoChapter {
     title: Option<String>,
 }
 
+struct Chapter {
+    start: f64,
+    end: Option<f64>,
+    title: String,
+}
+
 fn secs_to_ms(seconds: f64) -> i64 {
     (seconds.max(0.0) * 1000.0).round() as i64
 }
-
 
 fn escape_ffmetadata(value: &str) -> String {
     value
@@ -34,216 +36,132 @@ fn escape_ffmetadata(value: &str) -> String {
         .replace('\n', " ")
 }
 
+/// Parse a MM:SS or HH:MM:SS token, stripping common surrounding punctuation.
 fn parse_time_token(raw: &str) -> Option<f64> {
     let token = raw
         .trim_matches(['[', ']', '(', ')', '{', '}'])
         .trim_end_matches(['-', '|', ',', '.']);
-    let parts: Vec<&str> = token.split(':').collect();
-    if parts.len() != 2 && parts.len() != 3 {
-        return None;
-    }
-    if !parts
-        .iter()
-        .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        return None;
-    }
 
-    let numbers: Vec<u64> = parts
-        .iter()
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect();
-    if numbers.len() != parts.len() {
-        return None;
-    }
+    let mut parts = token.split(':');
+    let a: u64 = parts.next()?.parse().ok()?;
+    let b: u64 = parts.next()?.parse().ok()?;
 
-    let seconds = if numbers.len() == 2 {
-        numbers[0] * 60 + numbers[1]
+    if let Some(c_str) = parts.next() {
+        // Reject anything with more than 3 components
+        if parts.next().is_some() {
+            return None;
+        }
+        let c: u64 = c_str.parse().ok()?;
+        Some((a * 3600 + b * 60 + c) as f64)
     } else {
-        numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
-    };
-
-    Some(seconds as f64)
+        Some((a * 60 + b) as f64)
+    }
 }
 
-fn parse_description_chapters(description: &str) -> Vec<(f64, String)> {
-    let mut parsed = Vec::new();
+/// Extract chapters from timestamp lines in a video description.
+fn parse_description_chapters(description: &str) -> Vec<Chapter> {
+    let mut chapters: Vec<Chapter> = description
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let first = line.split_whitespace().next()?;
+            let start = parse_time_token(first)?;
+            let title = line[first.len()..]
+                .trim_start()
+                .trim_start_matches(['-', '|', ':', ' ']);
+            let title = if title.is_empty() { "Chapter" } else { title };
+            Some(Chapter { start, end: None, title: escape_ffmetadata(title) })
+        })
+        .collect();
 
-    for line in description.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut tokens = line.split_whitespace();
-        let first = match tokens.next() {
-            Some(token) => token,
-            None => continue,
-        };
-        let start = match parse_time_token(first) {
-            Some(value) => value,
-            None => continue,
-        };
-
-        let mut title = line[first.len()..].trim_start();
-        title = title.trim_start_matches(['-', '|', ':', ' ']);
-        if title.is_empty() {
-            title = "Chapter";
-        }
-
-        parsed.push((start, escape_ffmetadata(title)));
-    }
-
-    parsed.sort_by(|a, b| a.0.total_cmp(&b.0));
-    parsed.dedup_by(|a, b| (a.0 - b.0).abs() < 0.001);
-    parsed
+    chapters.sort_by(|a, b| a.start.total_cmp(&b.start));
+    // Deduplicate entries within 1ms of each other
+    chapters.dedup_by(|a, b| (a.start - b.start).abs() < 0.001);
+    chapters
 }
 
 fn build_ffmetadata(info: &InfoJson) -> Option<String> {
-    let mut starts = Vec::new();
-    let mut titles = Vec::new();
-    let mut ends = Vec::new();
-
-    if !info.chapters.is_empty() {
-        for chapter in &info.chapters {
-            let Some(start) = chapter.start_time else {
-                continue;
-            };
-            starts.push(start);
-            titles.push(
-                chapter
+    let chapters: Vec<Chapter> = if !info.chapters.is_empty() {
+        info.chapters
+            .iter()
+            .filter_map(|c| {
+                let start = c.start_time?;
+                let title = c
                     .title
                     .as_deref()
                     .map(escape_ffmetadata)
-                    .unwrap_or_else(|| "Chapter".to_string()),
-            );
-            ends.push(chapter.end_time);
-        }
-    } else if let Some(description) = &info.description {
-        let description_chapters = parse_description_chapters(description);
-        for (start, title) in description_chapters {
-            starts.push(start);
-            titles.push(title);
-            ends.push(None);
-        }
-    }
+                    .unwrap_or_else(|| "Chapter".to_string());
+                Some(Chapter { start, end: c.end_time, title })
+            })
+            .collect()
+    } else {
+        info.description
+            .as_deref()
+            .map(parse_description_chapters)
+            .unwrap_or_default()
+    };
 
-    if starts.is_empty() {
+    if chapters.is_empty() {
         return None;
     }
 
     let mut ffmeta = String::from(";FFMETADATA1\n");
-    for index in 0..starts.len() {
-        let start = starts[index];
-        let mut end = ends[index]
-            .filter(|end| *end > start)
-            .or_else(|| starts.get(index + 1).copied().filter(|next| *next > start))
-            .or_else(|| info.duration.filter(|duration| *duration > start))
-            .unwrap_or(start + 1.0);
+    for (i, chapter) in chapters.iter().enumerate() {
+        // Prefer the chapter's own end time, then the next chapter's start, then the
+        // video duration, falling back to start + 1s so the range is always valid.
+        let end = chapter
+            .end
+            .filter(|&e| e > chapter.start)
+            .or_else(|| {
+                chapters
+                    .get(i + 1)
+                    .map(|next| next.start)
+                    .filter(|&s| s > chapter.start)
+            })
+            .or_else(|| info.duration.filter(|&d| d > chapter.start))
+            .unwrap_or(chapter.start + 1.0);
 
-        if end <= start {
-            end = start + 1.0;
-        }
-
-        ffmeta.push_str("[CHAPTER]\n");
-        ffmeta.push_str("TIMEBASE=1/1000\n");
-        ffmeta.push_str(&format!("START={}\n", secs_to_ms(start)));
-        ffmeta.push_str(&format!("END={}\n", secs_to_ms(end)));
-        ffmeta.push_str(&format!("title={}\n", titles[index]));
+        ffmeta.push_str("[CHAPTER]\nTIMEBASE=1/1000\n");
+        ffmeta.push_str(&format!(
+            "START={}\nEND={}\ntitle={}\n",
+            secs_to_ms(chapter.start),
+            secs_to_ms(end),
+            chapter.title,
+        ));
     }
 
     Some(ffmeta)
 }
 
 fn load_info_json(path: &Path) -> Option<InfoJson> {
-    let info_json = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            log::debug!("load_info_json: failed to read {}: {}", path.display(), error);
+    let contents = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            log::debug!("chapters: failed to read {}: {}", path.display(), e);
             return None;
         }
     };
 
-    match serde_json::from_str(&info_json) {
+    match serde_json::from_str(&contents) {
         Ok(info) => Some(info),
-        Err(error) => {
-            log::debug!("load_info_json: failed to parse {}: {}", path.display(), error);
+        Err(e) => {
+            log::debug!("chapters: failed to parse {}: {}", path.display(), e);
             None
         }
     }
 }
 
-fn fetch_info_json(video_id: &str) -> Option<InfoJson> {
-    let url = urls::watch_url(video_id);
-    let output = match Command::new("yt-dlp")
-        .arg("--dump-single-json")
-        .arg("--skip-download")
-        .arg("--extractor-retries")
-        .arg("3")
-        .arg("--retries")
-        .arg("3")
-        .arg("--no-playlist")
-        .arg("--no-warnings")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) => {
-            log::debug!("fetch_info_json: failed to run yt-dlp for {}: {}", video_id, error);
-            return None;
-        }
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::debug!(
-            "fetch_info_json: yt-dlp failed for {} with {:?}: {}",
-            video_id,
-            output.status.code(),
-            stderr.trim()
-        );
-        return None;
-    }
-
-    match serde_json::from_slice(&output.stdout) {
-        Ok(info) => Some(info),
-        Err(error) => {
-            log::debug!("fetch_info_json: failed to parse yt-dlp json for {}: {}", video_id, error);
-            None
-        }
-    }
-}
-
-pub(super) fn ensure_chapters_file(local_path: &Path, video_id: &str) -> Option<PathBuf> {
+/// Ensure a `.chapters.ffmeta` file exists beside `local_path`, creating it from
+/// the co-located `info.json` sidecar if needed. Returns `None` if no chapter data
+/// is available.
+pub(super) fn ensure_chapters_file(local_path: &Path) -> Option<PathBuf> {
     let chapters_path = local_path.with_extension("chapters.ffmeta");
-    log::debug!(
-        "ensure_chapters_file: video={} local={} chapters={}",
-        video_id,
-        local_path.display(),
-        chapters_path.display()
-    );
     if chapters_path.exists() {
-        log::debug!("ensure_chapters_file: chapters file already exists for {}", video_id);
         return Some(chapters_path);
     }
 
-    let info_json_path = local_path.with_extension("info.json");
-    let info = load_info_json(&info_json_path).or_else(|| fetch_info_json(video_id))?;
-    log::debug!(
-        "ensure_chapters_file: resolved info for {} with {} chapters",
-        video_id,
-        info.chapters.len()
-    );
+    let info = load_info_json(&local_path.with_extension("info.json"))?;
     let ffmeta = build_ffmetadata(&info)?;
-
-    if let Err(error) = fs::write(&chapters_path, ffmeta) {
-        log::debug!("ensure_chapters_file: failed to write {}: {}", chapters_path.display(), error);
-        return None;
-    }
-
-    log::debug!("ensure_chapters_file: wrote {}", chapters_path.display());
+    fs::write(&chapters_path, ffmeta).ok()?;
     Some(chapters_path)
 }
