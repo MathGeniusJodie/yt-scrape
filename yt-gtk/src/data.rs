@@ -13,9 +13,11 @@ pub struct Video {
     pub thumbnail_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Transcript content is persisted in per-video sidecar files, not in `videos.json`.
+    #[serde(default, skip_serializing)]
     pub transcript: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // AI summaries are persisted in per-video sidecar files, not in `videos.json`.
+    #[serde(default, skip_serializing)]
     pub ai_summary: Option<String>,
 }
 

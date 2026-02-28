@@ -75,17 +75,19 @@ fn persist_summary_to_cache(
     state.summaries_in_progress.remove(video_id);
 
     let mut updated = false;
-    if let Some(video) = state
+    if let Some(video_index) = state
         .videos
-        .iter_mut()
-        .find(|video| video.video_id == video_id)
+        .iter()
+        .position(|video| video.video_id == video_id)
     {
-        video.ai_summary = Some(summary);
+        if let Err(save_error) = state.storage.save_video_ai_summary(video_id, &summary) {
+            error!(
+                "Failed to persist summary sidecar for {}: {}",
+                video_id, save_error
+            );
+        }
+        state.videos[video_index].ai_summary = Some(summary);
         updated = true;
-    }
-
-    if updated {
-        let _ = state.storage.save_videos(&state.videos);
     }
 
     updated
@@ -365,10 +367,17 @@ pub(super) fn show_transcript_dialog(
                 Ok(transcript) => {
                     buffer.set_text(&transcript);
                     let mut state = state_rc.borrow_mut();
+                    if let Err(save_error) =
+                        state.storage.save_video_transcript(&video_id, &transcript)
+                    {
+                        error!(
+                            "Failed to persist transcript sidecar for {}: {}",
+                            video_id, save_error
+                        );
+                    }
                     if let Some(video) = state.videos.iter_mut().find(|v| v.video_id == video_id) {
                         video.transcript = Some(transcript);
                     }
-                    let _ = state.storage.save_videos(&state.videos);
                 }
                 Err(transcript_error) => {
                     buffer.set_text(&format!("Error: {}", transcript_error));
