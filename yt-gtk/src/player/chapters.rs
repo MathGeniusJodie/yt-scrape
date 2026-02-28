@@ -1,20 +1,9 @@
 use crate::urls;
-use log::{error, info, warn};
-use std::io;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::{fs, io::Write, path::PathBuf};
 
 use serde::Deserialize;
-use thiserror::Error;
-
-/// Errors produced while launching media playback.
-#[derive(Debug, Error)]
-pub enum PlayerError {
-    /// Failed to start the `mpv` process.
-    #[error("failed to spawn mpv: {0}")]
-    Spawn(#[from] io::Error),
-}
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::{fs, io::Write};
 
 #[derive(Debug, Deserialize)]
 struct InfoJson {
@@ -54,7 +43,7 @@ fn log_chapter_debug(message: &str) {
         }
     }
 
-    error!("yt-gtk chapter debug: {}", message);
+    log::error!("yt-gtk chapter debug: {}", message);
 }
 
 fn escape_ffmetadata(value: &str) -> String {
@@ -76,20 +65,23 @@ fn parse_time_token(raw: &str) -> Option<f64> {
     }
     if !parts
         .iter()
-        .all(|p| !p.is_empty() && p.chars().all(|ch| ch.is_ascii_digit()))
+        .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
     {
         return None;
     }
 
-    let nums: Vec<u64> = parts.iter().filter_map(|p| p.parse::<u64>().ok()).collect();
-    if nums.len() != parts.len() {
+    let numbers: Vec<u64> = parts
+        .iter()
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect();
+    if numbers.len() != parts.len() {
         return None;
     }
 
-    let seconds = if nums.len() == 2 {
-        nums[0] * 60 + nums[1]
+    let seconds = if numbers.len() == 2 {
+        numbers[0] * 60 + numbers[1]
     } else {
-        nums[0] * 3600 + nums[1] * 60 + nums[2]
+        numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
     };
 
     Some(seconds as f64)
@@ -162,11 +154,11 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
     }
 
     let mut ffmeta = String::from(";FFMETADATA1\n");
-    for idx in 0..starts.len() {
-        let start = starts[idx];
-        let mut end = ends[idx]
+    for index in 0..starts.len() {
+        let start = starts[index];
+        let mut end = ends[index]
             .filter(|end| *end > start)
-            .or_else(|| starts.get(idx + 1).copied().filter(|next| *next > start))
+            .or_else(|| starts.get(index + 1).copied().filter(|next| *next > start))
             .or_else(|| info.duration.filter(|duration| *duration > start))
             .unwrap_or(start + 1.0);
 
@@ -178,7 +170,7 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
         ffmeta.push_str("TIMEBASE=1/1000\n");
         ffmeta.push_str(&format!("START={}\n", secs_to_ms(start)));
         ffmeta.push_str(&format!("END={}\n", secs_to_ms(end)));
-        ffmeta.push_str(&format!("title={}\n", titles[idx]));
+        ffmeta.push_str(&format!("title={}\n", titles[index]));
     }
 
     Some(ffmeta)
@@ -187,11 +179,11 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
 fn load_info_json(path: &Path) -> Option<InfoJson> {
     let info_json = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(err) => {
+        Err(error) => {
             log_chapter_debug(&format!(
                 "load_info_json: failed to read {}: {}",
                 path.display(),
-                err
+                error
             ));
             return None;
         }
@@ -199,11 +191,11 @@ fn load_info_json(path: &Path) -> Option<InfoJson> {
 
     match serde_json::from_str(&info_json) {
         Ok(info) => Some(info),
-        Err(err) => {
+        Err(error) => {
             log_chapter_debug(&format!(
                 "load_info_json: failed to parse {}: {}",
                 path.display(),
-                err
+                error
             ));
             None
         }
@@ -228,10 +220,10 @@ fn fetch_info_json(video_id: &str) -> Option<InfoJson> {
         .output()
     {
         Ok(output) => output,
-        Err(err) => {
+        Err(error) => {
             log_chapter_debug(&format!(
                 "fetch_info_json: failed to run yt-dlp for {}: {}",
-                video_id, err
+                video_id, error
             ));
             return None;
         }
@@ -250,17 +242,17 @@ fn fetch_info_json(video_id: &str) -> Option<InfoJson> {
 
     match serde_json::from_slice(&output.stdout) {
         Ok(info) => Some(info),
-        Err(err) => {
+        Err(error) => {
             log_chapter_debug(&format!(
                 "fetch_info_json: failed to parse yt-dlp json for {}: {}",
-                video_id, err
+                video_id, error
             ));
             None
         }
     }
 }
 
-fn ensure_chapters_file(local_path: &Path, video_id: &str) -> Option<PathBuf> {
+pub(super) fn ensure_chapters_file(local_path: &Path, video_id: &str) -> Option<PathBuf> {
     let chapters_path = local_path.with_extension("chapters.ffmeta");
     log_chapter_debug(&format!(
         "ensure_chapters_file: video={} local={} chapters={}",
@@ -285,11 +277,11 @@ fn ensure_chapters_file(local_path: &Path, video_id: &str) -> Option<PathBuf> {
     ));
     let ffmeta = build_ffmetadata(&info)?;
 
-    if let Err(err) = fs::write(&chapters_path, ffmeta) {
+    if let Err(error) = fs::write(&chapters_path, ffmeta) {
         log_chapter_debug(&format!(
             "ensure_chapters_file: failed to write {}: {}",
             chapters_path.display(),
-            err
+            error
         ));
         return None;
     }
@@ -299,83 +291,4 @@ fn ensure_chapters_file(local_path: &Path, video_id: &str) -> Option<PathBuf> {
         chapters_path.display()
     ));
     Some(chapters_path)
-}
-
-fn mpv_base_command(title: &str) -> Command {
-    let mut command = Command::new("mpv");
-    command
-        .arg(format!("--title={title}"))
-        .arg(format!("--force-media-title={title}"))
-        .arg("--sub-auto=all")
-        .arg("--sid=auto")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
-}
-
-/// Plays a video using `mpv` as a detached process.
-///
-/// Playback prefers a local file when available. If no local file exists, playback
-/// falls back to streaming directly from YouTube.
-///
-/// # Arguments
-///
-/// * `video_id` - YouTube video identifier.
-/// * `title` - Title used for mpv window metadata.
-/// * `local_path` - Optional path to a local downloaded video.
-///
-/// # Errors
-///
-/// Returns [`PlayerError::Spawn`] if launching `mpv` fails.
-pub fn play_video(
-    video_id: &str,
-    title: &str,
-    local_path: Option<&Path>,
-) -> Result<(), PlayerError> {
-    log_chapter_debug(&format!(
-        "play_video: id={} title={} local_path={}",
-        video_id,
-        title,
-        local_path
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "<none>".to_string())
-    ));
-
-    // Check if we have a local copy
-    if let Some(path) = local_path {
-        if path.exists() {
-            // Play local file.
-            let mut command = mpv_base_command(title);
-            let chapters_file = ensure_chapters_file(path, video_id);
-            if let Some(ref chapters_file) = chapters_file {
-                info!(
-                    "Using chapters file for {}: {}",
-                    video_id,
-                    chapters_file.display()
-                );
-                command.arg(format!("--chapters-file={}", chapters_file.display()));
-            } else {
-                warn!(
-                    "No chapters metadata available for local video {}",
-                    video_id
-                );
-            }
-            command.arg(path).spawn()?;
-            return Ok(());
-        }
-
-        log_chapter_debug(&format!(
-            "play_video: local path does not exist for {}: {}",
-            video_id,
-            path.display()
-        ));
-    }
-
-    // Fallback: stream from YouTube
-    log_chapter_debug(&format!("play_video: streaming fallback for {}", video_id));
-    let url = urls::watch_url(video_id);
-    mpv_base_command(title).arg(&url).spawn()?;
-
-    Ok(())
 }
