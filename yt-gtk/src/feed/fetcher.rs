@@ -551,8 +551,6 @@ fn should_retry(error: &reqwest::Error) -> bool {
     match error.status() {
         Some(status) => {
             status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::FORBIDDEN
-                || status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::NOT_FOUND
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
                 || status.is_server_error()
@@ -566,13 +564,7 @@ fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
         12_000
     } else {
         match error.status() {
-            Some(s)
-                if s == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || s == reqwest::StatusCode::FORBIDDEN
-                    || s == reqwest::StatusCode::UNAUTHORIZED =>
-            {
-                30_000
-            }
+            Some(s) if s == reqwest::StatusCode::TOO_MANY_REQUESTS => 30_000,
             Some(s) if s == reqwest::StatusCode::NOT_FOUND || s.is_server_error() => 20_000,
             Some(s) if s == reqwest::StatusCode::REQUEST_TIMEOUT => 12_000,
             _ => INITIAL_BACKOFF_MS,
