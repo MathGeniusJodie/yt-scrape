@@ -46,6 +46,10 @@ async-channel = "2"
 # Smart quotes
 smart_quotes = "0.1"
 
+[dev-dependencies]
+# `test-util` enables tokio::time::pause / start_paused in tests; not in `full`.
+tokio = { version = "1", features = ["test-util"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

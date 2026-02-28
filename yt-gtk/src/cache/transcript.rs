@@ -1,4 +1,4 @@
-use super::subtitle_requests::run_yt_dlp_subtitle_command;
+use super::subtitle_requests::{run_yt_dlp_subtitle_command, SubtitleRateLimiter};
 use crate::urls;
 use serde::Deserialize;
 use std::ffi::OsStr;
@@ -61,7 +61,7 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String,
     let output_template = work_dir.join(format!("{}.%(ext)s", video_id));
 
     // Run yt-dlp to download auto-generated subtitles in json3 format.
-    let output = run_yt_dlp_subtitle_command(video_id, || {
+    let output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
         let mut command = Command::new("yt-dlp");
         command
             .arg("--write-auto-sub")

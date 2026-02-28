@@ -1,4 +1,4 @@
-use super::subtitle_requests::run_yt_dlp_subtitle_command;
+use super::subtitle_requests::{run_yt_dlp_subtitle_command, SubtitleRateLimiter};
 use crate::urls;
 use log::warn;
 use std::path::Path;
@@ -54,7 +54,7 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> anyhow::Resul
     }
 
     // Phase 2: Fetch subtitles as best effort. Failure here should not break local playback.
-    let subs_output = run_yt_dlp_subtitle_command(video_id, || {
+    let subs_output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
         let mut command = Command::new("yt-dlp");
         command
             .arg("--write-subs")
