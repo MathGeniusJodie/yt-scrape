@@ -1,3 +1,4 @@
+use super::subtitle_requests::run_yt_dlp_subtitle_command;
 use crate::urls;
 use serde::Deserialize;
 use std::ffi::OsStr;
@@ -59,24 +60,27 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String,
     let url = urls::watch_url(video_id);
     let output_template = work_dir.join(format!("{}.%(ext)s", video_id));
 
-    // Run yt-dlp to download auto-generated subtitles in json3 format
-    let status = Command::new("yt-dlp")
-        .arg("--write-auto-sub")
-        .arg("--sub-format")
-        .arg("json3")
-        .arg("--skip-download")
-        .arg("-o")
-        .arg(&output_template)
-        .arg("--no-playlist")
-        .arg("--no-warnings")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
+    // Run yt-dlp to download auto-generated subtitles in json3 format.
+    let output = run_yt_dlp_subtitle_command(video_id, || {
+        let mut command = Command::new("yt-dlp");
+        command
+            .arg("--write-auto-sub")
+            .arg("--sub-format")
+            .arg("json3")
+            .arg("--skip-download")
+            .arg("-o")
+            .arg(&output_template)
+            .arg("--no-playlist")
+            .arg("--no-warnings")
+            .arg(&url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        command
+    })
+    .await?;
 
-    if !status.success() {
+    if !output.status.success() {
         return Err(TranscriptError::SubtitleFetchFailed);
     }
 

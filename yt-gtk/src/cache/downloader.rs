@@ -1,3 +1,4 @@
+use super::subtitle_requests::run_yt_dlp_subtitle_command;
 use crate::urls;
 use log::warn;
 use std::path::Path;
@@ -53,24 +54,27 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> anyhow::Resul
     }
 
     // Phase 2: Fetch subtitles as best effort. Failure here should not break local playback.
-    let subs_output = Command::new("yt-dlp")
-        .arg("--write-subs")
-        .arg("--write-auto-subs")
-        .arg("--sub-langs")
-        .arg("en.*,en,-live_chat")
-        .arg("--convert-subs")
-        .arg("vtt")
-        .arg("--skip-download")
-        .arg("-o")
-        .arg(&output_template)
-        .arg("--no-playlist")
-        .arg("--no-warnings")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let subs_output = run_yt_dlp_subtitle_command(video_id, || {
+        let mut command = Command::new("yt-dlp");
+        command
+            .arg("--write-subs")
+            .arg("--write-auto-subs")
+            .arg("--sub-langs")
+            .arg("en.*,en,-live_chat")
+            .arg("--convert-subs")
+            .arg("vtt")
+            .arg("--skip-download")
+            .arg("-o")
+            .arg(&output_template)
+            .arg("--no-playlist")
+            .arg("--no-warnings")
+            .arg(&url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        command
+    })
+    .await?;
 
     if !subs_output.status.success() {
         let stderr = String::from_utf8_lossy(&subs_output.stderr);

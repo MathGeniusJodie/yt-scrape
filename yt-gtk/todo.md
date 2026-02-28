@@ -2,8 +2,6 @@
 
 ## Architecture / Design
 
-- [ ] **#1 O(n) directory scan per card** — `storage.has_video()` calls `fs::read_dir` for every video in `populate_flow_box`. 400 synchronous directory scans per UI refresh. Scan the video directory once per refresh and cache results as a `HashSet<String>` of found IDs. (`cards.rs:165`, `storage.rs:121`)
-
 - [ ] **#2 Full card reconstruction on every refresh** — Every `refresh_video_lists` call destroys and rebuilds all 400 cards. Toggling one Watch Later badge recreates every card. Needs dirty-checking, diffing, or at minimum only rebuilding the affected tab. (`cards.rs:149`)
 
 - [ ] **#3 `thread::spawn` + `runtime.block_on` anti-pattern** — `spawn_summary_generation` and `spawn_video_download` both spin up a new OS thread to run an async task synchronously. Use `runtime.spawn()` directly instead. (`summary.rs:27`, `app/mod.rs:82`)
@@ -61,3 +59,5 @@
 - [ ] **#27 `load_videos`/`load_watch_later` silently swallow all errors** — Both return defaults on IO errors AND JSON parse errors without logging. A corrupted cache file is indistinguishable from a missing one, and data is silently lost on the next save. Add at least a `warn!` log. (`storage.rs:189-195`, `storage.rs:153-160`)
 
 - [ ] **#28 `SUMMARY_PROMPT` has inconsistent casing** — The constant switches between sentence case and lowercase mid-text. (`gemini.rs:16`)
+
+for claude: do a brutal code review of subtitle_requests.rs
