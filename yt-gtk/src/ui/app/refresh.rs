@@ -65,11 +65,24 @@ pub(super) fn refresh_watch_later_tab(state_rc: &Rc<RefCell<AppState>>, ui_conte
     );
 }
 
+/// Downloads thumbnails missing from local storage.
+///
+/// # Arguments
+///
+/// * `videos` - Videos whose thumbnails should be present locally.
+/// * `storage` - Storage backend used to resolve thumbnail paths.
+/// * `runtime` - Tokio runtime used to execute network and file I/O.
+///
+/// # Returns
+///
+/// `Some(receiver)` when at least one thumbnail download was scheduled. The receiver yields once
+/// when all scheduled downloads have completed (successfully or not). `None` when there is no
+/// work to do.
 pub(super) fn download_missing_thumbnails(
     videos: &[Video],
     storage: &Storage,
     runtime: Arc<tokio::runtime::Runtime>,
-) {
+) -> Option<async_channel::Receiver<()>> {
     const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
 
     let pending_downloads: Vec<(String, PathBuf)> = videos
@@ -85,9 +98,10 @@ pub(super) fn download_missing_thumbnails(
         .collect();
 
     if pending_downloads.is_empty() {
-        return;
+        return None;
     }
 
+    let (completion_tx, completion_rx) = async_channel::bounded(1);
     runtime.spawn(async move {
         let client = reqwest::Client::new();
 
@@ -128,5 +142,9 @@ pub(super) fn download_missing_thumbnails(
                 }
             })
             .await;
+
+        let _ = completion_tx.send(()).await;
     });
+
+    Some(completion_rx)
 }

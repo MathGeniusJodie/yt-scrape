@@ -553,7 +553,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                     let _ = state.storage.save_videos(&videos);
                     state.videos = videos;
 
-                    download_missing_thumbnails(
+                    let thumbnail_completion = download_missing_thumbnails(
                         &state.videos,
                         &state.storage,
                         ui_context_for_videos.runtime.clone(),
@@ -561,21 +561,32 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                     drop(state);
                     refresh_video_lists(&state_for_videos, &ui_context_for_videos);
 
-                    // Schedule a refresh after thumbnails have had time to download
-                    let state2 = state_for_videos.clone();
-                    let ui2 = ui_context_for_videos.clone();
-                    glib::timeout_add_seconds_local_once(3, move || {
-                        refresh_video_lists(&state2, &ui2);
-                    });
+                    if let Some(thumbnail_completion) = thumbnail_completion {
+                        let state2 = state_for_videos.clone();
+                        let ui2 = ui_context_for_videos.clone();
+                        // GTK must be updated on the main context after async thumbnail writes.
+                        glib::MainContext::default().spawn_local(async move {
+                            let _ = thumbnail_completion.recv().await;
+                            refresh_video_lists(&state2, &ui2);
+                        });
+                    }
                 }
             });
         });
     }
 
     // Start thumbnail downloads for visible videos
-    {
+    let startup_thumbnail_completion = {
         let state_ref = state.borrow();
-        download_missing_thumbnails(&state_ref.videos, &state_ref.storage, runtime.clone());
+        download_missing_thumbnails(&state_ref.videos, &state_ref.storage, runtime.clone())
+    };
+    if let Some(startup_thumbnail_completion) = startup_thumbnail_completion {
+        let state_for_startup = state.clone();
+        let ui_context_for_startup = ui_context.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let _ = startup_thumbnail_completion.recv().await;
+            refresh_video_lists(&state_for_startup, &ui_context_for_startup);
+        });
     }
 
     window.show_all();

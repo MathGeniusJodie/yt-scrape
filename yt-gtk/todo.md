@@ -2,12 +2,6 @@
 
 ## Architecture / Design
 
-- [ ] **#2 Full card reconstruction on every refresh** — Every `refresh_video_lists` call destroys and rebuilds all 400 cards. Toggling one Watch Later badge recreates every card. Needs dirty-checking, diffing, or at minimum only rebuilding the affected tab. (`cards.rs:149`)
-
-- [ ] **#3 `thread::spawn` + `runtime.block_on` anti-pattern** — `spawn_summary_generation` and `spawn_video_download` both spin up a new OS thread to run an async task synchronously. Use `runtime.spawn()` directly instead. (`summary.rs:27`, `app/mod.rs:82`)
-
-- [ ] **#4 Hardcoded 3-second thumbnail refresh timer is a race condition** — `glib::timeout_add_seconds_local_once(3, ...)` bets that all thumbnails download within 3 seconds. `download_missing_thumbnails` should signal completion so the refresh happens deterministically. (`app/mod.rs:553`)
-
 - [ ] **#5 Full `videos.json` rewrite for single-field updates** — Saving one transcript or AI summary rewrites the entire 400-video list. Use per-video sidecar files or at minimum debounce saves. (`summary.rs:88`, `summary.rs:377`)
 
 - [ ] **#6 Triple-channel relay in the refresh pipeline** — `tokio::mpsc` → relay task → `async_channel` → `glib::MainContext`. The relay task exists only to bridge channel types. Use `async_channel` directly in `fetch_all_feeds` to eliminate the extra task and channel. (`app/mod.rs:441-449`)
