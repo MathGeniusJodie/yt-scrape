@@ -6,10 +6,36 @@ mod player;
 mod ui;
 mod urls;
 
+use anyhow::Context;
 use gtk::prelude::*;
 use gtk::Application;
+use log::{error, Level, LevelFilter, Metadata, Record};
 use std::path::{Path, PathBuf};
 use std::{fs, io::Write};
+
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let _ = writeln!(std::io::stderr(), "[{}] {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static STDERR_LOGGER: StderrLogger = StderrLogger;
+
+fn init_logger() {
+    if log::set_logger(&STDERR_LOGGER).is_ok() {
+        log::set_max_level(LevelFilter::Info);
+    }
+}
 
 fn append_startup_log(path: &Path, message: &str) {
     if let Some(parent) = path.parent() {
@@ -41,20 +67,22 @@ fn log_startup_marker() {
 }
 
 fn main() {
+    init_logger();
     log_startup_marker();
 
+    if let Err(error) = run() {
+        error!("{error:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     // Set program name for desktop environment integration
     glib::set_prgname(Some("yt-gtk"));
     glib::set_application_name("yt-gtk");
 
     // Find the subs file
-    let subs_file = match find_subs_file() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let subs_file = find_subs_file().context("Failed locating youtube-subs.txt")?;
 
     let app = Application::builder()
         .application_id("com.github.yt-gtk")
@@ -65,6 +93,7 @@ fn main() {
     });
 
     app.run();
+    Ok(())
 }
 
 fn find_subs_file() -> anyhow::Result<PathBuf> {

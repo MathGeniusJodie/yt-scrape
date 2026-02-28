@@ -44,9 +44,7 @@ pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) 
     });
 
     dialog.run();
-    unsafe {
-        dialog.destroy();
-    }
+    dialog.close();
 }
 
 /// Show a loading dialog that can be updated
@@ -88,7 +86,5 @@ pub fn show_error_dialog(parent: &ApplicationWindow, title: &str, message: &str)
     );
     dialog.set_title(title);
     dialog.run();
-    unsafe {
-        dialog.destroy();
-    }
+    dialog.close();
 }

@@ -1,8 +1,9 @@
 use crate::urls;
-use anyhow::Result;
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
+use thiserror::Error;
 use tokio::process::Command;
 
 #[derive(Debug, Deserialize)]
@@ -20,8 +21,41 @@ struct Json3Segment {
     utf8: Option<String>,
 }
 
+/// Errors that can occur while fetching or parsing a transcript.
+#[derive(Debug, Error)]
+pub enum TranscriptError {
+    /// A filesystem operation failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// JSON parsing failed.
+    #[error("JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+    /// `yt-dlp` did not successfully download subtitles.
+    #[error("yt-dlp failed to fetch subtitles")]
+    SubtitleFetchFailed,
+    /// No subtitle artifact could be located after download.
+    #[error("no subtitle file found for video {video_id}")]
+    SubtitleFileNotFound { video_id: String },
+    /// Subtitle payload did not contain any events.
+    #[error("subtitle payload does not contain events")]
+    MissingSubtitleEvents,
+}
+
 /// Fetch transcript for a video using yt-dlp
-pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String> {
+///
+/// # Arguments
+///
+/// * `video_id` - YouTube video identifier.
+/// * `work_dir` - Temporary directory where subtitle artifacts are written.
+///
+/// # Returns
+///
+/// The normalized transcript text.
+///
+/// # Errors
+///
+/// Returns [`TranscriptError`] when subtitle download, discovery, or parsing fails.
+pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String, TranscriptError> {
     let url = urls::watch_url(video_id);
     let output_template = work_dir.join(format!("{}.%(ext)s", video_id));
 
@@ -43,15 +77,11 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String>
         .await?;
 
     if !status.success() {
-        anyhow::bail!("yt-dlp failed to fetch subtitles");
+        return Err(TranscriptError::SubtitleFetchFailed);
     }
 
-    // Find the downloaded subtitle file (could be .en.json3, .en-US.json3, etc.)
-    let pattern = format!("{}*.json3", video_id);
-    let subtitle_path = glob::glob(work_dir.join(&pattern).to_str().unwrap_or(""))?
-        .filter_map(Result::ok)
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No subtitle file found"))?;
+    // Find the downloaded subtitle file (could be .en.json3, .en-US.json3, etc.).
+    let subtitle_path = find_subtitle_path(work_dir, video_id)?;
 
     // Read and parse the JSON3 file
     let json_content = tokio::fs::read_to_string(&subtitle_path).await?;
@@ -63,13 +93,33 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String>
     Ok(transcript)
 }
 
+fn find_subtitle_path(
+    work_dir: &Path,
+    video_id: &str,
+) -> Result<std::path::PathBuf, TranscriptError> {
+    std::fs::read_dir(work_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(OsStr::to_str) == Some("json3")
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|name| name.starts_with(video_id))
+                    .unwrap_or(false)
+        })
+        .ok_or_else(|| TranscriptError::SubtitleFileNotFound {
+            video_id: video_id.to_string(),
+        })
+}
+
 /// Parse JSON3 subtitle format into clean text
-fn parse_json3(json: &str) -> Result<String> {
+fn parse_json3(json: &str) -> Result<String, TranscriptError> {
     let subtitle: Json3Subtitle = serde_json::from_str(json)?;
 
     let events = subtitle
         .events
-        .ok_or_else(|| anyhow::anyhow!("No events in subtitle"))?;
+        .ok_or(TranscriptError::MissingSubtitleEvents)?;
 
     let mut text_parts: Vec<String> = Vec::new();
 
@@ -116,4 +166,36 @@ fn clean_transcript(text: &str) -> String {
     let normalized: String = joined.split_whitespace().collect::<Vec<_>>().join(" ");
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_transcript, parse_json3, TranscriptError};
+
+    #[test]
+    fn clean_transcript_removes_duplicate_adjacent_lines() {
+        let raw = "hello\nhello\n\nworld\nworld\nnext";
+        assert_eq!(clean_transcript(raw), "hello world next");
+    }
+
+    #[test]
+    fn parse_json3_extracts_plain_text() {
+        let json = r#"{
+            "events": [
+                {"segs": [{"utf8": "Hello "}, {"utf8": "world"}]},
+                {"segs": [{"utf8": "\nHello "}, {"utf8": "again"}]}
+            ]
+        }"#;
+        assert_eq!(
+            parse_json3(json).expect("json3 should parse"),
+            "Hello world Hello again"
+        );
+    }
+
+    #[test]
+    fn parse_json3_rejects_missing_events() {
+        let json = r#"{"foo": "bar"}"#;
+        let error = parse_json3(json).expect_err("missing events should fail");
+        assert!(matches!(error, TranscriptError::MissingSubtitleEvents));
+    }
 }

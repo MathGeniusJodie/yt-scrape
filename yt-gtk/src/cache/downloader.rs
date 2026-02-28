@@ -1,10 +1,21 @@
 use crate::urls;
-use std::path::PathBuf;
+use log::warn;
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
 /// Download a video using yt-dlp
-pub async fn download_video(video_id: &str, output_path: &PathBuf) -> anyhow::Result<()> {
+///
+/// # Arguments
+///
+/// * `video_id` - YouTube video identifier.
+/// * `output_path` - Destination path stem for the downloaded media file.
+///
+/// # Errors
+///
+/// Returns an error when `yt-dlp` fails or returns a non-zero exit status for the
+/// primary media download phase.
+pub async fn download_video(video_id: &str, output_path: &Path) -> anyhow::Result<()> {
     let url = urls::watch_url(video_id);
     let output_template = output_path.with_extension("%(ext)s");
 
@@ -63,7 +74,7 @@ pub async fn download_video(video_id: &str, output_path: &PathBuf) -> anyhow::Re
 
     if !subs_output.status.success() {
         let stderr = String::from_utf8_lossy(&subs_output.stderr);
-        eprintln!(
+        warn!(
             "Subtitle download failed for {} (continuing): {}",
             video_id,
             stderr.trim()

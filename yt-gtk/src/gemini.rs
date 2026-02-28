@@ -15,6 +15,7 @@ const OPENROUTER_MODELS: [&str; 4] = [
 ];
 const SUMMARY_PROMPT: &str = "Summarize this YouTube video with all the relevant information so I don't have to watch it. Don't use nested unordered lists. don't use underlines. use heading and bullet points where appropriate. use fancy typography if appropriate, use italic for emphasis/important points. Include memorable quotes in blockquotes. Use * for markdown list, not -.include timestamps for sections";
 
+/// High-level status of a summary request for UI state handling.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum SummaryState {
@@ -172,6 +173,19 @@ fn configured_openrouter_models() -> Vec<String> {
         .collect()
 }
 
+/// Generates an AI summary for a video and streams partial results through a channel.
+///
+/// The function first attempts Gemini streaming. If Gemini is unavailable or fails,
+/// it falls back to OpenRouter using a fetched transcript.
+///
+/// # Arguments
+///
+/// * `video_id` - YouTube video identifier.
+/// * `video_url` - Full watch URL used by providers.
+/// * `video_title` - Human-readable video title for prompt context.
+/// * `channel_name` - Channel display name for prompt context.
+/// * `transcripts_work_dir` - Temporary directory for transcript extraction artifacts.
+/// * `tx` - Channel used to stream [`StreamingMessage`] updates.
 pub async fn summarize_video_streaming(
     video_id: &str,
     video_url: &str,

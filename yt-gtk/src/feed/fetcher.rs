@@ -3,6 +3,7 @@ use crate::urls;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
+use log::warn;
 use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -301,7 +302,7 @@ async fn fetch_channel_with_retries(
                         }
                         Ok(_) => {}
                         Err(lookup_error) => {
-                            eprintln!(
+                            warn!(
                                 "Failed resolving uploads playlist for {} after 404: {}",
                                 pending.channel_id, lookup_error
                             );
@@ -362,7 +363,7 @@ async fn fetch_channel_once(
     let durations_by_video_id = match fetch_video_durations(client, api_key, &video_ids).await {
         Ok(durations) => durations,
         Err(error) => {
-            eprintln!(
+            warn!(
                 "Failed fetching durations for channel {}: {}",
                 channel_id, error
             );
@@ -596,6 +597,18 @@ fn deterministic_jitter_ms(channel_id: &str, attempt: usize, max_jitter_ms: u64)
 }
 
 /// Load channel IDs from a file (one per line)
+///
+/// # Arguments
+///
+/// * `path` - Text file containing channel IDs, one per line.
+///
+/// # Returns
+///
+/// Parsed channel IDs excluding blank lines and comment lines beginning with `#`.
+///
+/// # Errors
+///
+/// Returns an error if reading the input file fails.
 pub fn load_channel_ids(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
     let content = std::fs::read_to_string(path)?;
     Ok(content

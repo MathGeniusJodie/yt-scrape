@@ -8,7 +8,18 @@ use std::path::Path;
 use std::rc::Rc;
 
 /// Create a video card widget
-/// Returns the card EventBox, watch later toggle button, and optional AI summary button
+///
+/// # Arguments
+///
+/// * `video` - Video metadata to display.
+/// * `thumbnail_path` - Local thumbnail file path.
+/// * `is_watch_later` - Whether the item is already in Watch Later.
+/// * `is_downloaded` - Whether the video exists in local cache.
+/// * `has_ai_summary` - Whether a cached AI summary exists.
+///
+/// # Returns
+///
+/// A tuple of `(card_event_box, watch_later_button, optional_summary_button)`.
 pub fn create_video_card(
     video: &Video,
     thumbnail_path: &Path,
@@ -151,7 +162,7 @@ pub fn create_video_card(
     } else {
         "watch-later-toggle"
     });
-    watch_later_toggle.set_label(if is_watch_later { "✓" } else { "+" });
+    watch_later_toggle.set_label(if is_watch_later { "x" } else { "+" });
     watch_later_toggle.set_tooltip_text(Some(if is_watch_later {
         "Remove from Watch Later"
     } else {
@@ -220,15 +231,15 @@ fn crop_to_16_9(pixbuf: &Pixbuf) -> Pixbuf {
 }
 
 /// Format title to always occupy 2 lines
-/// - Short titles get an em dash on the second line
+/// - Short titles get a placeholder second line marker
 /// - Long titles wrap and get ellipsized if > 2 lines
 fn format_two_line_title(title: &str) -> String {
     // Approximate characters that fit on one line at 320px width
     const CHARS_PER_LINE: usize = 38;
 
     if title.chars().count() <= CHARS_PER_LINE {
-        // Short title - add em dash on second line
-        format!("{}\n—", title)
+        // Short title - add a visible placeholder for line-height stability.
+        format!("{}\n--", title)
     } else {
         // Long title - let it wrap naturally (will be ellipsized if > 2 lines)
         title.to_string()
