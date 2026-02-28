@@ -38,6 +38,10 @@ pub(super) fn create_context_menu(
     watch_later_button.set_widget_name("menu-watch-later");
     menu_box.pack_start(&watch_later_button, false, false, 4);
 
+    let copy_url_button = Button::with_label("Copy URL");
+    copy_url_button.set_widget_name("menu-copy-url");
+    menu_box.pack_start(&copy_url_button, false, false, 4);
+
     let summary_button = Button::with_label("AI Summary");
     summary_button.set_widget_name("menu-summary");
     menu_box.pack_start(&summary_button, false, false, 4);
@@ -92,6 +96,18 @@ pub(super) fn create_context_menu(
                 ui_context.context_menu.popdown();
                 apply_watch_later_action(&state_rc, &ui_context, video);
             }
+        });
+    }
+
+    {
+        let selected_video = selected_video.clone();
+        let ui_context = ui_context.clone();
+        copy_url_button.connect_clicked(move |_| {
+            if let Some(ref video) = *selected_video.borrow() {
+                // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
+                gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD).set_text(&video.video_url);
+            }
+            ui_context.context_menu.popdown();
         });
     }
 
