@@ -288,6 +288,14 @@ fn toggle_watch_later_and_download(
             let video_path = state.storage.video_path(video_id, video_title);
             spawn_video_download(runtime.clone(), video_id.to_string(), video_path);
         }
+        if !added {
+            if let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
+                error!(
+                    "Failed to remove cached video {}: {}",
+                    video_id, remove_error
+                );
+            }
+        }
 
         (added, state.storage.clone(), state.watch_later.clone())
     };
@@ -514,8 +522,20 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
 
     // Load cached data
-    let videos = storage.load_videos();
     let watch_later = storage.load_watch_later();
+    match storage.prune_cached_videos_not_in_watch_later(&watch_later) {
+        Ok(removed_count) if removed_count > 0 => {
+            info!("Removed {} cached videos not in watch-later", removed_count);
+        }
+        Ok(_) => {}
+        Err(cleanup_error) => {
+            warn!(
+                "Failed to clean up cached videos from watch-later state: {}",
+                cleanup_error
+            );
+        }
+    }
+    let videos = storage.load_videos();
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()

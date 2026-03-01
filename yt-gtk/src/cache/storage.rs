@@ -89,17 +89,18 @@ fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
 
     entries
         .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let extension = path.extension().and_then(OsStr::to_str)?;
-            if !VIDEO_EXTENSIONS.contains(&extension) {
-                return None;
-            }
-
-            let stem = path.file_stem().and_then(OsStr::to_str)?;
-            video_id_from_stem(stem).map(str::to_string)
-        })
+        .filter_map(|entry| cached_video_id_for_path(&entry.path()).map(str::to_string))
         .collect()
+}
+
+fn cached_video_id_for_path(path: &Path) -> Option<&str> {
+    let extension = path.extension().and_then(OsStr::to_str)?;
+    if !VIDEO_EXTENSIONS.contains(&extension) {
+        return None;
+    }
+
+    let stem = path.file_stem().and_then(OsStr::to_str)?;
+    video_id_from_stem(stem)
 }
 
 /// Sanitizes free-form title text into a stable filename-safe component.
@@ -238,13 +239,7 @@ impl Storage {
 
         entries.filter_map(Result::ok).find_map(|entry| {
             let path = entry.path();
-            let extension = path.extension().and_then(OsStr::to_str)?;
-            if !VIDEO_EXTENSIONS.contains(&extension) {
-                return None;
-            }
-
-            let stem = path.file_stem().and_then(OsStr::to_str)?;
-            (video_id_from_stem(stem) == Some(video_id)).then_some(path)
+            (cached_video_id_for_path(&path) == Some(video_id)).then_some(path)
         })
     }
 
@@ -255,6 +250,72 @@ impl Storage {
     /// A set of video IDs extracted from cached video filenames.
     pub fn cached_video_ids(&self) -> HashSet<String> {
         collect_cached_video_ids_from_dir(&self.videos_dir)
+    }
+
+    /// Deletes all cached video files for a single video ID.
+    ///
+    /// This removes every matching file in the videos cache directory across supported
+    /// extensions and titles.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_id` - YouTube video identifier to remove from local video cache.
+    ///
+    /// # Returns
+    ///
+    /// Number of files removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if directory scanning or file deletion fails.
+    pub fn remove_cached_video_files(&self, video_id: &str) -> StorageResult<usize> {
+        let entries = std::fs::read_dir(&self.videos_dir)?;
+        let mut removed_count = 0usize;
+
+        for entry in entries {
+            let path = entry?.path();
+            if cached_video_id_for_path(&path) == Some(video_id) {
+                std::fs::remove_file(path)?;
+                removed_count += 1;
+            }
+        }
+
+        Ok(removed_count)
+    }
+
+    /// Removes cached video files that are no longer in watch later.
+    ///
+    /// # Arguments
+    ///
+    /// * `watch_later` - Set of video IDs that are allowed to remain in the video cache folder.
+    ///
+    /// # Returns
+    ///
+    /// Number of cached video files removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if directory scanning or file deletion fails.
+    pub fn prune_cached_videos_not_in_watch_later(
+        &self,
+        watch_later: &HashSet<String>,
+    ) -> StorageResult<usize> {
+        let entries = std::fs::read_dir(&self.videos_dir)?;
+        let mut removed_count = 0usize;
+
+        for entry in entries {
+            let path = entry?.path();
+            let Some(cached_video_id) = cached_video_id_for_path(&path) else {
+                continue;
+            };
+            if watch_later.contains(cached_video_id) {
+                continue;
+            }
+            std::fs::remove_file(path)?;
+            removed_count += 1;
+        }
+
+        Ok(removed_count)
     }
 
     fn video_sidecar_path(&self, video_id: &str) -> PathBuf {
@@ -459,6 +520,10 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn touch(path: &Path) {
+        File::create(path).expect("test file must be creatable");
+    }
+
     fn create_unique_temp_dir() -> std::path::PathBuf {
         let unique_suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -528,16 +593,56 @@ mod tests {
     fn collect_cached_video_ids_from_dir_only_keeps_supported_video_files() {
         let temp_dir = create_unique_temp_dir();
 
-        File::create(temp_dir.join("my_title_C9ww_8cg_5g.mkv")).expect("Failed to create mkv file");
-        File::create(temp_dir.join("another_title_abc123DEF45.mp4"))
-            .expect("Failed to create mp4 file");
-        File::create(temp_dir.join("skip_me.txt")).expect("Failed to create text file");
-        File::create(temp_dir.join("missing_suffix_.webm")).expect("Failed to create webm file");
+        touch(&temp_dir.join("my_title_C9ww_8cg_5g.mkv"));
+        touch(&temp_dir.join("another_title_abc123DEF45.mp4"));
+        touch(&temp_dir.join("skip_me.txt"));
+        touch(&temp_dir.join("missing_suffix_.webm"));
 
         let ids = collect_cached_video_ids_from_dir(&temp_dir);
         assert!(ids.contains("C9ww_8cg_5g"));
         assert!(ids.contains("abc123DEF45"));
         assert_eq!(ids.len(), 2);
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn remove_cached_video_files_removes_all_matching_extensions() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+
+        touch(&storage.videos_dir.join("title_C9ww_8cg_5g.mkv"));
+        touch(&storage.videos_dir.join("title_C9ww_8cg_5g.mp4"));
+        touch(&storage.videos_dir.join("other_abc123DEF45.webm"));
+
+        let removed_count = storage
+            .remove_cached_video_files("C9ww_8cg_5g")
+            .expect("removal should succeed");
+        assert_eq!(removed_count, 2);
+        assert!(storage.find_video_path("C9ww_8cg_5g").is_none());
+        assert!(storage.find_video_path("abc123DEF45").is_some());
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn prune_cached_videos_not_in_watch_later_keeps_only_watch_later_files() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+
+        touch(&storage.videos_dir.join("keep_C9ww_8cg_5g.mkv"));
+        touch(&storage.videos_dir.join("remove_abc123DEF45.mp4"));
+        touch(&storage.videos_dir.join("ignore.txt"));
+
+        let watch_later = std::collections::HashSet::from(["C9ww_8cg_5g".to_string()]);
+        let removed_count = storage
+            .prune_cached_videos_not_in_watch_later(&watch_later)
+            .expect("prune should succeed");
+
+        assert_eq!(removed_count, 1);
+        assert!(storage.find_video_path("C9ww_8cg_5g").is_some());
+        assert!(storage.find_video_path("abc123DEF45").is_none());
+        assert!(storage.videos_dir.join("ignore.txt").exists());
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
