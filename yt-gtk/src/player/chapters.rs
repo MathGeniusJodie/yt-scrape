@@ -149,21 +149,14 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
 }
 
 fn load_info_json(path: &Path) -> Option<InfoJson> {
-    let contents = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::debug!("chapters: failed to read {}: {}", path.display(), e);
-            return None;
-        }
-    };
-
-    match serde_json::from_str(&contents) {
-        Ok(info) => Some(info),
-        Err(e) => {
-            log::debug!("chapters: failed to parse {}: {}", path.display(), e);
-            None
-        }
-    }
+    fs::read_to_string(path)
+        .inspect_err(|e| log::debug!("chapters: failed to read {}: {}", path.display(), e))
+        .ok()
+        .and_then(|c| {
+            serde_json::from_str(&c)
+                .inspect_err(|e| log::debug!("chapters: failed to parse {}: {}", path.display(), e))
+                .ok()
+        })
 }
 
 /// Ensure a `.chapters.ffmeta` file exists beside `local_path`, creating it from

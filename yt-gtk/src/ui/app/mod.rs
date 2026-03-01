@@ -59,12 +59,11 @@ impl AppState {
     }
 
     fn rebuild_video_index(&mut self) {
-        self.video_index_by_id.clear();
-        self.video_index_by_id.reserve(self.videos.len());
-        for (index, video) in self.videos.iter().enumerate() {
-            self.video_index_by_id
-                .insert(video.video_id().to_string(), index);
-        }
+        self.video_index_by_id = self.videos
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.video_id().to_string(), i))
+            .collect();
     }
 
     fn set_videos(&mut self, videos: Vec<Video>) {
@@ -281,14 +280,12 @@ fn spawn_refresh_progress_updates(
                 }
                 FetchProgress::ChannelComplete { channel, count } => {
                     completed_channels += 1;
-                    if failed_channels == 0 {
-                        status_label
-                            .set_text(&format!("Fetching feeds ({completed_channels}/{total_channels})..."));
-                    } else {
-                        status_label.set_text(&format!(
-                            "Fetching feeds ({completed_channels}/{total_channels}, {failed_channels} failed)..."
-                        ));
-                    }
+                    let failed = (failed_channels > 0)
+                        .then(|| format!(", {failed_channels} failed"))
+                        .unwrap_or_default();
+                    status_label.set_text(&format!(
+                        "Fetching feeds ({completed_channels}/{total_channels}{failed})..."
+                    ));
                     info!("Fetched {} videos for channel {}", count, channel);
                 }
                 FetchProgress::RetryScheduled {

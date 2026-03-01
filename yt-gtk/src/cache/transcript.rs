@@ -143,16 +143,16 @@ fn parse_json3(json: &str) -> Result<String, TranscriptError> {
 
 /// Clean up raw transcript text
 fn clean_transcript(text: &str) -> String {
-    let mut prev = "";
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         // Skip duplicate consecutive lines (auto-subs repeat the previous line on each update).
-        .filter(|&line| {
-            let is_dup = line == prev;
-            prev = line;
-            !is_dup
+        .scan("", |prev, line| {
+            let emit = *prev != line;
+            *prev = line;
+            Some(emit.then_some(line))
         })
+        .flatten()
         .collect::<Vec<_>>()
         .join(" ")
 }
