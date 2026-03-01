@@ -3,7 +3,22 @@ use crate::urls;
 use log::warn;
 use std::path::Path;
 use std::process::Stdio;
+use thiserror::Error;
 use tokio::process::Command;
+
+/// Errors that can occur while downloading a video with `yt-dlp`.
+#[derive(Debug, Error)]
+pub enum DownloadError {
+    /// Spawning or awaiting `yt-dlp` failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// `yt-dlp` exited unsuccessfully during the media download phase.
+    #[error("yt-dlp failed with exit code {exit_code:?}: {stderr}")]
+    Failed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+}
 
 /// Download a video using yt-dlp
 ///
@@ -14,9 +29,9 @@ use tokio::process::Command;
 ///
 /// # Errors
 ///
-/// Returns an error when `yt-dlp` fails or returns a non-zero exit status for the
-/// primary media download phase.
-pub async fn download_video(video_id: &str, output_path: &Path) -> anyhow::Result<()> {
+/// Returns an error when `yt-dlp` fails or returns a non-zero exit status for the primary media
+/// download phase.
+pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), DownloadError> {
     let url = urls::watch_url(video_id);
     let output_template = output_path.with_extension("%(ext)s");
 
@@ -46,11 +61,10 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> anyhow::Resul
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "yt-dlp failed with exit code {:?}: {}",
-            output.status.code(),
-            stderr.trim()
-        );
+        return Err(DownloadError::Failed {
+            exit_code: output.status.code(),
+            stderr: stderr.trim().to_string(),
+        });
     }
 
     // Phase 2: Fetch subtitles as best effort. Failure here should not break local playback.

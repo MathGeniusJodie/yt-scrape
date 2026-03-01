@@ -34,8 +34,28 @@ pub fn create_readonly_text_scroller(initial_text: &str) -> (ScrolledWindow, Tex
     (scrolled, buffer)
 }
 
-/// Show a scrollable text dialog (for transcripts/summaries)
-pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) {
+/// Creates a modal text dialog with a scrollable read-only text view.
+///
+/// # Arguments
+///
+/// * `parent` - Parent application window.
+/// * `title` - Window title for the dialog.
+/// * `initial_text` - Initial text shown in the read-only buffer.
+/// * `configure_content` - Hook to insert additional widgets into the content area before the
+///   text scroller.
+///
+/// # Returns
+///
+/// A tuple containing the created dialog and its backing text buffer.
+pub fn create_text_dialog<F>(
+    parent: &ApplicationWindow,
+    title: &str,
+    initial_text: &str,
+    configure_content: F,
+) -> (Dialog, TextBuffer)
+where
+    F: FnOnce(&gtk::Box),
+{
     let dialog = Dialog::with_buttons(
         Some(title),
         Some(parent),
@@ -46,8 +66,9 @@ pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) 
     dialog.set_default_size(700, 500);
 
     let content_area = dialog.content_area();
+    configure_content(&content_area);
 
-    let (scrolled, _buffer) = create_readonly_text_scroller(content);
+    let (scrolled, buffer) = create_readonly_text_scroller(initial_text);
     content_area.pack_start(&scrolled, true, true, 0);
 
     dialog.show_all();
@@ -55,6 +76,13 @@ pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) 
     dialog.connect_response(|dialog, _| {
         dialog.close();
     });
+
+    (dialog, buffer)
+}
+
+/// Show a scrollable text dialog (for transcripts/summaries)
+pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) {
+    let (dialog, _buffer) = create_text_dialog(parent, title, content, |_| {});
 
     dialog.run();
 }

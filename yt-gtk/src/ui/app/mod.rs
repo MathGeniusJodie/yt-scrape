@@ -3,7 +3,7 @@ mod refresh;
 mod summary;
 mod summary_generator;
 
-use crate::cache::{download_video, Storage};
+use crate::cache::{download_video, Storage, StorageError};
 use crate::data::Video;
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use crate::ui::video_card::VideoCardWidgets;
@@ -44,7 +44,7 @@ pub(super) enum CacheVideoError {
         video_id: String,
         sidecar_name: &'static str,
         #[source]
-        source: anyhow::Error,
+        source: StorageError,
     },
     #[error("Video {video_id} is no longer available")]
     MissingVideo { video_id: String },
@@ -122,29 +122,21 @@ impl AppState {
     }
 }
 
+type CardMap = Rc<RefCell<HashMap<String, VideoCardWidgets>>>;
+
 #[derive(Clone)]
-struct AsyncContext {
+struct AppContext {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
     summary_generator: SummaryGenerator,
-}
-
-#[derive(Clone)]
-struct WidgetContext {
     window: ApplicationWindow,
     context_menu: Popover,
     feed_flow: FlowBox,
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
     badge: Label,
-    feed_cards: Rc<RefCell<HashMap<String, VideoCardWidgets>>>,
-    watch_later_cards: Rc<RefCell<HashMap<String, VideoCardWidgets>>>,
-}
-
-#[derive(Clone)]
-struct UiContext {
-    async_ctx: AsyncContext,
-    widgets: WidgetContext,
+    feed_cards: CardMap,
+    watch_later_cards: CardMap,
 }
 
 const CARD_WIDTH: i32 = 320;
@@ -163,6 +155,34 @@ fn spawn_video_download(runtime: Arc<Runtime>, video_id: String, video_path: Pat
     runtime.spawn(async move {
         if let Err(download_error) = download_video(&video_id, &video_path).await {
             error!("Failed to download video {}: {}", video_id, download_error);
+        }
+    });
+}
+
+fn persist_watch_later(runtime: Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
+    runtime.spawn(async move {
+        match tokio::task::spawn_blocking(move || storage.save_watch_later(&watch_later)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(save_error)) => {
+                error!("Failed to persist watch-later list: {}", save_error);
+            }
+            Err(join_error) => {
+                error!("Watch-later persistence task failed: {}", join_error);
+            }
+        }
+    });
+}
+
+fn persist_videos(runtime: Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
+    runtime.spawn(async move {
+        match tokio::task::spawn_blocking(move || storage.save_videos(&videos)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(save_error)) => {
+                error!("Failed to persist refreshed videos cache: {}", save_error);
+            }
+            Err(join_error) => {
+                error!("Video cache persistence task failed: {}", join_error);
+            }
         }
     });
 }
@@ -256,28 +276,29 @@ fn toggle_watch_later_and_download(
     video_id: &str,
     video_title: &str,
 ) -> bool {
-    let mut state = state_rc.borrow_mut();
-    let added = !state.watch_later.remove(video_id);
-    if added {
-        state.watch_later.insert(video_id.to_string());
-    }
+    let (added, storage, watch_later_snapshot) = {
+        let mut state = state_rc.borrow_mut();
+        let added = !state.watch_later.remove(video_id);
+        if added {
+            state.watch_later.insert(video_id.to_string());
+        }
 
-    let local_path = state.storage.find_video_path(video_id);
-    if added && needs_download_upgrade(local_path.as_deref()) {
-        let video_path = state.storage.video_path(video_id, video_title);
-        spawn_video_download(runtime.clone(), video_id.to_string(), video_path);
-    }
+        let local_path = state.storage.find_video_path(video_id);
+        if added && needs_download_upgrade(local_path.as_deref()) {
+            let video_path = state.storage.video_path(video_id, video_title);
+            spawn_video_download(runtime.clone(), video_id.to_string(), video_path);
+        }
 
-    if let Err(save_error) = state.storage.save_watch_later(&state.watch_later) {
-        error!("Failed to persist watch-later list: {}", save_error);
-    }
+        (added, state.storage.clone(), state.watch_later.clone())
+    };
 
+    persist_watch_later(runtime.clone(), storage, watch_later_snapshot);
     added
 }
 
 fn apply_watch_later_action(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: String,
 ) {
     let video_title = {
@@ -291,12 +312,8 @@ fn apply_watch_later_action(
         return;
     };
 
-    let added = toggle_watch_later_and_download(
-        state_rc,
-        &ui_context.async_ctx.runtime,
-        &video_id,
-        &video_title,
-    );
+    let added =
+        toggle_watch_later_and_download(state_rc, &ui_context.runtime, &video_id, &video_title);
     update_watch_later_toggles(ui_context, &video_id, added);
     sync_watch_later_card(state_rc, ui_context, &video_id);
     if added {
@@ -389,22 +406,27 @@ fn spawn_refresh_progress_updates(
 fn spawn_refreshed_videos_apply(
     videos_rx: async_channel::Receiver<Vec<Video>>,
     state_rc: Rc<RefCell<AppState>>,
-    ui_context: UiContext,
+    ui_context: AppContext,
 ) {
     glib::MainContext::default().spawn_local(async move {
         if let Ok(mut videos) = videos_rx.recv().await {
             let mut state = state_rc.borrow_mut();
             state.storage.hydrate_videos_from_sidecars(&mut videos);
-            if let Err(save_error) = state.storage.save_videos(&videos) {
-                error!("Failed to persist refreshed videos cache: {}", save_error);
-            }
+            let videos_for_persistence = videos.clone();
+            let storage_for_persistence = state.storage.clone();
+            let runtime_for_persistence = ui_context.runtime.clone();
             state.set_videos(videos);
+            persist_videos(
+                runtime_for_persistence,
+                storage_for_persistence,
+                videos_for_persistence,
+            );
 
             let thumbnail_completion = download_missing_thumbnails(
                 state.videos.values(),
                 &state.storage,
-                ui_context.async_ctx.http_client.clone(),
-                ui_context.async_ctx.runtime.clone(),
+                ui_context.http_client.clone(),
+                ui_context.runtime.clone(),
             );
             drop(state);
 
@@ -425,7 +447,7 @@ fn spawn_refreshed_videos_apply(
 
 fn start_feed_refresh(
     state: Rc<RefCell<AppState>>,
-    ui_context: UiContext,
+    ui_context: AppContext,
     spinner: Spinner,
     status_label: Label,
     subs_file: PathBuf,
@@ -446,8 +468,8 @@ fn start_feed_refresh(
     let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
 
     let progress_tx_for_errors = progress_tx.clone();
-    let fetch_client = ui_context.async_ctx.http_client.clone();
-    ui_context.async_ctx.runtime.spawn(async move {
+    let fetch_client = ui_context.http_client.clone();
+    ui_context.runtime.spawn(async move {
         match fetch_all_feeds(&fetch_client, channel_ids, progress_tx).await {
             Ok(videos) => {
                 let _ = videos_tx.send(videos).await;
@@ -629,12 +651,10 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     // Create context menu with handlers connected once
     let context_menu = Popover::new(None::<&gtk::Widget>);
 
-    let async_ctx = AsyncContext {
+    let ui_context = AppContext {
         summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
         runtime: runtime.clone(),
         http_client: http_client.clone(),
-    };
-    let widgets = WidgetContext {
         window: window.clone(),
         context_menu: context_menu.clone(),
         feed_flow: feed_flow.clone(),
@@ -644,7 +664,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         feed_cards: feed_cards.clone(),
         watch_later_cards: watch_later_cards.clone(),
     };
-    let ui_context = UiContext { async_ctx, widgets };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
     // Set initial badge and populate videos
@@ -675,8 +694,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         download_missing_thumbnails(
             state_ref.videos.values(),
             &state_ref.storage,
-            ui_context.async_ctx.http_client.clone(),
-            ui_context.async_ctx.runtime.clone(),
+            ui_context.http_client.clone(),
+            ui_context.runtime.clone(),
         )
     };
     if let Some(startup_thumbnail_completion) = startup_thumbnail_completion {

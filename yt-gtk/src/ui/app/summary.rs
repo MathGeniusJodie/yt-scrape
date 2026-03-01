@@ -1,8 +1,8 @@
 use super::refresh::refresh_video_summary_badges;
 use super::summary_generator::{StartSummaryGenerationError, SummaryGenerationMode};
-use super::{AppState, UiContext};
+use super::{AppContext, AppState};
 use crate::cache::fetch_transcript;
-use crate::ui::dialogs::{create_readonly_text_scroller, show_text_dialog};
+use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
 
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Orientation};
@@ -12,10 +12,10 @@ use std::rc::Rc;
 
 pub(super) fn maybe_prefetch_summary_for_watch_later(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
-    let summary_generator = ui_context.async_ctx.summary_generator.clone();
+    let summary_generator = ui_context.summary_generator.clone();
     let generation_task =
         match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Prefetch) {
             Ok(task) => task,
@@ -75,7 +75,7 @@ fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
 
 fn start_summary_generation_for_dialog(
     state_rc: Rc<RefCell<AppState>>,
-    ui_context: UiContext,
+    ui_context: AppContext,
     video_id: String,
     buffer: gtk::TextBuffer,
     regenerate_button: Button,
@@ -84,7 +84,7 @@ fn start_summary_generation_for_dialog(
     buffer.set_text(loading_text);
     regenerate_button.set_sensitive(false);
 
-    let summary_generator = ui_context.async_ctx.summary_generator.clone();
+    let summary_generator = ui_context.summary_generator.clone();
     let generation_task =
         match summary_generator.start(&state_rc, &video_id, SummaryGenerationMode::Interactive) {
             Ok(task) => task,
@@ -153,7 +153,7 @@ fn start_summary_generation_for_dialog(
 
 pub(super) fn show_summary_dialog(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
     let (video_title, cached_summary) = {
@@ -171,31 +171,25 @@ pub(super) fn show_summary_dialog(
         )
     };
 
-    let dialog = gtk::Dialog::with_buttons(
-        Some(&format!("Summary: {}", video_title)),
-        Some(&ui_context.widgets.window),
-        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
-        &[("Close", gtk::ResponseType::Close)],
-    );
-    dialog.set_default_size(700, 500);
-
-    let content_area = dialog.content_area();
-
-    let controls_row = GtkBox::new(Orientation::Horizontal, 8);
-    controls_row.set_margin_start(8);
-    controls_row.set_margin_end(8);
-    controls_row.set_margin_top(8);
-
-    let spacer = GtkBox::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    controls_row.pack_start(&spacer, true, true, 0);
-
     let regenerate_button = Button::with_label("Regenerate Summary");
-    controls_row.pack_end(&regenerate_button, false, false, 0);
-    content_area.pack_start(&controls_row, false, false, 0);
+    let regenerate_button_for_layout = regenerate_button.clone();
+    let (_dialog, buffer) = create_text_dialog(
+        &ui_context.window,
+        &format!("Summary: {}", video_title),
+        "",
+        move |content_area| {
+            let controls_row = GtkBox::new(Orientation::Horizontal, 8);
+            controls_row.set_margin_start(8);
+            controls_row.set_margin_end(8);
+            controls_row.set_margin_top(8);
 
-    let (scrolled, buffer) = create_readonly_text_scroller("");
-    content_area.pack_start(&scrolled, true, true, 0);
+            let spacer = GtkBox::new(Orientation::Horizontal, 0);
+            spacer.set_hexpand(true);
+            controls_row.pack_start(&spacer, true, true, 0);
+            controls_row.pack_end(&regenerate_button_for_layout, false, false, 0);
+            content_area.pack_start(&controls_row, false, false, 0);
+        },
+    );
 
     let state_rc_for_dialog = state_rc.clone();
     let ui_context_for_dialog = ui_context.clone();
@@ -232,17 +226,11 @@ pub(super) fn show_summary_dialog(
             );
         });
     }
-
-    dialog.show_all();
-
-    dialog.connect_response(|dialog, _| {
-        dialog.close();
-    });
 }
 
 pub(super) fn show_transcript_dialog(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
     let (video_title, cached_transcript) = {
@@ -263,7 +251,7 @@ pub(super) fn show_transcript_dialog(
     // Check if we already have the transcript cached
     if let Some(transcript) = cached_transcript {
         show_text_dialog(
-            &ui_context.widgets.window,
+            &ui_context.window,
             &format!("Transcript: {}", video_title),
             &transcript,
         );
@@ -271,19 +259,12 @@ pub(super) fn show_transcript_dialog(
     }
 
     // Need to fetch transcript
-    let dialog = gtk::Dialog::with_buttons(
-        Some(&format!("Transcript: {}", video_title)),
-        Some(&ui_context.widgets.window),
-        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
-        &[("Close", gtk::ResponseType::Close)],
+    let (_dialog, buffer) = create_text_dialog(
+        &ui_context.window,
+        &format!("Transcript: {}", video_title),
+        "Loading transcript...",
+        |_| {},
     );
-    dialog.set_default_size(700, 500);
-
-    let content_area = dialog.content_area();
-    let (scrolled, buffer) = create_readonly_text_scroller("Loading transcript...");
-    content_area.pack_start(&scrolled, true, true, 0);
-
-    dialog.show_all();
 
     // Fetch transcript
     let work_dir = state_rc
@@ -295,7 +276,7 @@ pub(super) fn show_transcript_dialog(
     let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
 
     let video_id_for_thread = video_id.to_string();
-    let runtime = ui_context.async_ctx.runtime.clone();
+    let runtime = ui_context.runtime.clone();
     runtime.spawn(async move {
         match fetch_transcript(&video_id_for_thread, &work_dir).await {
             Ok(transcript) => {
@@ -327,9 +308,5 @@ pub(super) fn show_transcript_dialog(
                 }
             }
         }
-    });
-
-    dialog.connect_response(|dialog, _| {
-        dialog.close();
     });
 }

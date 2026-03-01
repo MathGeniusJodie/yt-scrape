@@ -1,6 +1,6 @@
 use super::summary::{show_summary_dialog, show_transcript_dialog};
-use super::{apply_watch_later_action, resolve_playback_path, AppState, UiContext};
-use crate::data::{Tab, Video};
+use super::{apply_watch_later_action, resolve_playback_path, AppContext, AppState};
+use crate::data::Tab;
 use crate::player::play_video;
 use crate::ui::video_card::{create_video_card, set_watch_later_toggle_state, VideoCardWidgets};
 
@@ -59,10 +59,10 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, runtime: &Arc<Runtime>,
 pub(super) fn create_context_menu(
     popover: &Popover,
     state_rc: Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
 ) {
     let popover = popover.clone();
-    let selected_video = ui_context.widgets.selected_video.clone();
+    let selected_video = ui_context.selected_video.clone();
     let menu_box = GtkBox::new(Orientation::Vertical, 0);
     menu_box.set_margin_start(8);
     menu_box.set_margin_end(8);
@@ -98,10 +98,10 @@ pub(super) fn create_context_menu(
     on_menu_action(
         &play_button,
         selected_video.clone(),
-        ui_context.widgets.context_menu.clone(),
+        ui_context.context_menu.clone(),
         {
             let state_rc = state_rc.clone();
-            let runtime = ui_context.async_ctx.runtime.clone();
+            let runtime = ui_context.runtime.clone();
             move |video_id| {
                 play_selected_video(&state_rc, &runtime, &video_id);
             }
@@ -110,7 +110,7 @@ pub(super) fn create_context_menu(
     on_menu_action(
         &watch_later_button,
         selected_video.clone(),
-        ui_context.widgets.context_menu.clone(),
+        ui_context.context_menu.clone(),
         {
             let state_rc = state_rc.clone();
             let ui_context = ui_context.clone();
@@ -122,7 +122,7 @@ pub(super) fn create_context_menu(
     on_menu_action(
         &copy_url_button,
         selected_video.clone(),
-        ui_context.widgets.context_menu.clone(),
+        ui_context.context_menu.clone(),
         |video_id| {
             // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
             gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD)
@@ -132,7 +132,7 @@ pub(super) fn create_context_menu(
     on_menu_action(
         &summary_button,
         selected_video.clone(),
-        ui_context.widgets.context_menu.clone(),
+        ui_context.context_menu.clone(),
         {
             let state_rc = state_rc.clone();
             let ui_context = ui_context.clone();
@@ -144,7 +144,7 @@ pub(super) fn create_context_menu(
     on_menu_action(
         &transcript_button,
         selected_video,
-        ui_context.widgets.context_menu.clone(),
+        ui_context.context_menu.clone(),
         {
             let state_rc = state_rc.clone();
             let ui_context = ui_context.clone();
@@ -155,30 +155,30 @@ pub(super) fn create_context_menu(
     );
 }
 
-fn flow_for_tab(ui_context: &UiContext, tab: Tab) -> &FlowBox {
+fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     match tab {
-        Tab::Feed => &ui_context.widgets.feed_flow,
-        Tab::WatchLater => &ui_context.widgets.watch_later_flow,
+        Tab::Feed => &ui_context.feed_flow,
+        Tab::WatchLater => &ui_context.watch_later_flow,
     }
 }
 
 fn card_map_for_tab(
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     tab: Tab,
 ) -> &Rc<RefCell<HashMap<String, VideoCardWidgets>>> {
     match tab {
-        Tab::Feed => &ui_context.widgets.feed_cards,
-        Tab::WatchLater => &ui_context.widgets.watch_later_cards,
+        Tab::Feed => &ui_context.feed_cards,
+        Tab::WatchLater => &ui_context.watch_later_cards,
     }
 }
 
-fn videos_for_tab(state: &AppState, tab: Tab) -> Vec<Video> {
+fn video_ids_for_tab(state: &AppState, tab: Tab) -> Vec<String> {
     match tab {
-        Tab::Feed => state.videos.values().cloned().collect(),
+        Tab::Feed => state.videos.keys().cloned().collect(),
         Tab::WatchLater => state
             .videos
-            .values()
-            .filter(|video| state.watch_later.contains(video.video_id()))
+            .keys()
+            .filter(|video_id| state.watch_later.contains(video_id.as_str()))
             .cloned()
             .collect(),
     }
@@ -186,7 +186,7 @@ fn videos_for_tab(state: &AppState, tab: Tab) -> Vec<Video> {
 
 fn connect_card_handlers(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
     card_widgets: &VideoCardWidgets,
 ) {
@@ -200,14 +200,14 @@ fn connect_card_handlers(
     card_widgets.root().connect_button_press_event(
         clone!(@strong video_id, @strong state_rc, @strong ui_context => move |widget, event| {
             if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
-                play_selected_video(&state_rc, &ui_context.async_ctx.runtime, &video_id);
+                play_selected_video(&state_rc, &ui_context.runtime, &video_id);
                 return glib::Propagation::Stop;
             }
 
             if event.button() == 3 {
-                *ui_context.widgets.selected_video.borrow_mut() = Some(video_id.clone());
-                ui_context.widgets.context_menu.set_relative_to(Some(widget));
-                ui_context.widgets.context_menu.popup();
+                *ui_context.selected_video.borrow_mut() = Some(video_id.clone());
+                ui_context.context_menu.set_relative_to(Some(widget));
+                ui_context.context_menu.popup();
                 return glib::Propagation::Stop;
             }
 
@@ -237,33 +237,34 @@ fn add_card_to_flow(flow_box: &FlowBox, card_widgets: &VideoCardWidgets, positio
 }
 
 fn build_video_card(
-    video: &Video,
+    video_id: &str,
     downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
-) -> VideoCardWidgets {
-    let state = state_rc.borrow();
-    let thumbnail_path = state.storage.thumbnail_path(video.video_id());
-    let is_watch_later = state.watch_later.contains(video.video_id());
-    let is_downloaded = downloaded_video_ids.contains(video.video_id());
-    drop(state);
-
-    let card_widgets = create_video_card(
-        video,
-        &thumbnail_path,
-        is_watch_later,
-        is_downloaded,
-        video.has_ai_summary(),
-    );
-    connect_card_handlers(state_rc, ui_context, video.video_id(), &card_widgets);
-    card_widgets
+    ui_context: &AppContext,
+) -> Option<VideoCardWidgets> {
+    let card_widgets = {
+        let state = state_rc.borrow();
+        let video = state.video_by_id(video_id)?;
+        let thumbnail_path = state.storage.thumbnail_path(video.video_id());
+        let is_watch_later = state.watch_later.contains(video.video_id());
+        let is_downloaded = downloaded_video_ids.contains(video.video_id());
+        create_video_card(
+            video,
+            &thumbnail_path,
+            is_watch_later,
+            is_downloaded,
+            video.has_ai_summary(),
+        )
+    };
+    connect_card_handlers(state_rc, ui_context, video_id, &card_widgets);
+    Some(card_widgets)
 }
 
 pub(super) fn populate_flow_box(
     tab: Tab,
     downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
 ) {
     let flow_box = flow_for_tab(ui_context, tab);
     let card_map = card_map_for_tab(ui_context, tab);
@@ -274,35 +275,43 @@ pub(super) fn populate_flow_box(
     });
     card_map.borrow_mut().clear();
 
-    let videos = {
+    let video_ids = {
         let state = state_rc.borrow();
-        videos_for_tab(&state, tab)
+        video_ids_for_tab(&state, tab)
     };
 
-    for video in videos {
-        let card_widgets = build_video_card(&video, downloaded_video_ids, state_rc, ui_context);
+    for video_id in video_ids {
+        let Some(card_widgets) =
+            build_video_card(&video_id, downloaded_video_ids, state_rc, ui_context)
+        else {
+            continue;
+        };
         add_card_to_flow(flow_box, &card_widgets, None);
-        card_map
-            .borrow_mut()
-            .insert(video.video_id().to_string(), card_widgets);
+        card_map.borrow_mut().insert(video_id, card_widgets);
     }
 
     flow_box.show_all();
 }
 
+pub(super) fn for_each_card_matching<F>(ui_context: &AppContext, video_id: &str, mut action: F)
+where
+    F: FnMut(&VideoCardWidgets),
+{
+    for card_map in [&ui_context.feed_cards, &ui_context.watch_later_cards] {
+        if let Some(card) = card_map.borrow().get(video_id).cloned() {
+            action(&card);
+        }
+    }
+}
+
 pub(super) fn update_watch_later_toggles(
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
     is_watch_later: bool,
 ) {
-    for card_map in [
-        &ui_context.widgets.feed_cards,
-        &ui_context.widgets.watch_later_cards,
-    ] {
-        if let Some(card) = card_map.borrow().get(video_id).cloned() {
-            set_watch_later_toggle_state(card.watch_later_toggle(), is_watch_later);
-        }
-    }
+    for_each_card_matching(ui_context, video_id, |card| {
+        set_watch_later_toggle_state(card.watch_later_toggle(), is_watch_later);
+    });
 }
 
 fn watch_later_insert_position(state: &AppState, video_id: &str) -> Option<usize> {
@@ -315,22 +324,21 @@ fn watch_later_insert_position(state: &AppState, video_id: &str) -> Option<usize
 
 pub(super) fn sync_watch_later_card(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
-    let (in_watch_later, video, insert_position, is_downloaded) = {
+    let (in_watch_later, insert_position, is_downloaded) = {
         let state = state_rc.borrow();
         let in_watch_later = state.watch_later.contains(video_id);
-        let video = state.video_by_id(video_id).cloned();
         let insert_position = watch_later_insert_position(&state, video_id);
         let is_downloaded = state.storage.find_video_path(video_id).is_some();
-        (in_watch_later, video, insert_position, is_downloaded)
+        (in_watch_later, insert_position, is_downloaded)
     };
 
-    let mut watch_later_cards = ui_context.widgets.watch_later_cards.borrow_mut();
+    let mut watch_later_cards = ui_context.watch_later_cards.borrow_mut();
     if !in_watch_later {
         if let Some(card) = watch_later_cards.remove(video_id) {
-            ui_context.widgets.watch_later_flow.remove(card.root());
+            ui_context.watch_later_flow.remove(card.root());
         }
         return;
     }
@@ -339,43 +347,34 @@ pub(super) fn sync_watch_later_card(
         return;
     }
 
-    let Some(video) = video else {
-        return;
-    };
-
     let downloaded_video_ids = if is_downloaded {
         HashSet::from([video_id.to_string()])
     } else {
         HashSet::new()
     };
-    let card_widgets = build_video_card(&video, &downloaded_video_ids, state_rc, ui_context);
-    add_card_to_flow(
-        &ui_context.widgets.watch_later_flow,
-        &card_widgets,
-        insert_position,
-    );
+    let Some(card_widgets) =
+        build_video_card(video_id, &downloaded_video_ids, state_rc, ui_context)
+    else {
+        return;
+    };
+    add_card_to_flow(&ui_context.watch_later_flow, &card_widgets, insert_position);
     watch_later_cards.insert(video_id.to_string(), card_widgets);
-    ui_context.widgets.watch_later_flow.show_all();
+    ui_context.watch_later_flow.show_all();
 }
 
 pub(super) fn refresh_video_summary_badges(
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
     has_summary: bool,
 ) {
-    for card_map in [
-        &ui_context.widgets.feed_cards,
-        &ui_context.widgets.watch_later_cards,
-    ] {
-        if let Some(card) = card_map.borrow().get(video_id).cloned() {
-            card.set_summary_available(has_summary);
-        }
-    }
+    for_each_card_matching(ui_context, video_id, |card| {
+        card.set_summary_available(has_summary);
+    });
 }
 
 pub(super) fn refresh_video_thumbnail(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
     let thumbnail_path = {
@@ -383,12 +382,7 @@ pub(super) fn refresh_video_thumbnail(
         state.storage.thumbnail_path(video_id)
     };
 
-    for card_map in [
-        &ui_context.widgets.feed_cards,
-        &ui_context.widgets.watch_later_cards,
-    ] {
-        if let Some(card) = card_map.borrow().get(video_id).cloned() {
-            card.refresh_thumbnail(&thumbnail_path);
-        }
-    }
+    for_each_card_matching(ui_context, video_id, |card| {
+        card.refresh_thumbnail(&thumbnail_path);
+    });
 }

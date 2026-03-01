@@ -4,5 +4,5 @@ mod subtitle_requests;
 mod transcript;
 
 pub use downloader::download_video;
-pub use storage::Storage;
+pub use storage::{Storage, StorageError};
 pub use transcript::fetch_transcript;

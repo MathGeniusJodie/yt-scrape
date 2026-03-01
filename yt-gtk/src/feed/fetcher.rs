@@ -1,12 +1,13 @@
 use crate::data::Video;
 use crate::urls;
-use anyhow::Context;
 use async_channel::Sender;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use log::warn;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
 use tokio::time::{sleep, Duration, Instant};
 
 const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
@@ -18,6 +19,21 @@ const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
 const MAX_FEED_VIDEOS: usize = 400;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 const MAX_BACKOFF_MULTIPLIER: u64 = 4;
+
+/// Errors that can occur while loading and fetching feed metadata.
+#[derive(Debug, Error)]
+pub enum FeedError {
+    /// Required API key was not present in the process environment.
+    #[error("GOOGLE_API_KEY is not set. Set it before refreshing feeds.")]
+    MissingApiKey,
+    /// Channel ID file could not be read.
+    #[error("failed to read channel IDs from {path}: {source}")]
+    ReadChannelIds {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 /// Progress updates during feed fetching
 #[derive(Debug, Clone)]
@@ -169,12 +185,11 @@ pub async fn fetch_all_feeds(
     client: &reqwest::Client,
     channel_ids: Vec<String>,
     tx: Sender<FetchProgress>,
-) -> anyhow::Result<Vec<Video>> {
+) -> Result<Vec<Video>, FeedError> {
     let total = channel_ids.len();
     let _ = tx.send(FetchProgress::Started { total }).await;
 
-    let api_key = std::env::var("GOOGLE_API_KEY")
-        .context("GOOGLE_API_KEY is not set. Set it before refreshing feeds.")?;
+    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| FeedError::MissingApiKey)?;
 
     let mut all_videos = Vec::new();
     let mut successful_channels = 0usize;
@@ -563,8 +578,11 @@ fn backoff_ms_with_base(base_ms: u64, attempt: usize) -> u64 {
 /// # Errors
 ///
 /// Returns an error if reading the input file fails.
-pub fn load_channel_ids(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
-    let content = std::fs::read_to_string(path)?;
+pub fn load_channel_ids(path: &Path) -> Result<Vec<String>, FeedError> {
+    let content = std::fs::read_to_string(path).map_err(|source| FeedError::ReadChannelIds {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(content
         .lines()
         .map(str::trim)

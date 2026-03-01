@@ -3,7 +3,7 @@ use super::cards::{
     refresh_video_thumbnail, sync_watch_later_card as sync_single_watch_later_card,
     update_watch_later_toggles as set_watch_later_toggles,
 };
-use super::{update_watch_later_badge, AppState, UiContext};
+use super::{update_watch_later_badge, AppContext, AppState};
 use crate::cache::Storage;
 use crate::data::{Tab, Video};
 
@@ -19,21 +19,21 @@ fn refresh_tab(
     tab: Tab,
     downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
 ) {
     populate_flow_box(tab, downloaded_video_ids, state_rc, ui_context);
 }
 
-pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &UiContext) {
+pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
     let state_ref = state_rc.borrow();
     let downloaded_video_ids = state_ref.storage.cached_video_ids();
-    update_watch_later_badge(&ui_context.widgets.badge, state_ref.watch_later.len());
+    update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
     refresh_tab(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
     refresh_tab(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
 }
 
 pub(super) fn update_watch_later_toggles(
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
     is_watch_later: bool,
 ) {
@@ -42,17 +42,17 @@ pub(super) fn update_watch_later_toggles(
 
 pub(super) fn sync_watch_later_card(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
     let watch_later_count = state_rc.borrow().watch_later.len();
-    update_watch_later_badge(&ui_context.widgets.badge, watch_later_count);
+    update_watch_later_badge(&ui_context.badge, watch_later_count);
     sync_single_watch_later_card(state_rc, ui_context, video_id);
 }
 
 pub(super) fn refresh_video_summary_badges(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_id: &str,
 ) {
     let has_summary = state_rc
@@ -64,7 +64,7 @@ pub(super) fn refresh_video_summary_badges(
 
 pub(super) fn refresh_video_thumbnails(
     state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &UiContext,
+    ui_context: &AppContext,
     video_ids: &[String],
 ) {
     for video_id in video_ids {

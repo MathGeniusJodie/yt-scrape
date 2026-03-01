@@ -1,10 +1,10 @@
 use crate::data::{Video, WatchLaterData};
-use anyhow::Result;
 use log::warn;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 const MAX_TITLE_LENGTH: usize = 100;
 const WATCH_LATER_FILE: &str = "watch_later.json";
@@ -13,6 +13,22 @@ const VIDEO_SIDECARS_DIR: &str = "video_sidecars";
 const VIDEO_SIDECAR_EXTENSION: &str = "json";
 const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
 const YOUTUBE_VIDEO_ID_LENGTH: usize = 11;
+
+type StorageResult<T> = std::result::Result<T, StorageError>;
+
+/// Errors produced by filesystem-backed storage operations.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    /// Platform project directories could not be discovered.
+    #[error("Could not determine project directories")]
+    ProjectDirectoriesUnavailable,
+    /// Filesystem operation failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// JSON serialization or parsing failed.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct VideoMetadataSidecar {
@@ -105,6 +121,7 @@ fn sanitize_filename(input: &str) -> String {
 }
 
 /// Manages filesystem-backed persistence for video metadata and cached assets.
+#[derive(Clone)]
 pub struct Storage {
     data_dir: PathBuf,
     cache_dir: PathBuf,
@@ -125,9 +142,9 @@ impl Storage {
     ///
     /// Returns an error if project directories cannot be discovered or if directory creation
     /// fails.
-    pub fn new() -> Result<Self> {
+    pub fn new() -> StorageResult<Self> {
         let project_dirs = directories::ProjectDirs::from("", "", "yt-gtk")
-            .ok_or_else(|| anyhow::anyhow!("Could not determine project directories"))?;
+            .ok_or(StorageError::ProjectDirectoriesUnavailable)?;
         Self::new_at(
             project_dirs.data_dir().to_path_buf(),
             project_dirs.cache_dir().to_path_buf(),
@@ -148,7 +165,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error if directory creation fails.
-    pub fn new_at(data_dir: PathBuf, cache_dir: PathBuf) -> Result<Self> {
+    pub fn new_at(data_dir: PathBuf, cache_dir: PathBuf) -> StorageResult<Self> {
         let thumbnails_dir = cache_dir.join("thumbnails");
         let videos_dir = cache_dir.join("videos");
         let video_sidecars_dir = cache_dir.join(VIDEO_SIDECARS_DIR);
@@ -273,7 +290,11 @@ impl Storage {
         }
     }
 
-    fn write_video_sidecar(&self, video_id: &str, sidecar: &VideoMetadataSidecar) -> Result<()> {
+    fn write_video_sidecar(
+        &self,
+        video_id: &str,
+        sidecar: &VideoMetadataSidecar,
+    ) -> StorageResult<()> {
         let path = self.video_sidecar_path(video_id);
         if sidecar.is_empty() {
             if path.exists() {
@@ -308,7 +329,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when serialization or file writes fail.
-    pub fn save_watch_later(&self, video_ids: &HashSet<String>) -> Result<()> {
+    pub fn save_watch_later(&self, video_ids: &HashSet<String>) -> StorageResult<()> {
         let path = self.data_dir.join(WATCH_LATER_FILE);
         let mut sorted_video_ids = video_ids.iter().cloned().collect::<Vec<_>>();
         sorted_video_ids.sort_unstable();
@@ -355,7 +376,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when serialization or file writes fail.
-    pub fn save_videos(&self, videos: &[Video]) -> Result<()> {
+    pub fn save_videos(&self, videos: &[Video]) -> StorageResult<()> {
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
         let json = serde_json::to_string_pretty(videos)?;
         std::fs::write(path, json)?;
@@ -378,7 +399,7 @@ impl Storage {
         video_id: &str,
         transcript: Option<&str>,
         ai_summary: Option<&str>,
-    ) -> Result<()> {
+    ) -> StorageResult<()> {
         let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
         if let Some(transcript) = transcript {
             sidecar.transcript = Some(transcript.to_string());
@@ -403,7 +424,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
-    pub fn save_video_transcript(&self, video_id: &str, transcript: &str) -> Result<()> {
+    pub fn save_video_transcript(&self, video_id: &str, transcript: &str) -> StorageResult<()> {
         self.save_video_metadata(video_id, Some(transcript), None)
     }
 
@@ -421,7 +442,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
-    pub fn save_video_ai_summary(&self, video_id: &str, ai_summary: &str) -> Result<()> {
+    pub fn save_video_ai_summary(&self, video_id: &str, ai_summary: &str) -> StorageResult<()> {
         self.save_video_metadata(video_id, None, Some(ai_summary))
     }
 }
