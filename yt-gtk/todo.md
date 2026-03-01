@@ -1,0 +1,6 @@
+- [ ] **Bug**: Fix `video_id_from_stem` — uses `rsplit_once('_')` but YouTube IDs can contain `_` (e.g. `C9ww_8cg_5g`); use the fixed-11-char property instead (`src/cache/storage.rs:30`)
+- [ ] `MAX_BACKOFF_MS` is misleading — it only caps small-base backoffs; for large bases (20–30 s) the actual cap is `4 × base_ms`, not `MAX_BACKOFF_MS`; rename or add clarifying comment or simplify the logic (`src/feed/fetcher.rs:598`)
+- [ ] `spawn_summary_generation_stream` uses a double channel — change `summarize_video_streaming` to accept `async_channel::Sender` directly and remove the inner `mpsc` + forwarding task (`src/ui/app/summary.rs:46`)
+- [ ] `toggle_watch_later_and_download` — rewrite inverted if/else as `let added = !state.watch_later.remove(video_id); if added { state.watch_later.insert(...); }` (`src/ui/app/mod.rs:215`)
+- [ ] `CardButtonIndex` wraps a single `HashMap<String, Button>` with no benefit — replace with the map directly (`src/ui/app/mod.rs:103`)
+- [ ] Add comment to `Ok(_) => {}` arm in `fetch_channel_with_retries` 404 block to clarify the intentional fallthrough to terminal error (`src/feed/fetcher.rs:310`)
