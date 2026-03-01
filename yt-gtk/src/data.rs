@@ -102,7 +102,9 @@ impl Video {
 
     /// Returns `true` when a non-empty AI summary is cached for this video.
     pub fn has_ai_summary(&self) -> bool {
-        self.ai_summary.as_ref().is_some_and(|s| !s.trim().is_empty())
+        self.ai_summary
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
     }
 }
 

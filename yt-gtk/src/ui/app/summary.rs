@@ -73,21 +73,7 @@ fn persist_summary_to_cache(
 ) -> bool {
     let mut state = state_rc.borrow_mut();
     state.summaries_in_progress.remove(video_id);
-
-    if let Err(save_error) = state.storage.save_video_ai_summary(video_id, &summary) {
-        error!(
-            "Failed to persist summary sidecar for {}: {}",
-            video_id, save_error
-        );
-    }
-
-    let mut updated = false;
-    if let Some(video) = state.video_by_id_mut(video_id) {
-        video.set_ai_summary(Some(summary));
-        updated = true;
-    }
-
-    updated
+    state.cache_video_ai_summary(video_id, summary)
 }
 
 pub(super) fn maybe_prefetch_summary_for_watch_later(
@@ -443,17 +429,7 @@ pub(super) fn show_transcript_dialog(
                 Ok(transcript) => {
                     buffer.set_text(&transcript);
                     let mut state = state_rc.borrow_mut();
-                    if let Err(save_error) =
-                        state.storage.save_video_transcript(&video_id, &transcript)
-                    {
-                        error!(
-                            "Failed to persist transcript sidecar for {}: {}",
-                            video_id, save_error
-                        );
-                    }
-                    if let Some(video) = state.video_by_id_mut(&video_id) {
-                        video.set_transcript(Some(transcript));
-                    }
+                    state.cache_video_transcript(&video_id, transcript);
                 }
                 Err(transcript_error) => {
                     buffer.set_text(&format!("Error: {}", transcript_error));

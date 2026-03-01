@@ -98,9 +98,14 @@ pub(crate) async fn run_yt_dlp_subtitle_command(
 /// Return `true` if `stderr` indicates an HTTP 429 / rate-limit error.
 fn is_rate_limited(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
-    ["http error 429", "too many requests", "rate limit", "rate-limited"]
-        .iter()
-        .any(|p| lower.contains(p))
+    [
+        "http error 429",
+        "too many requests",
+        "rate limit",
+        "rate-limited",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
 }
 
 #[cfg(test)]

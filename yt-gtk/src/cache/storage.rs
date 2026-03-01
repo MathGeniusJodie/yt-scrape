@@ -261,6 +261,18 @@ impl Storage {
         }
     }
 
+    fn apply_sidecar_metadata_to_video(&self, video: &mut Video) {
+        let Some(sidecar) = self.read_video_sidecar(video.video_id()) else {
+            return;
+        };
+        if let Some(transcript) = sidecar.transcript {
+            video.set_transcript(Some(transcript));
+        }
+        if let Some(ai_summary) = sidecar.ai_summary {
+            video.set_ai_summary(Some(ai_summary));
+        }
+    }
+
     fn write_video_sidecar(&self, video_id: &str, sidecar: &VideoMetadataSidecar) -> Result<()> {
         let path = self.video_sidecar_path(video_id);
         if sidecar.is_empty() {
@@ -309,6 +321,17 @@ impl Storage {
         Ok(())
     }
 
+    /// Hydrates in-memory videos with transcript/summary metadata from sidecar files.
+    ///
+    /// # Arguments
+    ///
+    /// * `videos` - Videos to hydrate with sidecar transcript/summary data.
+    pub fn hydrate_videos_from_sidecars(&self, videos: &mut [Video]) {
+        for video in videos {
+            self.apply_sidecar_metadata_to_video(video);
+        }
+    }
+
     /// Loads cached video metadata from disk.
     ///
     /// Metadata from per-video sidecar files is merged into each loaded video.
@@ -318,20 +341,8 @@ impl Storage {
     /// Cached videos, or an empty vector if cache loading/parsing fails.
     pub fn load_videos(&self) -> Vec<Video> {
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
-        let mut videos: Vec<Video> =
-            try_load_json_file(&path, "videos cache").unwrap_or_default();
-
-        for video in &mut videos {
-            if let Some(sidecar) = self.read_video_sidecar(video.video_id()) {
-                if let Some(transcript) = sidecar.transcript {
-                    video.set_transcript(Some(transcript));
-                }
-                if let Some(ai_summary) = sidecar.ai_summary {
-                    video.set_ai_summary(Some(ai_summary));
-                }
-            }
-        }
-
+        let mut videos: Vec<Video> = try_load_json_file(&path, "videos cache").unwrap_or_default();
+        self.hydrate_videos_from_sidecars(&mut videos);
         videos
     }
 
@@ -568,6 +579,41 @@ mod tests {
             .expect("Video should be present");
         assert_eq!(mixed_loaded.transcript(), Some("sidecar transcript"));
         assert_eq!(mixed_loaded.ai_summary(), Some("sidecar summary"));
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn hydrate_videos_from_sidecars_applies_metadata_for_existing_ids() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+
+        storage
+            .write_video_sidecar(
+                "side789",
+                &VideoMetadataSidecar {
+                    transcript: Some("sidecar transcript".to_string()),
+                    ai_summary: Some("sidecar summary".to_string()),
+                },
+            )
+            .expect("Writing sidecar should succeed");
+
+        let mut refreshed_videos = vec![sample_video("side789"), sample_video("none0000000")];
+        storage.hydrate_videos_from_sidecars(&mut refreshed_videos);
+
+        let hydrated = refreshed_videos
+            .iter()
+            .find(|video| video.video_id() == "side789")
+            .expect("Hydrated video should be present");
+        assert_eq!(hydrated.transcript(), Some("sidecar transcript"));
+        assert_eq!(hydrated.ai_summary(), Some("sidecar summary"));
+
+        let untouched = refreshed_videos
+            .iter()
+            .find(|video| video.video_id() == "none0000000")
+            .expect("Untouched video should be present");
+        assert_eq!(untouched.transcript(), None);
+        assert_eq!(untouched.ai_summary(), None);
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }

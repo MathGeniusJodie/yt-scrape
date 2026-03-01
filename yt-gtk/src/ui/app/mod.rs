@@ -21,10 +21,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 use cards::create_context_menu;
-use refresh::{
-    download_missing_thumbnails, merge_cached_video_fields, refresh_video_lists,
-    refresh_watch_later_tab,
-};
+use refresh::{download_missing_thumbnails, refresh_video_lists, refresh_watch_later_tab};
 use summary::maybe_prefetch_summary_for_watch_later;
 
 struct AppState {
@@ -59,7 +56,8 @@ impl AppState {
     }
 
     fn rebuild_video_index(&mut self) {
-        self.video_index_by_id = self.videos
+        self.video_index_by_id = self
+            .videos
             .iter()
             .enumerate()
             .map(|(i, v)| (v.video_id().to_string(), i))
@@ -80,6 +78,40 @@ impl AppState {
     fn video_by_id_mut(&mut self, video_id: &str) -> Option<&mut Video> {
         let index = *self.video_index_by_id.get(video_id)?;
         self.videos.get_mut(index)
+    }
+
+    fn cache_video_transcript(&mut self, video_id: &str, transcript: String) -> bool {
+        if let Err(save_error) = self.storage.save_video_transcript(video_id, &transcript) {
+            error!(
+                "Failed to persist transcript sidecar for {}: {}",
+                video_id, save_error
+            );
+            return false;
+        }
+
+        if let Some(video) = self.video_by_id_mut(video_id) {
+            video.set_transcript(Some(transcript));
+            return true;
+        }
+
+        false
+    }
+
+    fn cache_video_ai_summary(&mut self, video_id: &str, ai_summary: String) -> bool {
+        if let Err(save_error) = self.storage.save_video_ai_summary(video_id, &ai_summary) {
+            error!(
+                "Failed to persist summary sidecar for {}: {}",
+                video_id, save_error
+            );
+            return false;
+        }
+
+        if let Some(video) = self.video_by_id_mut(video_id) {
+            video.set_ai_summary(Some(ai_summary));
+            return true;
+        }
+
+        false
     }
 
     fn http_client(&self) -> &reqwest::Client {
@@ -280,9 +312,11 @@ fn spawn_refresh_progress_updates(
                 }
                 FetchProgress::ChannelComplete { channel, count } => {
                     completed_channels += 1;
-                    let failed = (failed_channels > 0)
-                        .then(|| format!(", {failed_channels} failed"))
-                        .unwrap_or_default();
+                    let failed = if failed_channels > 0 {
+                        format!(", {failed_channels} failed")
+                    } else {
+                        String::new()
+                    };
                     status_label.set_text(&format!(
                         "Fetching feeds ({completed_channels}/{total_channels}{failed})..."
                     ));
@@ -348,7 +382,7 @@ fn spawn_refreshed_videos_apply(
     glib::MainContext::default().spawn_local(async move {
         if let Ok(mut videos) = videos_rx.recv().await {
             let mut state = state_rc.borrow_mut();
-            merge_cached_video_fields(&mut videos, &state.videos);
+            state.storage.hydrate_videos_from_sidecars(&mut videos);
             if let Err(save_error) = state.storage.save_videos(&videos) {
                 error!("Failed to persist refreshed videos cache: {}", save_error);
             }

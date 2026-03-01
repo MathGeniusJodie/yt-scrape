@@ -6,28 +6,9 @@ use crate::data::{Tab, Video};
 use futures::stream::{self, StreamExt};
 use log::warn;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-
-pub(super) fn merge_cached_video_fields(videos: &mut [Video], cached_videos: &[Video]) {
-    let cached_by_id: HashMap<&str, &Video> = cached_videos
-        .iter()
-        .map(|video| (video.video_id(), video))
-        .collect();
-
-    for video in videos {
-        if let Some(cached) = cached_by_id.get(video.video_id()) {
-            if video.transcript().is_none() {
-                video.set_transcript(cached.transcript().map(ToString::to_string));
-            }
-            if video.ai_summary().is_none() {
-                video.set_ai_summary(cached.ai_summary().map(ToString::to_string));
-            }
-        }
-    }
-}
 
 pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &UiContext) {
     let state_ref = state_rc.borrow();

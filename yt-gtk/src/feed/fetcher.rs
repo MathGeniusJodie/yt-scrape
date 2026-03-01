@@ -134,9 +134,15 @@ struct PlaylistThumbnails {
 
 impl PlaylistThumbnails {
     fn preferred_url(&self) -> Option<String> {
-        [&self.medium, &self.high, &self.standard, &self.maxres, &self.default_thumbnail]
-            .into_iter()
-            .find_map(|t| t.as_ref().map(|t| t.url.clone()))
+        [
+            &self.medium,
+            &self.high,
+            &self.standard,
+            &self.maxres,
+            &self.default_thumbnail,
+        ]
+        .into_iter()
+        .find_map(|t| t.as_ref().map(|t| t.url.clone()))
     }
 }
 

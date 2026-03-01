@@ -1,9 +1,5 @@
 # Structural Improvements
 
-## High Priority
-
-- [ ] **Fix dual video storage / three-way sync** — `AppState.videos` + storage sidecars require three separate writes (persist sidecar, reload, update AppState) after fetching summary/transcript. Make sidecars the single source of truth with lazy loading, or load once at startup and keep in sync.
-
 - [ ] **Split `AppState` by concern** (`src/ui/app/mod.rs:30-88`) — Currently holds videos, watch-later state, HTTP client, storage, in-progress tracking, and video index. Extract `VideoCache` (videos + index + storage) and `WatchLaterManager` to separate persistence from UI state.
 
 - [ ] **Split `UiContext` by concern** (`src/ui/app/mod.rs:90-100`) — Mixes window refs, layout widgets, `Arc<Runtime>`, UI state, and button tracking. Separate into `WindowContext`, `LayoutContext`, and `UiState`.
