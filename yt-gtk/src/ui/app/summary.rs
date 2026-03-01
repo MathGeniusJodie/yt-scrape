@@ -1,138 +1,59 @@
 use super::refresh::refresh_video_lists;
+use super::summary_generator::{
+    StartSummaryGenerationError, SummaryGenerationMode, SummaryGenerator,
+};
 use super::{create_readonly_text_scroller, AppState, UiContext};
 use crate::cache::fetch_transcript;
-use crate::data::Video;
-use crate::gemini::{summarize_video_streaming, StreamingMessage};
 use crate::ui::dialogs::show_text_dialog;
 
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Orientation};
 use log::error;
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
-
-#[derive(Clone)]
-struct SummaryGenerationRequest {
-    video_id: String,
-    video_url: String,
-    video_title: String,
-    channel_name: String,
-}
-
-impl SummaryGenerationRequest {
-    fn from_video(video: &Video) -> Self {
-        Self {
-            video_id: video.video_id().to_string(),
-            video_url: video.watch_url(),
-            video_title: video.title().to_string(),
-            channel_name: video.channel_name().to_string(),
-        }
-    }
-}
-
-fn summary_generation_request(
-    state: &AppState,
-    video_id: &str,
-) -> Option<SummaryGenerationRequest> {
-    state
-        .video_by_id(video_id)
-        .map(SummaryGenerationRequest::from_video)
-}
-
-fn spawn_summary_generation_stream(
-    runtime: Arc<Runtime>,
-    client: reqwest::Client,
-    request: SummaryGenerationRequest,
-    transcripts_work_dir: PathBuf,
-) -> async_channel::Receiver<StreamingMessage> {
-    let (tx, rx) = async_channel::unbounded::<StreamingMessage>();
-
-    runtime.spawn(async move {
-        summarize_video_streaming(
-            client,
-            &request.video_id,
-            &request.video_url,
-            &request.video_title,
-            &request.channel_name,
-            &transcripts_work_dir,
-            tx,
-        )
-        .await;
-    });
-
-    rx
-}
-
-fn persist_summary_to_cache(
-    state_rc: &Rc<RefCell<AppState>>,
-    video_id: &str,
-    summary: String,
-) -> bool {
-    let mut state = state_rc.borrow_mut();
-    state.summaries_in_progress.remove(video_id);
-    state.cache_video_ai_summary(video_id, summary)
-}
 
 pub(super) fn maybe_prefetch_summary_for_watch_later(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
     video_id: &str,
 ) {
-    let summary_request = {
-        let mut state = state_rc.borrow_mut();
-        let Some(video) = state.video_by_id(video_id) else {
-            error!("Cannot prefetch summary for missing video {}", video_id);
-            return;
+    let summary_generator = SummaryGenerator::new(ui_context.runtime.clone());
+    let generation_task =
+        match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Prefetch) {
+            Ok(task) => task,
+            Err(StartSummaryGenerationError::MissingVideo) => {
+                error!("Cannot prefetch summary for missing video {}", video_id);
+                return;
+            }
+            Err(
+                StartSummaryGenerationError::AlreadyCached
+                | StartSummaryGenerationError::AlreadyInProgress,
+            ) => {
+                return;
+            }
         };
-        let has_summary = video.has_ai_summary();
-        let request = SummaryGenerationRequest::from_video(video);
-
-        if has_summary || state.summaries_in_progress.contains(video_id) {
-            None
-        } else {
-            state.summaries_in_progress.insert(video_id.to_string());
-            Some(request)
-        }
-    };
-    let Some(request) = summary_request else {
-        return;
-    };
-
-    let (transcripts_work_dir, summary_client) = {
-        let state = state_rc.borrow();
-        (
-            state.storage.transcripts_work_dir().to_path_buf(),
-            state.http_client().clone(),
-        )
-    };
-    let result_rx = spawn_summary_generation_stream(
-        ui_context.runtime.clone(),
-        summary_client,
-        request.clone(),
-        transcripts_work_dir,
-    );
 
     let state_for_result = state_rc.clone();
     let ui_context_for_result = ui_context.clone();
-    let video_id_for_result = request.video_id.clone();
+    let summary_generator_for_result = summary_generator.clone();
 
     glib::MainContext::default().spawn_local(async move {
-        match collect_streaming_summary(result_rx).await {
-            Err(error) => {
-                state_for_result
-                    .borrow_mut()
-                    .summaries_in_progress
-                    .remove(&video_id_for_result);
+        let video_id_for_result = generation_task.video_id().to_string();
+        match generation_task.collect().await {
+            Err(generation_error) => {
+                summary_generator_for_result
+                    .clear_in_progress(&state_for_result, &video_id_for_result);
                 error!(
                     "Failed to prefetch summary for {}: {}",
-                    video_id_for_result, error
+                    video_id_for_result, generation_error
                 );
             }
             Ok(summary) => {
-                if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+                if summary_generator_for_result.persist_summary(
+                    &state_for_result,
+                    &video_id_for_result,
+                    summary,
+                ) {
                     refresh_video_lists(&state_for_result, &ui_context_for_result);
                 }
             }
@@ -143,30 +64,6 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
 fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
-}
-
-/// Collects all chunks from a streaming summary channel into a single trimmed string.
-///
-/// # Errors
-///
-/// Returns `Err` if the stream produces an error message or if the resulting summary is empty.
-async fn collect_streaming_summary(
-    rx: async_channel::Receiver<StreamingMessage>,
-) -> Result<String, String> {
-    let mut summary = String::new();
-    while let Ok(msg) = rx.recv().await {
-        match msg {
-            StreamingMessage::Chunk(text) => summary.push_str(&text),
-            StreamingMessage::Done => break,
-            StreamingMessage::Error(e) => return Err(e),
-        }
-    }
-    let summary = summary.trim().to_string();
-    if summary.is_empty() {
-        Err("Summary was empty".to_string())
-    } else {
-        Ok(summary)
-    }
 }
 
 fn start_summary_generation_for_dialog(
@@ -180,87 +77,59 @@ fn start_summary_generation_for_dialog(
     buffer.set_text(loading_text);
     regenerate_button.set_sensitive(false);
 
-    let summary_request = {
-        let mut state = state_rc.borrow_mut();
-        let request_data = summary_generation_request(&state, &video_id);
-        if request_data.is_some() {
-            state.summaries_in_progress.insert(video_id.clone());
-        }
-        request_data
-    };
-    let Some(summary_request) = summary_request else {
-        buffer.set_text("Error: Video is no longer available.");
-        regenerate_button.set_sensitive(true);
-        error!("Cannot generate summary for missing video {}", video_id);
-        return;
-    };
-
-    let (transcripts_work_dir, summary_client) = {
-        let state = state_rc.borrow();
-        (
-            state.storage.transcripts_work_dir().to_path_buf(),
-            state.http_client().clone(),
-        )
-    };
-    let result_rx = spawn_summary_generation_stream(
-        ui_context.runtime.clone(),
-        summary_client,
-        summary_request.clone(),
-        transcripts_work_dir,
-    );
+    let summary_generator = SummaryGenerator::new(ui_context.runtime.clone());
+    let generation_task =
+        match summary_generator.start(&state_rc, &video_id, SummaryGenerationMode::Interactive) {
+            Ok(task) => task,
+            Err(StartSummaryGenerationError::MissingVideo) => {
+                buffer.set_text("Error: Video is no longer available.");
+                regenerate_button.set_sensitive(true);
+                error!("Cannot generate summary for missing video {}", video_id);
+                return;
+            }
+            Err(start_error) => {
+                buffer.set_text(&format!("Error: {}", start_error));
+                regenerate_button.set_sensitive(true);
+                return;
+            }
+        };
 
     let state_for_result = state_rc.clone();
     let ui_context_for_result = ui_context.clone();
-    let video_id_for_result = summary_request.video_id.clone();
     let buffer_for_result = buffer.clone();
     let button_for_result = regenerate_button.clone();
+    let summary_generator_for_result = summary_generator.clone();
 
     glib::MainContext::default().spawn_local(async move {
-        let mut summary = String::new();
+        let video_id_for_result = generation_task.video_id().to_string();
         let mut received_chunk = false;
-        let mut summary_error = None;
-
-        while let Ok(message) = result_rx.recv().await {
-            match message {
-                StreamingMessage::Chunk(text) => {
-                    if !received_chunk {
-                        buffer_for_result.set_text("");
-                        received_chunk = true;
-                    }
-                    insert_stream_chunk(&buffer_for_result, &text);
-                    summary.push_str(&text);
+        let generation_result = generation_task
+            .collect_with_chunks(|text| {
+                if !received_chunk {
+                    buffer_for_result.set_text("");
+                    received_chunk = true;
                 }
-                StreamingMessage::Done => break,
-                StreamingMessage::Error(error_text) => {
-                    summary_error = Some(error_text);
-                    break;
-                }
-            }
-        }
+                insert_stream_chunk(&buffer_for_result, text);
+            })
+            .await;
 
         button_for_result.set_sensitive(true);
 
-        if let Some(error) = summary_error {
-            state_for_result
-                .borrow_mut()
-                .summaries_in_progress
-                .remove(&video_id_for_result);
-            buffer_for_result.set_text(&format!("Error: {}", error));
-            return;
-        }
-
-        let summary = summary.trim().to_string();
-        if summary.is_empty() {
-            state_for_result
-                .borrow_mut()
-                .summaries_in_progress
-                .remove(&video_id_for_result);
-            buffer_for_result.set_text("Error: Summary was empty");
-            return;
-        }
-
-        if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
-            refresh_video_lists(&state_for_result, &ui_context_for_result);
+        match generation_result {
+            Err(generation_error) => {
+                summary_generator_for_result
+                    .clear_in_progress(&state_for_result, &video_id_for_result);
+                buffer_for_result.set_text(&format!("Error: {}", generation_error));
+            }
+            Ok(summary) => {
+                if summary_generator_for_result.persist_summary(
+                    &state_for_result,
+                    &video_id_for_result,
+                    summary,
+                ) {
+                    refresh_video_lists(&state_for_result, &ui_context_for_result);
+                }
+            }
         }
     });
 }

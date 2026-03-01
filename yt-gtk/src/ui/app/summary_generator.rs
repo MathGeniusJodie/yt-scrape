@@ -1,0 +1,475 @@
+use super::AppState;
+use crate::data::Video;
+use crate::gemini::{summarize_video_streaming, StreamingMessage};
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::runtime::Runtime;
+
+#[derive(Clone)]
+struct SummaryGenerationRequest {
+    video_id: String,
+    video_url: String,
+    video_title: String,
+    channel_name: String,
+}
+
+impl SummaryGenerationRequest {
+    fn from_video(video: &Video) -> Self {
+        Self {
+            video_id: video.video_id().to_string(),
+            video_url: video.watch_url(),
+            video_title: video.title().to_string(),
+            channel_name: video.channel_name().to_string(),
+        }
+    }
+}
+
+fn spawn_summary_generation_stream(
+    runtime: Arc<Runtime>,
+    client: reqwest::Client,
+    request: SummaryGenerationRequest,
+    transcripts_work_dir: std::path::PathBuf,
+) -> async_channel::Receiver<StreamingMessage> {
+    let (tx, rx) = async_channel::unbounded::<StreamingMessage>();
+
+    runtime.spawn(async move {
+        summarize_video_streaming(
+            client,
+            &request.video_id,
+            &request.video_url,
+            &request.video_title,
+            &request.channel_name,
+            &transcripts_work_dir,
+            tx,
+        )
+        .await;
+    });
+
+    rx
+}
+
+/// Configures request guards for starting summary generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SummaryGenerationMode {
+    /// Skip generation if a summary exists or one is already running.
+    Prefetch,
+    /// Always start a new generation for explicit user actions.
+    Interactive,
+}
+
+impl SummaryGenerationMode {
+    const fn should_skip_cached(self) -> bool {
+        matches!(self, Self::Prefetch)
+    }
+
+    const fn should_skip_in_progress(self) -> bool {
+        matches!(self, Self::Prefetch)
+    }
+}
+
+/// Start-time validation errors for summary generation.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(super) enum StartSummaryGenerationError {
+    #[error("Video is no longer available.")]
+    MissingVideo,
+    #[error("Summary is already cached.")]
+    AlreadyCached,
+    #[error("Summary generation is already in progress.")]
+    AlreadyInProgress,
+}
+
+/// Stream-consumption errors for summary generation.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(super) enum SummaryGenerationError {
+    #[error("{0}")]
+    Stream(String),
+    #[error("Summary was empty")]
+    EmptySummary,
+}
+
+/// Service responsible for summary generation orchestration.
+#[derive(Clone)]
+pub(super) struct SummaryGenerator {
+    runtime: Arc<Runtime>,
+}
+
+impl SummaryGenerator {
+    /// Creates a generator backed by the application's async runtime.
+    pub(super) fn new(runtime: Arc<Runtime>) -> Self {
+        Self { runtime }
+    }
+
+    /// Validates inputs and starts a background summary stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartSummaryGenerationError`] when generation should not start.
+    pub(super) fn start(
+        &self,
+        state_rc: &Rc<RefCell<AppState>>,
+        video_id: &str,
+        mode: SummaryGenerationMode,
+    ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
+        let request = {
+            let mut state = state_rc.borrow_mut();
+            prepare_summary_generation_request(&mut state, video_id, mode)?
+        };
+
+        let (transcripts_work_dir, summary_client) = {
+            let state = state_rc.borrow();
+            (
+                state.storage.transcripts_work_dir().to_path_buf(),
+                state.http_client().clone(),
+            )
+        };
+
+        let request_video_id = request.video_id.clone();
+        let result_rx = spawn_summary_generation_stream(
+            self.runtime.clone(),
+            summary_client,
+            request,
+            transcripts_work_dir,
+        );
+
+        Ok(SummaryGenerationTask {
+            video_id: request_video_id,
+            result_rx,
+        })
+    }
+
+    /// Removes a video's in-progress marker after a failed or cancelled generation.
+    pub(super) fn clear_in_progress(&self, state_rc: &Rc<RefCell<AppState>>, video_id: &str) {
+        state_rc.borrow_mut().summaries_in_progress.remove(video_id);
+    }
+
+    /// Persists the final summary and clears the in-progress marker.
+    pub(super) fn persist_summary(
+        &self,
+        state_rc: &Rc<RefCell<AppState>>,
+        video_id: &str,
+        summary: String,
+    ) -> bool {
+        let mut state = state_rc.borrow_mut();
+        state.summaries_in_progress.remove(video_id);
+        state.cache_video_ai_summary(video_id, summary)
+    }
+}
+
+/// In-flight summary stream handle.
+pub(super) struct SummaryGenerationTask {
+    video_id: String,
+    result_rx: async_channel::Receiver<StreamingMessage>,
+}
+
+impl SummaryGenerationTask {
+    /// Returns the video id associated with this task.
+    pub(super) fn video_id(&self) -> &str {
+        &self.video_id
+    }
+
+    /// Collects the full summary body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SummaryGenerationError`] if streaming fails or produces empty output.
+    pub(super) async fn collect(self) -> Result<String, SummaryGenerationError> {
+        self.collect_with_chunks(|_| {}).await
+    }
+
+    /// Collects a full summary while forwarding each chunk to `on_chunk`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SummaryGenerationError`] if streaming fails or produces empty output.
+    pub(super) async fn collect_with_chunks<F>(
+        self,
+        mut on_chunk: F,
+    ) -> Result<String, SummaryGenerationError>
+    where
+        F: FnMut(&str),
+    {
+        let mut summary = String::new();
+
+        while let Ok(message) = self.result_rx.recv().await {
+            match message {
+                StreamingMessage::Chunk(text) => {
+                    on_chunk(&text);
+                    summary.push_str(&text);
+                }
+                StreamingMessage::Done => break,
+                StreamingMessage::Error(error_text) => {
+                    return Err(SummaryGenerationError::Stream(error_text));
+                }
+            }
+        }
+
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            Err(SummaryGenerationError::EmptySummary)
+        } else {
+            Ok(summary)
+        }
+    }
+}
+
+fn prepare_summary_generation_request(
+    state: &mut AppState,
+    video_id: &str,
+    mode: SummaryGenerationMode,
+) -> Result<SummaryGenerationRequest, StartSummaryGenerationError> {
+    let Some(video) = state.video_by_id(video_id) else {
+        return Err(StartSummaryGenerationError::MissingVideo);
+    };
+
+    let has_cached_summary = video.has_ai_summary();
+    let request = SummaryGenerationRequest::from_video(video);
+
+    if mode.should_skip_cached() && has_cached_summary {
+        return Err(StartSummaryGenerationError::AlreadyCached);
+    }
+    if mode.should_skip_in_progress() && state.summaries_in_progress.contains(video_id) {
+        return Err(StartSummaryGenerationError::AlreadyInProgress);
+    }
+
+    state.summaries_in_progress.insert(video_id.to_string());
+    Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        prepare_summary_generation_request, StartSummaryGenerationError, SummaryGenerationError,
+        SummaryGenerationMode, SummaryGenerationTask,
+    };
+    use crate::cache::Storage;
+    use crate::data::Video;
+    use crate::gemini::StreamingMessage;
+    use crate::ui::app::AppState;
+
+    use chrono::Utc;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirs {
+        root: PathBuf,
+    }
+
+    impl TestDirs {
+        fn new() -> Self {
+            let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "yt-gtk-summary-generator-tests-{}-{}",
+                std::process::id(),
+                unique_id
+            ));
+            std::fs::create_dir_all(&root).expect("test directory must be creatable");
+            Self { root }
+        }
+
+        fn data_dir(&self) -> PathBuf {
+            self.root.join("data")
+        }
+
+        fn cache_dir(&self) -> PathBuf {
+            self.root.join("cache")
+        }
+
+        fn subs_file(&self) -> PathBuf {
+            self.root.join("subs.txt")
+        }
+    }
+
+    impl Drop for TestDirs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_video(video_id: &str) -> Video {
+        Video::new(
+            video_id.to_string(),
+            "channel-id".to_string(),
+            "Channel".to_string(),
+            "Video Title".to_string(),
+            Utc::now(),
+            "https://example.com/thumb.jpg".to_string(),
+            None,
+        )
+    }
+
+    fn test_state(videos: Vec<Video>) -> (AppState, TestDirs) {
+        let dirs = TestDirs::new();
+        let storage = Storage::new_at(dirs.data_dir(), dirs.cache_dir())
+            .expect("test storage must initialize");
+        let state = AppState::new(
+            videos,
+            HashSet::new(),
+            storage,
+            dirs.subs_file(),
+            reqwest::Client::new(),
+        );
+        (state, dirs)
+    }
+
+    #[test]
+    fn prepare_request_returns_missing_video_error() {
+        let (mut state, _dirs) = test_state(Vec::new());
+
+        let result = prepare_summary_generation_request(
+            &mut state,
+            "missing-video-id",
+            SummaryGenerationMode::Prefetch,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StartSummaryGenerationError::MissingVideo)
+        ));
+    }
+
+    #[test]
+    fn prepare_request_skips_prefetch_when_summary_cached() {
+        let video_id = "video-id";
+        let mut video = test_video(video_id);
+        video.set_ai_summary(Some("cached summary".to_string()));
+        let (mut state, _dirs) = test_state(vec![video]);
+
+        let result = prepare_summary_generation_request(
+            &mut state,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StartSummaryGenerationError::AlreadyCached)
+        ));
+        assert!(!state.summaries_in_progress.contains(video_id));
+    }
+
+    #[test]
+    fn prepare_request_skips_prefetch_when_already_running() {
+        let video_id = "video-id";
+        let (mut state, _dirs) = test_state(vec![test_video(video_id)]);
+        state.summaries_in_progress.insert(video_id.to_string());
+
+        let result = prepare_summary_generation_request(
+            &mut state,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StartSummaryGenerationError::AlreadyInProgress)
+        ));
+    }
+
+    #[test]
+    fn prepare_request_marks_in_progress_for_new_prefetch() {
+        let video_id = "video-id";
+        let (mut state, _dirs) = test_state(vec![test_video(video_id)]);
+
+        let result = prepare_summary_generation_request(
+            &mut state,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
+
+        assert!(result.is_ok());
+        assert!(state.summaries_in_progress.contains(video_id));
+    }
+
+    #[test]
+    fn prepare_request_allows_interactive_regeneration_when_cached() {
+        let video_id = "video-id";
+        let mut video = test_video(video_id);
+        video.set_ai_summary(Some("cached summary".to_string()));
+        let (mut state, _dirs) = test_state(vec![video]);
+        state.summaries_in_progress.insert(video_id.to_string());
+
+        let result = prepare_summary_generation_request(
+            &mut state,
+            video_id,
+            SummaryGenerationMode::Interactive,
+        )
+        .expect("interactive generation should start");
+
+        assert_eq!(result.video_id, video_id);
+        assert!(state.summaries_in_progress.contains(video_id));
+    }
+
+    #[tokio::test]
+    async fn collect_with_chunks_returns_trimmed_summary() {
+        let (tx, rx) = async_channel::unbounded();
+        tx.send(StreamingMessage::Chunk(" hello".to_string()))
+            .await
+            .expect("chunk send should succeed");
+        tx.send(StreamingMessage::Chunk(" world ".to_string()))
+            .await
+            .expect("chunk send should succeed");
+        tx.send(StreamingMessage::Done)
+            .await
+            .expect("done send should succeed");
+
+        let mut rendered = String::new();
+        let summary = SummaryGenerationTask {
+            video_id: "video-id".to_string(),
+            result_rx: rx,
+        }
+        .collect_with_chunks(|chunk| rendered.push_str(chunk))
+        .await
+        .expect("summary should be collected");
+
+        assert_eq!(summary, "hello world");
+        assert_eq!(rendered, " hello world ");
+    }
+
+    #[tokio::test]
+    async fn collect_returns_stream_error() {
+        let (tx, rx) = async_channel::unbounded();
+        tx.send(StreamingMessage::Error("provider failed".to_string()))
+            .await
+            .expect("error send should succeed");
+
+        let result = SummaryGenerationTask {
+            video_id: "video-id".to_string(),
+            result_rx: rx,
+        }
+        .collect()
+        .await;
+
+        assert_eq!(
+            result,
+            Err(SummaryGenerationError::Stream(
+                "provider failed".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_returns_empty_summary_error() {
+        let (tx, rx) = async_channel::unbounded();
+        tx.send(StreamingMessage::Chunk("   ".to_string()))
+            .await
+            .expect("chunk send should succeed");
+        tx.send(StreamingMessage::Done)
+            .await
+            .expect("done send should succeed");
+
+        let result = SummaryGenerationTask {
+            video_id: "video-id".to_string(),
+            result_rx: rx,
+        }
+        .collect()
+        .await;
+
+        assert_eq!(result, Err(SummaryGenerationError::EmptySummary));
+    }
+}

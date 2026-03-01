@@ -1,6 +1,7 @@
 mod cards;
 mod refresh;
 mod summary;
+mod summary_generator;
 
 use crate::cache::{download_video, Storage};
 use crate::data::Video;
