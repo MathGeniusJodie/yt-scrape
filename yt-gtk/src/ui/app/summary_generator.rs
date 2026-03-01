@@ -8,40 +8,22 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
-#[derive(Clone)]
-struct SummaryGenerationRequest {
-    video_id: String,
-    video_url: String,
-    video_title: String,
-    channel_name: String,
-}
-
-impl SummaryGenerationRequest {
-    fn from_video(video: &Video) -> Self {
-        Self {
-            video_id: video.video_id().to_string(),
-            video_url: video.watch_url(),
-            video_title: video.title().to_string(),
-            channel_name: video.channel_name().to_string(),
-        }
-    }
-}
-
 fn spawn_summary_generation_stream(
     runtime: Arc<Runtime>,
     client: reqwest::Client,
-    request: SummaryGenerationRequest,
+    video: Video,
     transcripts_work_dir: std::path::PathBuf,
 ) -> async_channel::Receiver<StreamingMessage> {
     let (tx, rx) = async_channel::unbounded::<StreamingMessage>();
 
     runtime.spawn(async move {
+        let video_url = video.watch_url();
         summarize_video_streaming(
             client,
-            &request.video_id,
-            &request.video_url,
-            &request.video_title,
-            &request.channel_name,
+            video.video_id(),
+            &video_url,
+            video.title(),
+            video.channel_name(),
             &transcripts_work_dir,
             tx,
         )
@@ -113,9 +95,9 @@ impl SummaryGenerator {
         video_id: &str,
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
-        let request = {
+        let video = {
             let mut state = state_rc.borrow_mut();
-            prepare_summary_generation_request(&mut state, video_id, mode)?
+            prepare_summary_generation_video(&mut state, video_id, mode)?
         };
 
         let (transcripts_work_dir, summary_client) = {
@@ -126,16 +108,16 @@ impl SummaryGenerator {
             )
         };
 
-        let request_video_id = request.video_id.clone();
+        let task_video_id = video.video_id().to_string();
         let result_rx = spawn_summary_generation_stream(
             self.runtime.clone(),
             summary_client,
-            request,
+            video,
             transcripts_work_dir,
         );
 
         Ok(SummaryGenerationTask {
-            video_id: request_video_id,
+            video_id: task_video_id,
             result_rx,
         })
     }
@@ -215,17 +197,16 @@ impl SummaryGenerationTask {
     }
 }
 
-fn prepare_summary_generation_request(
+fn prepare_summary_generation_video(
     state: &mut AppState,
     video_id: &str,
     mode: SummaryGenerationMode,
-) -> Result<SummaryGenerationRequest, StartSummaryGenerationError> {
-    let Some(video) = state.video_by_id(video_id) else {
+) -> Result<Video, StartSummaryGenerationError> {
+    let Some(video) = state.video_by_id(video_id).cloned() else {
         return Err(StartSummaryGenerationError::MissingVideo);
     };
 
     let has_cached_summary = video.has_ai_summary();
-    let request = SummaryGenerationRequest::from_video(video);
 
     if mode.should_skip_cached() && has_cached_summary {
         return Err(StartSummaryGenerationError::AlreadyCached);
@@ -235,13 +216,13 @@ fn prepare_summary_generation_request(
     }
 
     state.summaries_in_progress.insert(video_id.to_string());
-    Ok(request)
+    Ok(video)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_summary_generation_request, StartSummaryGenerationError, SummaryGenerationError,
+        prepare_summary_generation_video, StartSummaryGenerationError, SummaryGenerationError,
         SummaryGenerationMode, SummaryGenerationTask,
     };
     use crate::cache::Storage;
@@ -321,7 +302,7 @@ mod tests {
     fn prepare_request_returns_missing_video_error() {
         let (mut state, _dirs) = test_state(Vec::new());
 
-        let result = prepare_summary_generation_request(
+        let result = prepare_summary_generation_video(
             &mut state,
             "missing-video-id",
             SummaryGenerationMode::Prefetch,
@@ -340,11 +321,8 @@ mod tests {
         video.set_ai_summary(Some("cached summary".to_string()));
         let (mut state, _dirs) = test_state(vec![video]);
 
-        let result = prepare_summary_generation_request(
-            &mut state,
-            video_id,
-            SummaryGenerationMode::Prefetch,
-        );
+        let result =
+            prepare_summary_generation_video(&mut state, video_id, SummaryGenerationMode::Prefetch);
 
         assert!(matches!(
             result,
@@ -359,11 +337,8 @@ mod tests {
         let (mut state, _dirs) = test_state(vec![test_video(video_id)]);
         state.summaries_in_progress.insert(video_id.to_string());
 
-        let result = prepare_summary_generation_request(
-            &mut state,
-            video_id,
-            SummaryGenerationMode::Prefetch,
-        );
+        let result =
+            prepare_summary_generation_video(&mut state, video_id, SummaryGenerationMode::Prefetch);
 
         assert!(matches!(
             result,
@@ -376,11 +351,8 @@ mod tests {
         let video_id = "video-id";
         let (mut state, _dirs) = test_state(vec![test_video(video_id)]);
 
-        let result = prepare_summary_generation_request(
-            &mut state,
-            video_id,
-            SummaryGenerationMode::Prefetch,
-        );
+        let result =
+            prepare_summary_generation_video(&mut state, video_id, SummaryGenerationMode::Prefetch);
 
         assert!(result.is_ok());
         assert!(state.summaries_in_progress.contains(video_id));
@@ -394,14 +366,14 @@ mod tests {
         let (mut state, _dirs) = test_state(vec![video]);
         state.summaries_in_progress.insert(video_id.to_string());
 
-        let result = prepare_summary_generation_request(
+        let result = prepare_summary_generation_video(
             &mut state,
             video_id,
             SummaryGenerationMode::Interactive,
         )
         .expect("interactive generation should start");
 
-        assert_eq!(result.video_id, video_id);
+        assert_eq!(result.video_id(), video_id);
         assert!(state.summaries_in_progress.contains(video_id));
     }
 
