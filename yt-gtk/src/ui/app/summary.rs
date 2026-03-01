@@ -1,10 +1,8 @@
-use super::refresh::refresh_video_lists;
-use super::summary_generator::{
-    StartSummaryGenerationError, SummaryGenerationMode, SummaryGenerator,
-};
-use super::{create_readonly_text_scroller, AppState, UiContext};
+use super::refresh::refresh_video_summary_badges;
+use super::summary_generator::{StartSummaryGenerationError, SummaryGenerationMode};
+use super::{AppState, UiContext};
 use crate::cache::fetch_transcript;
-use crate::ui::dialogs::show_text_dialog;
+use crate::ui::dialogs::{create_readonly_text_scroller, show_text_dialog};
 
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Orientation};
@@ -17,8 +15,7 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
     ui_context: &UiContext,
     video_id: &str,
 ) {
-    let summary_generator =
-        SummaryGenerator::new(ui_context.runtime.clone(), ui_context.http_client.clone());
+    let summary_generator = ui_context.async_ctx.summary_generator.clone();
     let generation_task =
         match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Prefetch) {
             Ok(task) => task,
@@ -42,8 +39,7 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
         let video_id_for_result = generation_task.video_id().to_string();
         match generation_task.collect().await {
             Err(generation_error) => {
-                summary_generator_for_result
-                    .clear_in_progress(&state_for_result, &video_id_for_result);
+                summary_generator_for_result.clear_in_progress(&video_id_for_result);
                 error!(
                     "Failed to prefetch summary for {}: {}",
                     video_id_for_result, generation_error
@@ -62,7 +58,11 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
                     return;
                 }
 
-                refresh_video_lists(&state_for_result, &ui_context_for_result);
+                refresh_video_summary_badges(
+                    &state_for_result,
+                    &ui_context_for_result,
+                    &video_id_for_result,
+                );
             }
         }
     });
@@ -84,8 +84,7 @@ fn start_summary_generation_for_dialog(
     buffer.set_text(loading_text);
     regenerate_button.set_sensitive(false);
 
-    let summary_generator =
-        SummaryGenerator::new(ui_context.runtime.clone(), ui_context.http_client.clone());
+    let summary_generator = ui_context.async_ctx.summary_generator.clone();
     let generation_task =
         match summary_generator.start(&state_rc, &video_id, SummaryGenerationMode::Interactive) {
             Ok(task) => task,
@@ -125,8 +124,7 @@ fn start_summary_generation_for_dialog(
 
         match generation_result {
             Err(generation_error) => {
-                summary_generator_for_result
-                    .clear_in_progress(&state_for_result, &video_id_for_result);
+                summary_generator_for_result.clear_in_progress(&video_id_for_result);
                 buffer_for_result.set_text(&format!("Error: {}", generation_error));
             }
             Ok(summary) => {
@@ -143,7 +141,11 @@ fn start_summary_generation_for_dialog(
                     return;
                 }
 
-                refresh_video_lists(&state_for_result, &ui_context_for_result);
+                refresh_video_summary_badges(
+                    &state_for_result,
+                    &ui_context_for_result,
+                    &video_id_for_result,
+                );
             }
         }
     });
@@ -171,7 +173,7 @@ pub(super) fn show_summary_dialog(
 
     let dialog = gtk::Dialog::with_buttons(
         Some(&format!("Summary: {}", video_title)),
-        Some(&ui_context.window),
+        Some(&ui_context.widgets.window),
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
         &[("Close", gtk::ResponseType::Close)],
     );
@@ -261,7 +263,7 @@ pub(super) fn show_transcript_dialog(
     // Check if we already have the transcript cached
     if let Some(transcript) = cached_transcript {
         show_text_dialog(
-            &ui_context.window,
+            &ui_context.widgets.window,
             &format!("Transcript: {}", video_title),
             &transcript,
         );
@@ -271,7 +273,7 @@ pub(super) fn show_transcript_dialog(
     // Need to fetch transcript
     let dialog = gtk::Dialog::with_buttons(
         Some(&format!("Transcript: {}", video_title)),
-        Some(&ui_context.window),
+        Some(&ui_context.widgets.window),
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
         &[("Close", gtk::ResponseType::Close)],
     );
@@ -293,7 +295,7 @@ pub(super) fn show_transcript_dialog(
     let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
 
     let video_id_for_thread = video_id.to_string();
-    let runtime = ui_context.runtime.clone();
+    let runtime = ui_context.async_ctx.runtime.clone();
     runtime.spawn(async move {
         match fetch_transcript(&video_id_for_thread, &work_dir).await {
             Ok(transcript) => {

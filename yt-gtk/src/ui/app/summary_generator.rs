@@ -3,8 +3,9 @@ use crate::data::Video;
 use crate::gemini::{summarize_video_streaming, StreamingMessage};
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
@@ -77,6 +78,7 @@ pub(super) enum SummaryGenerationError {
 pub(super) struct SummaryGenerator {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
+    summaries_in_progress: Arc<Mutex<HashSet<String>>>,
 }
 
 impl SummaryGenerator {
@@ -85,6 +87,7 @@ impl SummaryGenerator {
         Self {
             runtime,
             http_client,
+            summaries_in_progress: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -100,8 +103,12 @@ impl SummaryGenerator {
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
         let video = {
-            let mut state = state_rc.borrow_mut();
-            prepare_summary_generation_video(&mut state, video_id, mode)?
+            let state = state_rc.borrow();
+            let mut summaries_in_progress = self
+                .summaries_in_progress
+                .lock()
+                .expect("summary in-progress mutex must not be poisoned");
+            prepare_summary_generation_video(&state, &mut summaries_in_progress, video_id, mode)?
         };
 
         let transcripts_work_dir = {
@@ -124,8 +131,11 @@ impl SummaryGenerator {
     }
 
     /// Removes a video's in-progress marker after a failed or cancelled generation.
-    pub(super) fn clear_in_progress(&self, state_rc: &Rc<RefCell<AppState>>, video_id: &str) {
-        state_rc.borrow_mut().summaries_in_progress.remove(video_id);
+    pub(super) fn clear_in_progress(&self, video_id: &str) {
+        self.summaries_in_progress
+            .lock()
+            .expect("summary in-progress mutex must not be poisoned")
+            .remove(video_id);
     }
 
     /// Persists the final summary and clears the in-progress marker.
@@ -135,9 +145,13 @@ impl SummaryGenerator {
         video_id: &str,
         summary: String,
     ) -> Result<(), CacheVideoError> {
-        let mut state = state_rc.borrow_mut();
-        state.summaries_in_progress.remove(video_id);
-        state.cache_video_ai_summary(video_id, summary)
+        self.summaries_in_progress
+            .lock()
+            .expect("summary in-progress mutex must not be poisoned")
+            .remove(video_id);
+        state_rc
+            .borrow_mut()
+            .cache_video_ai_summary(video_id, summary)
     }
 }
 
@@ -199,7 +213,8 @@ impl SummaryGenerationTask {
 }
 
 fn prepare_summary_generation_video(
-    state: &mut AppState,
+    state: &AppState,
+    summaries_in_progress: &mut HashSet<String>,
     video_id: &str,
     mode: SummaryGenerationMode,
 ) -> Result<Video, StartSummaryGenerationError> {
@@ -212,11 +227,11 @@ fn prepare_summary_generation_video(
     if mode.should_skip_cached() && has_cached_summary {
         return Err(StartSummaryGenerationError::AlreadyCached);
     }
-    if mode.should_skip_in_progress() && state.summaries_in_progress.contains(video_id) {
+    if mode.should_skip_in_progress() && summaries_in_progress.contains(video_id) {
         return Err(StartSummaryGenerationError::AlreadyInProgress);
     }
 
-    state.summaries_in_progress.insert(video_id.to_string());
+    summaries_in_progress.insert(video_id.to_string());
     Ok(video)
 }
 
@@ -291,10 +306,12 @@ mod tests {
 
     #[test]
     fn prepare_request_returns_missing_video_error() {
-        let (mut state, _dirs) = test_state(Vec::new());
+        let (state, _dirs) = test_state(Vec::new());
+        let mut summaries_in_progress = HashSet::new();
 
         let result = prepare_summary_generation_video(
-            &mut state,
+            &state,
+            &mut summaries_in_progress,
             "missing-video-id",
             SummaryGenerationMode::Prefetch,
         );
@@ -310,26 +327,35 @@ mod tests {
         let video_id = "video-id";
         let mut video = test_video(video_id);
         video.set_ai_summary(Some("cached summary".to_string()));
-        let (mut state, _dirs) = test_state(vec![video]);
+        let (state, _dirs) = test_state(vec![video]);
+        let mut summaries_in_progress = HashSet::new();
 
-        let result =
-            prepare_summary_generation_video(&mut state, video_id, SummaryGenerationMode::Prefetch);
+        let result = prepare_summary_generation_video(
+            &state,
+            &mut summaries_in_progress,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
 
         assert!(matches!(
             result,
             Err(StartSummaryGenerationError::AlreadyCached)
         ));
-        assert!(!state.summaries_in_progress.contains(video_id));
+        assert!(!summaries_in_progress.contains(video_id));
     }
 
     #[test]
     fn prepare_request_skips_prefetch_when_already_running() {
         let video_id = "video-id";
-        let (mut state, _dirs) = test_state(vec![test_video(video_id)]);
-        state.summaries_in_progress.insert(video_id.to_string());
+        let (state, _dirs) = test_state(vec![test_video(video_id)]);
+        let mut summaries_in_progress = HashSet::from([video_id.to_string()]);
 
-        let result =
-            prepare_summary_generation_video(&mut state, video_id, SummaryGenerationMode::Prefetch);
+        let result = prepare_summary_generation_video(
+            &state,
+            &mut summaries_in_progress,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
 
         assert!(matches!(
             result,
@@ -340,13 +366,18 @@ mod tests {
     #[test]
     fn prepare_request_marks_in_progress_for_new_prefetch() {
         let video_id = "video-id";
-        let (mut state, _dirs) = test_state(vec![test_video(video_id)]);
+        let (state, _dirs) = test_state(vec![test_video(video_id)]);
+        let mut summaries_in_progress = HashSet::new();
 
-        let result =
-            prepare_summary_generation_video(&mut state, video_id, SummaryGenerationMode::Prefetch);
+        let result = prepare_summary_generation_video(
+            &state,
+            &mut summaries_in_progress,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
 
         assert!(result.is_ok());
-        assert!(state.summaries_in_progress.contains(video_id));
+        assert!(summaries_in_progress.contains(video_id));
     }
 
     #[test]
@@ -354,18 +385,19 @@ mod tests {
         let video_id = "video-id";
         let mut video = test_video(video_id);
         video.set_ai_summary(Some("cached summary".to_string()));
-        let (mut state, _dirs) = test_state(vec![video]);
-        state.summaries_in_progress.insert(video_id.to_string());
+        let (state, _dirs) = test_state(vec![video]);
+        let mut summaries_in_progress = HashSet::from([video_id.to_string()]);
 
         let result = prepare_summary_generation_video(
-            &mut state,
+            &state,
+            &mut summaries_in_progress,
             video_id,
             SummaryGenerationMode::Interactive,
         )
         .expect("interactive generation should start");
 
         assert_eq!(result.video_id(), video_id);
-        assert!(state.summaries_in_progress.contains(video_id));
+        assert!(summaries_in_progress.contains(video_id));
     }
 
     #[tokio::test]

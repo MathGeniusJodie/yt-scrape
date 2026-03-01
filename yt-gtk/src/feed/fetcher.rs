@@ -166,6 +166,7 @@ enum ChannelFetchResult {
 
 /// Fetch all feeds from the given channel IDs
 pub async fn fetch_all_feeds(
+    client: &reqwest::Client,
     channel_ids: Vec<String>,
     tx: Sender<FetchProgress>,
 ) -> anyhow::Result<Vec<Video>> {
@@ -174,11 +175,6 @@ pub async fn fetch_all_feeds(
 
     let api_key = std::env::var("GOOGLE_API_KEY")
         .context("GOOGLE_API_KEY is not set. Set it before refreshing feeds.")?;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .gzip(true)
-        .build()?;
 
     let mut all_videos = Vec::new();
     let mut successful_channels = 0usize;

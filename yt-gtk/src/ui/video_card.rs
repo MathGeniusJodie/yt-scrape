@@ -12,6 +12,54 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+/// Widget handles for an individual video card.
+#[derive(Clone)]
+pub struct VideoCardWidgets {
+    root: EventBox,
+    watch_later_toggle: gtk::Button,
+    summary_button: gtk::Button,
+    thumbnail: DrawingArea,
+    thumbnail_pixbuf: Rc<RefCell<Option<Pixbuf>>>,
+}
+
+impl VideoCardWidgets {
+    /// Returns the card root widget.
+    pub fn root(&self) -> &EventBox {
+        &self.root
+    }
+
+    /// Returns the Watch Later toggle button.
+    pub fn watch_later_toggle(&self) -> &gtk::Button {
+        &self.watch_later_toggle
+    }
+
+    /// Returns the AI summary button.
+    pub fn summary_button(&self) -> &gtk::Button {
+        &self.summary_button
+    }
+
+    /// Shows or hides the AI summary button.
+    pub fn set_summary_available(&self, has_summary: bool) {
+        self.summary_button.set_visible(has_summary);
+    }
+
+    /// Reloads the thumbnail image from disk and redraws the card.
+    pub fn refresh_thumbnail(&self, thumbnail_path: &Path) {
+        *self.thumbnail_pixbuf.borrow_mut() = load_thumbnail(thumbnail_path);
+        self.thumbnail.queue_draw();
+    }
+}
+
+fn load_thumbnail(thumbnail_path: &Path) -> Option<Pixbuf> {
+    if !thumbnail_path.exists() {
+        return None;
+    }
+
+    Pixbuf::from_file(thumbnail_path)
+        .ok()
+        .map(|pixbuf| crop_to_16_9(&pixbuf))
+}
+
 /// Create a video card widget
 ///
 /// # Arguments
@@ -24,14 +72,14 @@ use std::rc::Rc;
 ///
 /// # Returns
 ///
-/// A tuple of `(card_event_box, watch_later_button, optional_summary_button)`.
+/// Widget handles for the created card.
 pub fn create_video_card(
     video: &Video,
     thumbnail_path: &Path,
     is_watch_later: bool,
     is_downloaded: bool,
     has_ai_summary: bool,
-) -> (EventBox, gtk::Button, Option<gtk::Button>) {
+) -> VideoCardWidgets {
     let event_box = EventBox::new();
     event_box.set_above_child(false);
     event_box.set_hexpand(false);
@@ -51,13 +99,7 @@ pub fn create_video_card(
     thumbnail.set_vexpand(false);
 
     // Load the cropped 16:9 pixbuf
-    let pixbuf: Rc<RefCell<Option<Pixbuf>>> = Rc::new(RefCell::new(None));
-    if thumbnail_path.exists() {
-        if let Ok(pb) = Pixbuf::from_file(thumbnail_path) {
-            let cropped = crop_to_16_9(&pb);
-            *pixbuf.borrow_mut() = Some(cropped);
-        }
-    }
+    let pixbuf: Rc<RefCell<Option<Pixbuf>>> = Rc::new(RefCell::new(load_thumbnail(thumbnail_path)));
 
     let pixbuf_for_draw = pixbuf.clone();
     thumbnail.connect_draw(move |widget, cr| {
@@ -184,23 +226,26 @@ pub fn create_video_card(
         status_box.pack_end(&downloaded_badge, false, false, 0);
     }
 
-    let mut ai_summary_button = None;
-    if has_ai_summary {
-        let summary_button = gtk::Button::with_label("AI");
-        summary_button.set_widget_name("status-ai-summary-button");
-        summary_button.set_relief(gtk::ReliefStyle::None);
-        summary_button.set_can_focus(false);
-        summary_button.set_tooltip_text(Some("Show cached AI summary"));
-        status_box.pack_end(&summary_button, false, false, 0);
-        ai_summary_button = Some(summary_button);
-    }
+    let summary_button = gtk::Button::with_label("AI");
+    summary_button.set_widget_name("status-ai-summary-button");
+    summary_button.set_relief(gtk::ReliefStyle::None);
+    summary_button.set_can_focus(false);
+    summary_button.set_tooltip_text(Some("Show cached AI summary"));
+    status_box.pack_end(&summary_button, false, false, 0);
+    summary_button.set_visible(has_ai_summary);
 
     content_box.pack_start(&status_box, false, false, 0);
 
     card.pack_start(&content_box, false, false, 0);
 
     event_box.add(&card);
-    (event_box, watch_later_toggle, ai_summary_button)
+    VideoCardWidgets {
+        root: event_box,
+        watch_later_toggle,
+        summary_button,
+        thumbnail,
+        thumbnail_pixbuf: pixbuf,
+    }
 }
 
 /// Update the Watch Later toggle visuals for a card button.

@@ -6,7 +6,7 @@ mod summary_generator;
 use crate::cache::{download_video, Storage};
 use crate::data::Video;
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
-use crate::ui::video_card::set_watch_later_toggle_state;
+use crate::ui::video_card::VideoCardWidgets;
 
 use gtk::prelude::*;
 use gtk::{
@@ -24,13 +24,16 @@ use thiserror::Error;
 use tokio::runtime::Runtime;
 
 use cards::create_context_menu;
-use refresh::{download_missing_thumbnails, refresh_video_lists, refresh_watch_later_tab};
+use refresh::{
+    download_missing_thumbnails, refresh_video_lists, refresh_video_thumbnails,
+    sync_watch_later_card, update_watch_later_toggles,
+};
 use summary::maybe_prefetch_summary_for_watch_later;
+use summary_generator::SummaryGenerator;
 
 struct AppState {
     videos: IndexMap<String, Video>,
     watch_later: HashSet<String>,
-    summaries_in_progress: HashSet<String>,
     storage: Storage,
 }
 
@@ -47,26 +50,23 @@ pub(super) enum CacheVideoError {
     MissingVideo { video_id: String },
 }
 
-fn index_videos_by_id(videos: Vec<Video>) -> IndexMap<String, Video> {
-    let mut indexed = IndexMap::with_capacity(videos.len());
-    for video in videos {
-        indexed.insert(video.video_id().to_string(), video);
-    }
-    indexed
-}
-
 impl AppState {
     fn new(videos: Vec<Video>, watch_later: HashSet<String>, storage: Storage) -> Self {
         Self {
-            videos: index_videos_by_id(videos),
+            videos: videos
+                .into_iter()
+                .map(|video| (video.video_id().to_string(), video))
+                .collect(),
             watch_later,
-            summaries_in_progress: HashSet::new(),
             storage,
         }
     }
 
     fn set_videos(&mut self, videos: Vec<Video>) {
-        self.videos = index_videos_by_id(videos);
+        self.videos = videos
+            .into_iter()
+            .map(|video| (video.video_id().to_string(), video))
+            .collect();
     }
 
     fn video_by_id(&self, video_id: &str) -> Option<&Video> {
@@ -77,48 +77,26 @@ impl AppState {
         self.videos.get_mut(video_id)
     }
 
-    fn cache_video_sidecar<Persist, Update>(
+    fn cache_video_transcript(
         &mut self,
         video_id: &str,
-        value: String,
-        sidecar_name: &'static str,
-        persist: Persist,
-        update: Update,
-    ) -> Result<(), CacheVideoError>
-    where
-        Persist: FnOnce(&Storage, &str, &str) -> anyhow::Result<()>,
-        Update: FnOnce(&mut Video, String),
-    {
-        persist(&self.storage, video_id, &value).map_err(|source| CacheVideoError::Persist {
-            video_id: video_id.to_string(),
-            sidecar_name,
-            source,
-        })?;
+        transcript: String,
+    ) -> Result<(), CacheVideoError> {
+        self.storage
+            .save_video_transcript(video_id, &transcript)
+            .map_err(|source| CacheVideoError::Persist {
+                video_id: video_id.to_string(),
+                sidecar_name: "transcript",
+                source,
+            })?;
 
         let video =
             self.video_by_id_mut(video_id)
                 .ok_or_else(|| CacheVideoError::MissingVideo {
                     video_id: video_id.to_string(),
                 })?;
-
-        update(video, value);
+        video.set_transcript(Some(transcript));
         Ok(())
-    }
-
-    fn cache_video_transcript(
-        &mut self,
-        video_id: &str,
-        transcript: String,
-    ) -> Result<(), CacheVideoError> {
-        self.cache_video_sidecar(
-            video_id,
-            transcript,
-            "transcript",
-            Storage::save_video_transcript,
-            |video, transcript| {
-                video.set_transcript(Some(transcript));
-            },
-        )
     }
 
     fn cache_video_ai_summary(
@@ -126,29 +104,47 @@ impl AppState {
         video_id: &str,
         ai_summary: String,
     ) -> Result<(), CacheVideoError> {
-        self.cache_video_sidecar(
-            video_id,
-            ai_summary,
-            "summary",
-            Storage::save_video_ai_summary,
-            |video, ai_summary| {
-                video.set_ai_summary(Some(ai_summary));
-            },
-        )
+        self.storage
+            .save_video_ai_summary(video_id, &ai_summary)
+            .map_err(|source| CacheVideoError::Persist {
+                video_id: video_id.to_string(),
+                sidecar_name: "summary",
+                source,
+            })?;
+
+        let video =
+            self.video_by_id_mut(video_id)
+                .ok_or_else(|| CacheVideoError::MissingVideo {
+                    video_id: video_id.to_string(),
+                })?;
+        video.set_ai_summary(Some(ai_summary));
+        Ok(())
     }
 }
 
 #[derive(Clone)]
-struct UiContext {
-    window: ApplicationWindow,
-    context_menu: Popover,
+struct AsyncContext {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
+    summary_generator: SummaryGenerator,
+}
+
+#[derive(Clone)]
+struct WidgetContext {
+    window: ApplicationWindow,
+    context_menu: Popover,
     feed_flow: FlowBox,
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
     badge: Label,
-    feed_watch_later_buttons: Rc<RefCell<HashMap<String, Button>>>,
+    feed_cards: Rc<RefCell<HashMap<String, VideoCardWidgets>>>,
+    watch_later_cards: Rc<RefCell<HashMap<String, VideoCardWidgets>>>,
+}
+
+#[derive(Clone)]
+struct UiContext {
+    async_ctx: AsyncContext,
+    widgets: WidgetContext,
 }
 
 const CARD_WIDTH: i32 = 320;
@@ -254,27 +250,6 @@ fn create_video_grid() -> (ScrolledWindow, FlowBox) {
     (scroll, flow)
 }
 
-fn create_readonly_text_scroller(initial_text: &str) -> (ScrolledWindow, gtk::TextBuffer) {
-    let scrolled = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scrolled.set_vexpand(true);
-
-    let text_view = gtk::TextView::new();
-    text_view.set_editable(false);
-    text_view.set_wrap_mode(gtk::WrapMode::Word);
-    text_view.set_left_margin(12);
-    text_view.set_right_margin(12);
-    text_view.set_top_margin(12);
-    text_view.set_bottom_margin(12);
-
-    let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-    buffer.set_text(initial_text);
-    text_view.set_buffer(Some(&buffer));
-
-    scrolled.add(&text_view);
-    (scrolled, buffer)
-}
-
 fn toggle_watch_later_and_download(
     state_rc: &Rc<RefCell<AppState>>,
     runtime: &Arc<Runtime>,
@@ -316,23 +291,16 @@ fn apply_watch_later_action(
         return;
     };
 
-    let added =
-        toggle_watch_later_and_download(state_rc, &ui_context.runtime, &video_id, &video_title);
-    update_feed_watch_later_toggle(ui_context, &video_id, added);
-    refresh_watch_later_tab(state_rc, ui_context);
+    let added = toggle_watch_later_and_download(
+        state_rc,
+        &ui_context.async_ctx.runtime,
+        &video_id,
+        &video_title,
+    );
+    update_watch_later_toggles(ui_context, &video_id, added);
+    sync_watch_later_card(state_rc, ui_context, &video_id);
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
-    }
-}
-
-fn update_feed_watch_later_toggle(ui_context: &UiContext, video_id: &str, is_watch_later: bool) {
-    let feed_toggle = ui_context
-        .feed_watch_later_buttons
-        .borrow()
-        .get(video_id)
-        .cloned();
-    if let Some(button) = feed_toggle {
-        set_watch_later_toggle_state(&button, is_watch_later);
     }
 }
 
@@ -422,7 +390,6 @@ fn spawn_refreshed_videos_apply(
     videos_rx: async_channel::Receiver<Vec<Video>>,
     state_rc: Rc<RefCell<AppState>>,
     ui_context: UiContext,
-    http_client: reqwest::Client,
 ) {
     glib::MainContext::default().spawn_local(async move {
         if let Ok(mut videos) = videos_rx.recv().await {
@@ -436,8 +403,8 @@ fn spawn_refreshed_videos_apply(
             let thumbnail_completion = download_missing_thumbnails(
                 state.videos.values(),
                 &state.storage,
-                http_client.clone(),
-                ui_context.runtime.clone(),
+                ui_context.async_ctx.http_client.clone(),
+                ui_context.async_ctx.runtime.clone(),
             );
             drop(state);
 
@@ -447,8 +414,9 @@ fn spawn_refreshed_videos_apply(
                 let state2 = state_rc.clone();
                 let ui2 = ui_context.clone();
                 glib::MainContext::default().spawn_local(async move {
-                    let _ = thumbnail_completion.recv().await;
-                    refresh_video_lists(&state2, &ui2);
+                    if let Ok(video_ids) = thumbnail_completion.recv().await {
+                        refresh_video_thumbnails(&state2, &ui2, &video_ids);
+                    }
                 });
             }
         }
@@ -461,7 +429,6 @@ fn start_feed_refresh(
     spinner: Spinner,
     status_label: Label,
     subs_file: PathBuf,
-    http_client: reqwest::Client,
 ) {
     spinner.start();
     status_label.set_text("Refreshing...");
@@ -479,8 +446,9 @@ fn start_feed_refresh(
     let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
 
     let progress_tx_for_errors = progress_tx.clone();
-    ui_context.runtime.spawn(async move {
-        match fetch_all_feeds(channel_ids, progress_tx).await {
+    let fetch_client = ui_context.async_ctx.http_client.clone();
+    ui_context.async_ctx.runtime.spawn(async move {
+        match fetch_all_feeds(&fetch_client, channel_ids, progress_tx).await {
             Ok(videos) => {
                 let _ = videos_tx.send(videos).await;
             }
@@ -495,7 +463,7 @@ fn start_feed_refresh(
     });
 
     spawn_refresh_progress_updates(progress_rx, spinner, status_label);
-    spawn_refreshed_videos_apply(videos_rx, state, ui_context, http_client);
+    spawn_refreshed_videos_apply(videos_rx, state, ui_context);
 }
 
 /// Builds and presents the primary GTK application window.
@@ -655,22 +623,28 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     main_box.pack_start(&stack, true, true, 0);
     window.add(&main_box);
 
-    let feed_watch_later_buttons = Rc::new(RefCell::new(HashMap::<String, Button>::new()));
+    let feed_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
+    let watch_later_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
 
     // Create context menu with handlers connected once
     let context_menu = Popover::new(None::<&gtk::Widget>);
 
-    let ui_context = UiContext {
-        window: window.clone(),
-        context_menu: context_menu.clone(),
+    let async_ctx = AsyncContext {
+        summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
         runtime: runtime.clone(),
         http_client: http_client.clone(),
+    };
+    let widgets = WidgetContext {
+        window: window.clone(),
+        context_menu: context_menu.clone(),
         feed_flow: feed_flow.clone(),
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
         badge: wl_badge.clone(),
-        feed_watch_later_buttons: feed_watch_later_buttons.clone(),
+        feed_cards: feed_cards.clone(),
+        watch_later_cards: watch_later_cards.clone(),
     };
+    let ui_context = UiContext { async_ctx, widgets };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
     // Set initial badge and populate videos
@@ -683,7 +657,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let spinner = spinner.clone();
         let ui_context = ui_context.clone();
         let subs_file = subs_file.clone();
-        let http_client = http_client.clone();
 
         refresh_button.connect_clicked(move |_| {
             start_feed_refresh(
@@ -692,7 +665,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 spinner.clone(),
                 status_label.clone(),
                 subs_file.clone(),
-                http_client.clone(),
             );
         });
     }
@@ -703,16 +675,17 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         download_missing_thumbnails(
             state_ref.videos.values(),
             &state_ref.storage,
-            http_client.clone(),
-            runtime.clone(),
+            ui_context.async_ctx.http_client.clone(),
+            ui_context.async_ctx.runtime.clone(),
         )
     };
     if let Some(startup_thumbnail_completion) = startup_thumbnail_completion {
         let state_for_startup = state.clone();
         let ui_context_for_startup = ui_context.clone();
         glib::MainContext::default().spawn_local(async move {
-            let _ = startup_thumbnail_completion.recv().await;
-            refresh_video_lists(&state_for_startup, &ui_context_for_startup);
+            if let Ok(video_ids) = startup_thumbnail_completion.recv().await {
+                refresh_video_thumbnails(&state_for_startup, &ui_context_for_startup, &video_ids);
+            }
         });
     }
 
@@ -730,9 +703,50 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::index_videos_by_id;
+    use super::AppState;
+    use crate::cache::Storage;
     use crate::data::Video;
     use chrono::{TimeZone, Utc};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirs {
+        root: PathBuf,
+    }
+
+    impl TestDirs {
+        fn new() -> Self {
+            let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "yt-gtk-app-state-tests-{}-{}",
+                std::process::id(),
+                unique_id
+            ));
+            std::fs::create_dir_all(&root).expect("test directory must be creatable");
+            Self { root }
+        }
+
+        fn data_dir(&self) -> PathBuf {
+            self.root.join("data")
+        }
+
+        fn cache_dir(&self) -> PathBuf {
+            self.root.join("cache")
+        }
+    }
+
+    impl Drop for TestDirs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_storage(dirs: &TestDirs) -> Storage {
+        Storage::new_at(dirs.data_dir(), dirs.cache_dir()).expect("test storage must initialize")
+    }
 
     fn test_video(video_id: &str) -> Video {
         let published = Utc
@@ -752,18 +766,24 @@ mod tests {
     }
 
     #[test]
-    fn index_videos_by_id_keeps_insertion_order() {
-        let indexed = index_videos_by_id(vec![test_video("a"), test_video("b"), test_video("c")]);
-        let ids = indexed.keys().map(String::as_str).collect::<Vec<_>>();
+    fn app_state_new_keeps_insertion_order() {
+        let dirs = TestDirs::new();
+        let state = AppState::new(
+            vec![test_video("a"), test_video("b"), test_video("c")],
+            HashSet::new(),
+            test_storage(&dirs),
+        );
+        let ids = state.videos.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
 
     #[test]
-    fn index_videos_by_id_deduplicates_by_video_id() {
-        let indexed =
-            index_videos_by_id(vec![test_video("dup"), test_video("x"), test_video("dup")]);
-        let ids = indexed.keys().map(String::as_str).collect::<Vec<_>>();
+    fn app_state_set_videos_deduplicates_by_video_id() {
+        let dirs = TestDirs::new();
+        let mut state = AppState::new(Vec::new(), HashSet::new(), test_storage(&dirs));
+        state.set_videos(vec![test_video("dup"), test_video("x"), test_video("dup")]);
+        let ids = state.videos.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(ids, vec!["dup", "x"]);
-        assert_eq!(indexed.len(), 2);
+        assert_eq!(state.videos.len(), 2);
     }
 }
