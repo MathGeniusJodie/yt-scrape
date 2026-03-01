@@ -44,6 +44,7 @@ iso8601 = "0.6"
 
 # Non-blocking channel compatible with both tokio and glib main contexts
 async-channel = "2"
+indexmap = "2"
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause / start_paused in tests; not in `full`.

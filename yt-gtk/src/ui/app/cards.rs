@@ -14,6 +14,22 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+fn on_menu_action<F>(
+    button: &Button,
+    selected_video: Rc<RefCell<Option<String>>>,
+    context_menu: Popover,
+    action: F,
+) where
+    F: Fn(String) + 'static,
+{
+    button.connect_clicked(move |_| {
+        if let Some(video_id) = selected_video.borrow().clone() {
+            action(video_id);
+        }
+        context_menu.popdown();
+    });
+}
+
 fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, runtime: &Arc<Runtime>, video_id: &str) {
     let playback = {
         let state = state_rc.borrow();
@@ -79,66 +95,64 @@ pub(super) fn create_context_menu(
     let ui_context = ui_context.clone();
 
     // Connect handlers once - they read from selected_video
-    {
-        let selected_video = selected_video.clone();
-        let state_rc = state_rc.clone();
-        let ui_context = ui_context.clone();
-        play_button.connect_clicked(move |_| {
-            if let Some(video_id) = selected_video.borrow().clone() {
-                play_selected_video(&state_rc, &ui_context.runtime, &video_id);
+    on_menu_action(
+        &play_button,
+        selected_video.clone(),
+        ui_context.context_menu.clone(),
+        {
+            let state_rc = state_rc.clone();
+            let runtime = ui_context.runtime.clone();
+            move |video_id| {
+                play_selected_video(&state_rc, &runtime, &video_id);
             }
-            ui_context.context_menu.popdown();
-        });
-    }
-
-    {
-        let selected_video = selected_video.clone();
-        let state_rc = state_rc.clone();
-        let ui_context = ui_context.clone();
-        watch_later_button.connect_clicked(move |_| {
-            if let Some(video_id) = selected_video.borrow().clone() {
-                ui_context.context_menu.popdown();
+        },
+    );
+    on_menu_action(
+        &watch_later_button,
+        selected_video.clone(),
+        ui_context.context_menu.clone(),
+        {
+            let state_rc = state_rc.clone();
+            let ui_context = ui_context.clone();
+            move |video_id| {
                 apply_watch_later_action(&state_rc, &ui_context, video_id);
             }
-        });
-    }
-
-    {
-        let selected_video = selected_video.clone();
-        let ui_context = ui_context.clone();
-        copy_url_button.connect_clicked(move |_| {
-            if let Some(video_id) = selected_video.borrow().clone() {
-                // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
-                gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD)
-                    .set_text(&crate::urls::watch_url(&video_id));
-            }
-            ui_context.context_menu.popdown();
-        });
-    }
-
-    {
-        let selected_video = selected_video.clone();
-        let state_rc = state_rc.clone();
-        let ui_context = ui_context.clone();
-        summary_button.connect_clicked(move |_| {
-            if let Some(video_id) = selected_video.borrow().clone() {
-                ui_context.context_menu.popdown();
+        },
+    );
+    on_menu_action(
+        &copy_url_button,
+        selected_video.clone(),
+        ui_context.context_menu.clone(),
+        |video_id| {
+            // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
+            gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD)
+                .set_text(&crate::urls::watch_url(&video_id));
+        },
+    );
+    on_menu_action(
+        &summary_button,
+        selected_video.clone(),
+        ui_context.context_menu.clone(),
+        {
+            let state_rc = state_rc.clone();
+            let ui_context = ui_context.clone();
+            move |video_id| {
                 show_summary_dialog(&state_rc, &ui_context, &video_id);
             }
-        });
-    }
-
-    {
-        let selected_video = selected_video.clone();
-        let state_rc = state_rc.clone();
-        let ui_context = ui_context.clone();
-        transcript_button.connect_clicked(move |_| {
-            if let Some(video_id) = selected_video.borrow().clone() {
-                ui_context.context_menu.popdown();
+        },
+    );
+    on_menu_action(
+        &transcript_button,
+        selected_video,
+        ui_context.context_menu.clone(),
+        {
+            let state_rc = state_rc.clone();
+            let ui_context = ui_context.clone();
+            move |video_id| {
                 show_transcript_dialog(&state_rc, &ui_context, &video_id);
             }
-        });
-    }
+        },
+    );
 }
 
 pub(super) fn populate_flow_box(
@@ -158,10 +172,10 @@ pub(super) fn populate_flow_box(
 
     let state = state_rc.borrow();
     let videos: Vec<&Video> = match tab {
-        Tab::Feed => state.videos.iter().collect(),
+        Tab::Feed => state.videos.values().collect(),
         Tab::WatchLater => state
             .videos
-            .iter()
+            .values()
             .filter(|video| state.watch_later.contains(video.video_id()))
             .collect(),
     };
@@ -185,38 +199,27 @@ pub(super) fn populate_flow_box(
                 .insert(video.video_id().to_string(), watch_later_toggle.clone());
         }
 
-        let video_ref = video.video_id().to_string();
-        let state_rc = state_rc.clone();
-        let runtime = ui_context.runtime.clone();
-        let selected_video = ui_context.selected_video.clone();
-        let card_ui_context = ui_context.clone();
-
-        let wl_state_rc = state_rc.clone();
-        let wl_ui_context = ui_context.clone();
-        let wl_ref = video_ref.clone();
+        let video_id = video.video_id().to_string();
 
         if let Some(ai_summary_button) = ai_summary_button {
-            let summary_state_rc = state_rc.clone();
-            let summary_ui_context = ui_context.clone();
-            let summary_video_id = video_ref.clone();
-
-            ai_summary_button.connect_clicked(move |_| {
-                show_summary_dialog(&summary_state_rc, &summary_ui_context, &summary_video_id);
-            });
+            ai_summary_button.connect_clicked(clone!(@strong state_rc, @strong ui_context,
+            @strong video_id => move |_| {
+                show_summary_dialog(&state_rc, &ui_context, &video_id);
+            }));
         }
 
         // Double-click to play, right-click for context menu
         card.connect_button_press_event(
-            clone!(@strong video_ref, @strong state_rc, @strong runtime => move |widget, event| {
+            clone!(@strong video_id, @strong state_rc, @strong ui_context => move |widget, event| {
                 if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
-                    play_selected_video(&state_rc, &runtime, &video_ref);
+                    play_selected_video(&state_rc, &ui_context.runtime, &video_id);
                     return glib::Propagation::Stop;
                 }
 
                 if event.button() == 3 {
-                    *selected_video.borrow_mut() = Some(video_ref.clone());
-                    card_ui_context.context_menu.set_relative_to(Some(widget));
-                    card_ui_context.context_menu.popup();
+                    *ui_context.selected_video.borrow_mut() = Some(video_id.clone());
+                    ui_context.context_menu.set_relative_to(Some(widget));
+                    ui_context.context_menu.popup();
                     return glib::Propagation::Stop;
                 }
 
@@ -224,9 +227,11 @@ pub(super) fn populate_flow_box(
             }),
         );
 
-        watch_later_toggle.connect_clicked(move |_| {
-            apply_watch_later_action(&wl_state_rc, &wl_ui_context, wl_ref.clone());
-        });
+        watch_later_toggle.connect_clicked(
+            clone!(@strong state_rc, @strong ui_context, @strong video_id => move |_| {
+                apply_watch_later_action(&state_rc, &ui_context, video_id.clone());
+            }),
+        );
 
         flow_box.add(&card);
 

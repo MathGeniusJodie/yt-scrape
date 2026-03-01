@@ -237,6 +237,27 @@ pub async fn summarize_video_streaming(
     }
 }
 
+async fn check_http_response<ExtractError>(
+    response: reqwest::Response,
+    extract_error_message: ExtractError,
+) -> Result<String>
+where
+    ExtractError: FnOnce(&str) -> Option<String>,
+{
+    let status = response.status();
+    let body = response.text().await?;
+
+    if status.is_success() {
+        return Ok(body);
+    }
+
+    if let Some(error_message) = extract_error_message(&body) {
+        return Err(anyhow::anyhow!("{}: {}", status, error_message));
+    }
+
+    Err(anyhow::anyhow!("{}: {}", status, body))
+}
+
 async fn call_gemini_streaming(
     client: &reqwest::Client,
     api_key: &str,
@@ -283,16 +304,12 @@ async fn call_gemini_streaming(
         .send()
         .await?;
 
-    let status = response.status();
-    let body = response.text().await?;
-    if !status.is_success() {
-        if let Ok(error_response) = serde_json::from_str::<GeminiResponse>(&body) {
-            if let Some(error) = error_response.error {
-                return Err(anyhow::anyhow!("{}: {}", status, error.message));
-            }
-        }
-        return Err(anyhow::anyhow!("{}: {}", status, body));
-    }
+    let body = check_http_response(response, |body| {
+        serde_json::from_str::<GeminiResponse>(body)
+            .ok()
+            .and_then(|error_response| error_response.error.map(|error| error.message))
+    })
+    .await?;
 
     let gemini_response: GeminiResponse = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("Failed to parse Gemini response: {}", e))?;
@@ -359,18 +376,13 @@ async fn call_openrouter_with_transcript(
         .send()
         .await?;
 
-    let status = response.status();
-    let body = response.text().await?;
-    if !status.is_success() {
-        if let Ok(error_response) = serde_json::from_str::<OpenRouterResponse>(&body) {
-            if let Some(error) = error_response.error {
-                if let Some(message) = error.message {
-                    return Err(anyhow::anyhow!("{}: {}", status, message));
-                }
-            }
-        }
-        return Err(anyhow::anyhow!("{}: {}", status, body));
-    }
+    let body = check_http_response(response, |body| {
+        serde_json::from_str::<OpenRouterResponse>(body)
+            .ok()
+            .and_then(|error_response| error_response.error)
+            .and_then(|error| error.message)
+    })
+    .await?;
 
     let openrouter_response: OpenRouterResponse = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("Failed to parse OpenRouter response: {}", e))?;

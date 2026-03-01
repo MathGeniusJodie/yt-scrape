@@ -1,4 +1,4 @@
-use super::AppState;
+use super::{AppState, CacheVideoError};
 use crate::data::Video;
 use crate::gemini::{summarize_video_streaming, StreamingMessage};
 
@@ -76,12 +76,16 @@ pub(super) enum SummaryGenerationError {
 #[derive(Clone)]
 pub(super) struct SummaryGenerator {
     runtime: Arc<Runtime>,
+    http_client: reqwest::Client,
 }
 
 impl SummaryGenerator {
     /// Creates a generator backed by the application's async runtime.
-    pub(super) fn new(runtime: Arc<Runtime>) -> Self {
-        Self { runtime }
+    pub(super) fn new(runtime: Arc<Runtime>, http_client: reqwest::Client) -> Self {
+        Self {
+            runtime,
+            http_client,
+        }
     }
 
     /// Validates inputs and starts a background summary stream.
@@ -100,18 +104,15 @@ impl SummaryGenerator {
             prepare_summary_generation_video(&mut state, video_id, mode)?
         };
 
-        let (transcripts_work_dir, summary_client) = {
+        let transcripts_work_dir = {
             let state = state_rc.borrow();
-            (
-                state.storage.transcripts_work_dir().to_path_buf(),
-                state.http_client().clone(),
-            )
+            state.storage.transcripts_work_dir().to_path_buf()
         };
 
         let task_video_id = video.video_id().to_string();
         let result_rx = spawn_summary_generation_stream(
             self.runtime.clone(),
-            summary_client,
+            self.http_client.clone(),
             video,
             transcripts_work_dir,
         );
@@ -133,7 +134,7 @@ impl SummaryGenerator {
         state_rc: &Rc<RefCell<AppState>>,
         video_id: &str,
         summary: String,
-    ) -> bool {
+    ) -> Result<(), CacheVideoError> {
         let mut state = state_rc.borrow_mut();
         state.summaries_in_progress.remove(video_id);
         state.cache_video_ai_summary(video_id, summary)
@@ -260,10 +261,6 @@ mod tests {
         fn cache_dir(&self) -> PathBuf {
             self.root.join("cache")
         }
-
-        fn subs_file(&self) -> PathBuf {
-            self.root.join("subs.txt")
-        }
     }
 
     impl Drop for TestDirs {
@@ -288,13 +285,7 @@ mod tests {
         let dirs = TestDirs::new();
         let storage = Storage::new_at(dirs.data_dir(), dirs.cache_dir())
             .expect("test storage must initialize");
-        let state = AppState::new(
-            videos,
-            HashSet::new(),
-            storage,
-            dirs.subs_file(),
-            reqwest::Client::new(),
-        );
+        let state = AppState::new(videos, HashSet::new(), storage);
         (state, dirs)
     }
 

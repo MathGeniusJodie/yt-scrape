@@ -2502,6 +2502,7 @@ dependencies = [
  "gio",
  "glib",
  "gtk",
+ "indexmap",
  "iso8601",
  "log",
  "pango",

@@ -13,12 +13,14 @@ use gtk::{
     Application, ApplicationWindow, Box as GtkBox, Button, FlowBox, HeaderBar, Label, Orientation,
     Popover, ScrolledWindow, Spinner, Stack,
 };
+use indexmap::IndexMap;
 use log::{error, info, warn};
 use std::cell::RefCell;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::runtime::Runtime;
 
 use cards::create_context_menu;
@@ -26,110 +28,113 @@ use refresh::{download_missing_thumbnails, refresh_video_lists, refresh_watch_la
 use summary::maybe_prefetch_summary_for_watch_later;
 
 struct AppState {
-    videos: Vec<Video>,
-    video_index_by_id: HashMap<String, usize>,
+    videos: IndexMap<String, Video>,
     watch_later: HashSet<String>,
     summaries_in_progress: HashSet<String>,
     storage: Storage,
-    subs_file: PathBuf,
-    http_client: reqwest::Client,
 }
 
-fn sync_video_index_by_id(video_index_by_id: &mut HashMap<String, usize>, videos: &[Video]) {
-    let mut seen_video_ids = HashSet::with_capacity(videos.len());
+#[derive(Debug, Error)]
+pub(super) enum CacheVideoError {
+    #[error("Failed to persist {sidecar_name} sidecar for {video_id}: {source}")]
+    Persist {
+        video_id: String,
+        sidecar_name: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("Video {video_id} is no longer available")]
+    MissingVideo { video_id: String },
+}
 
-    for (index, video) in videos.iter().enumerate() {
-        let video_id = video.video_id();
-        seen_video_ids.insert(video_id);
-
-        match video_index_by_id.entry(video_id.to_string()) {
-            Entry::Occupied(mut occupied) => {
-                if occupied.get() != &index {
-                    occupied.insert(index);
-                }
-            }
-            Entry::Vacant(vacant) => {
-                vacant.insert(index);
-            }
-        }
+fn index_videos_by_id(videos: Vec<Video>) -> IndexMap<String, Video> {
+    let mut indexed = IndexMap::with_capacity(videos.len());
+    for video in videos {
+        indexed.insert(video.video_id().to_string(), video);
     }
-
-    video_index_by_id.retain(|video_id, _| seen_video_ids.contains(video_id.as_str()));
+    indexed
 }
 
 impl AppState {
-    fn new(
-        videos: Vec<Video>,
-        watch_later: HashSet<String>,
-        storage: Storage,
-        subs_file: PathBuf,
-        http_client: reqwest::Client,
-    ) -> Self {
-        let mut state = Self {
-            videos,
-            video_index_by_id: HashMap::new(),
+    fn new(videos: Vec<Video>, watch_later: HashSet<String>, storage: Storage) -> Self {
+        Self {
+            videos: index_videos_by_id(videos),
             watch_later,
             summaries_in_progress: HashSet::new(),
             storage,
-            subs_file,
-            http_client,
-        };
-        sync_video_index_by_id(&mut state.video_index_by_id, &state.videos);
-        state
+        }
     }
 
     fn set_videos(&mut self, videos: Vec<Video>) {
-        self.videos = videos;
-        sync_video_index_by_id(&mut self.video_index_by_id, &self.videos);
+        self.videos = index_videos_by_id(videos);
     }
 
     fn video_by_id(&self, video_id: &str) -> Option<&Video> {
-        self.video_index_by_id
-            .get(video_id)
-            .and_then(|index| self.videos.get(*index))
+        self.videos.get(video_id)
     }
 
     fn video_by_id_mut(&mut self, video_id: &str) -> Option<&mut Video> {
-        let index = *self.video_index_by_id.get(video_id)?;
-        self.videos.get_mut(index)
+        self.videos.get_mut(video_id)
     }
 
-    fn cache_video_transcript(&mut self, video_id: &str, transcript: String) -> bool {
-        if let Err(save_error) = self.storage.save_video_transcript(video_id, &transcript) {
-            error!(
-                "Failed to persist transcript sidecar for {}: {}",
-                video_id, save_error
-            );
-            return false;
-        }
+    fn cache_video_sidecar<Persist, Update>(
+        &mut self,
+        video_id: &str,
+        value: String,
+        sidecar_name: &'static str,
+        persist: Persist,
+        update: Update,
+    ) -> Result<(), CacheVideoError>
+    where
+        Persist: FnOnce(&Storage, &str, &str) -> anyhow::Result<()>,
+        Update: FnOnce(&mut Video, String),
+    {
+        persist(&self.storage, video_id, &value).map_err(|source| CacheVideoError::Persist {
+            video_id: video_id.to_string(),
+            sidecar_name,
+            source,
+        })?;
 
-        if let Some(video) = self.video_by_id_mut(video_id) {
-            video.set_transcript(Some(transcript));
-            return true;
-        }
+        let video =
+            self.video_by_id_mut(video_id)
+                .ok_or_else(|| CacheVideoError::MissingVideo {
+                    video_id: video_id.to_string(),
+                })?;
 
-        false
+        update(video, value);
+        Ok(())
     }
 
-    fn cache_video_ai_summary(&mut self, video_id: &str, ai_summary: String) -> bool {
-        if let Err(save_error) = self.storage.save_video_ai_summary(video_id, &ai_summary) {
-            error!(
-                "Failed to persist summary sidecar for {}: {}",
-                video_id, save_error
-            );
-            return false;
-        }
-
-        if let Some(video) = self.video_by_id_mut(video_id) {
-            video.set_ai_summary(Some(ai_summary));
-            return true;
-        }
-
-        false
+    fn cache_video_transcript(
+        &mut self,
+        video_id: &str,
+        transcript: String,
+    ) -> Result<(), CacheVideoError> {
+        self.cache_video_sidecar(
+            video_id,
+            transcript,
+            "transcript",
+            Storage::save_video_transcript,
+            |video, transcript| {
+                video.set_transcript(Some(transcript));
+            },
+        )
     }
 
-    fn http_client(&self) -> &reqwest::Client {
-        &self.http_client
+    fn cache_video_ai_summary(
+        &mut self,
+        video_id: &str,
+        ai_summary: String,
+    ) -> Result<(), CacheVideoError> {
+        self.cache_video_sidecar(
+            video_id,
+            ai_summary,
+            "summary",
+            Storage::save_video_ai_summary,
+            |video, ai_summary| {
+                video.set_ai_summary(Some(ai_summary));
+            },
+        )
     }
 }
 
@@ -138,6 +143,7 @@ struct UiContext {
     window: ApplicationWindow,
     context_menu: Popover,
     runtime: Arc<Runtime>,
+    http_client: reqwest::Client,
     feed_flow: FlowBox,
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
@@ -416,6 +422,7 @@ fn spawn_refreshed_videos_apply(
     videos_rx: async_channel::Receiver<Vec<Video>>,
     state_rc: Rc<RefCell<AppState>>,
     ui_context: UiContext,
+    http_client: reqwest::Client,
 ) {
     glib::MainContext::default().spawn_local(async move {
         if let Ok(mut videos) = videos_rx.recv().await {
@@ -427,9 +434,9 @@ fn spawn_refreshed_videos_apply(
             state.set_videos(videos);
 
             let thumbnail_completion = download_missing_thumbnails(
-                &state.videos,
+                state.videos.values(),
                 &state.storage,
-                state.http_client().clone(),
+                http_client.clone(),
                 ui_context.runtime.clone(),
             );
             drop(state);
@@ -454,6 +461,7 @@ fn start_feed_refresh(
     spinner: Spinner,
     status_label: Label,
     subs_file: PathBuf,
+    http_client: reqwest::Client,
 ) {
     spinner.start();
     status_label.set_text("Refreshing...");
@@ -487,7 +495,7 @@ fn start_feed_refresh(
     });
 
     spawn_refresh_progress_updates(progress_rx, spinner, status_label);
-    spawn_refreshed_videos_apply(videos_rx, state, ui_context);
+    spawn_refreshed_videos_apply(videos_rx, state, ui_context, http_client);
 }
 
 /// Builds and presents the primary GTK application window.
@@ -529,13 +537,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         }
     };
 
-    let state = Rc::new(RefCell::new(AppState::new(
-        videos,
-        watch_later,
-        storage,
-        subs_file,
-        http_client,
-    )));
+    let state = Rc::new(RefCell::new(AppState::new(videos, watch_later, storage)));
 
     // Selected video for context menu actions
     let selected_video: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -662,6 +664,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         window: window.clone(),
         context_menu: context_menu.clone(),
         runtime: runtime.clone(),
+        http_client: http_client.clone(),
         feed_flow: feed_flow.clone(),
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
@@ -679,7 +682,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let status_label = status_label.clone();
         let spinner = spinner.clone();
         let ui_context = ui_context.clone();
-        let subs_file = state.borrow().subs_file.clone();
+        let subs_file = subs_file.clone();
+        let http_client = http_client.clone();
 
         refresh_button.connect_clicked(move |_| {
             start_feed_refresh(
@@ -688,6 +692,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 spinner.clone(),
                 status_label.clone(),
                 subs_file.clone(),
+                http_client.clone(),
             );
         });
     }
@@ -696,9 +701,9 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let startup_thumbnail_completion = {
         let state_ref = state.borrow();
         download_missing_thumbnails(
-            &state_ref.videos,
+            state_ref.videos.values(),
             &state_ref.storage,
-            state_ref.http_client().clone(),
+            http_client.clone(),
             runtime.clone(),
         )
     };
@@ -725,10 +730,9 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::sync_video_index_by_id;
+    use super::index_videos_by_id;
     use crate::data::Video;
     use chrono::{TimeZone, Utc};
-    use std::collections::HashMap;
 
     fn test_video(video_id: &str) -> Video {
         let published = Utc
@@ -748,30 +752,18 @@ mod tests {
     }
 
     #[test]
-    fn sync_video_index_by_id_updates_changed_entries_and_removes_missing() {
-        let mut video_index_by_id = HashMap::new();
-        let initial_videos = vec![test_video("a"), test_video("b"), test_video("c")];
-        sync_video_index_by_id(&mut video_index_by_id, &initial_videos);
-
-        let updated_videos = vec![test_video("b"), test_video("d")];
-        sync_video_index_by_id(&mut video_index_by_id, &updated_videos);
-
-        assert_eq!(video_index_by_id.get("b"), Some(&0));
-        assert_eq!(video_index_by_id.get("d"), Some(&1));
-        assert!(!video_index_by_id.contains_key("a"));
-        assert!(!video_index_by_id.contains_key("c"));
-        assert_eq!(video_index_by_id.len(), 2);
+    fn index_videos_by_id_keeps_insertion_order() {
+        let indexed = index_videos_by_id(vec![test_video("a"), test_video("b"), test_video("c")]);
+        let ids = indexed.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 
     #[test]
-    fn sync_video_index_by_id_tracks_last_index_for_duplicate_ids() {
-        let mut video_index_by_id = HashMap::new();
-        let videos = vec![test_video("dup"), test_video("x"), test_video("dup")];
-
-        sync_video_index_by_id(&mut video_index_by_id, &videos);
-
-        assert_eq!(video_index_by_id.get("dup"), Some(&2));
-        assert_eq!(video_index_by_id.get("x"), Some(&1));
-        assert_eq!(video_index_by_id.len(), 2);
+    fn index_videos_by_id_deduplicates_by_video_id() {
+        let indexed =
+            index_videos_by_id(vec![test_video("dup"), test_video("x"), test_video("dup")]);
+        let ids = indexed.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["dup", "x"]);
+        assert_eq!(indexed.len(), 2);
     }
 }

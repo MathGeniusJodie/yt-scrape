@@ -6,41 +6,38 @@ use crate::data::{Tab, Video};
 use futures::stream::{self, StreamExt};
 use log::warn;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+
+fn refresh_tab(
+    tab: Tab,
+    downloaded_video_ids: &HashSet<String>,
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &UiContext,
+) {
+    let flow = match tab {
+        Tab::Feed => &ui_context.feed_flow,
+        Tab::WatchLater => &ui_context.watch_later_flow,
+    };
+
+    populate_flow_box(flow, tab, downloaded_video_ids, state_rc, ui_context);
+}
 
 pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &UiContext) {
     let state_ref = state_rc.borrow();
     let downloaded_video_ids = state_ref.storage.cached_video_ids();
     update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
-    populate_flow_box(
-        &ui_context.feed_flow,
-        Tab::Feed,
-        &downloaded_video_ids,
-        state_rc,
-        ui_context,
-    );
-    populate_flow_box(
-        &ui_context.watch_later_flow,
-        Tab::WatchLater,
-        &downloaded_video_ids,
-        state_rc,
-        ui_context,
-    );
+    refresh_tab(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
+    refresh_tab(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
 }
 
 pub(super) fn refresh_watch_later_tab(state_rc: &Rc<RefCell<AppState>>, ui_context: &UiContext) {
     let state_ref = state_rc.borrow();
     let downloaded_video_ids = state_ref.storage.cached_video_ids();
     update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
-    populate_flow_box(
-        &ui_context.watch_later_flow,
-        Tab::WatchLater,
-        &downloaded_video_ids,
-        state_rc,
-        ui_context,
-    );
+    refresh_tab(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
 }
 
 /// Downloads thumbnails missing from local storage.
@@ -56,8 +53,8 @@ pub(super) fn refresh_watch_later_tab(state_rc: &Rc<RefCell<AppState>>, ui_conte
 /// `Some(receiver)` when at least one thumbnail download was scheduled. The receiver yields once
 /// when all scheduled downloads have completed (successfully or not). `None` when there is no
 /// work to do.
-pub(super) fn download_missing_thumbnails(
-    videos: &[Video],
+pub(super) fn download_missing_thumbnails<'a>(
+    videos: impl IntoIterator<Item = &'a Video>,
     storage: &Storage,
     client: reqwest::Client,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -65,7 +62,7 @@ pub(super) fn download_missing_thumbnails(
     const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
 
     let pending_downloads: Vec<(String, PathBuf)> = videos
-        .iter()
+        .into_iter()
         .filter_map(|video| {
             let path = storage.thumbnail_path(video.video_id());
             if path.exists() {

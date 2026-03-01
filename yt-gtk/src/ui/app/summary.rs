@@ -17,7 +17,8 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
     ui_context: &UiContext,
     video_id: &str,
 ) {
-    let summary_generator = SummaryGenerator::new(ui_context.runtime.clone());
+    let summary_generator =
+        SummaryGenerator::new(ui_context.runtime.clone(), ui_context.http_client.clone());
     let generation_task =
         match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Prefetch) {
             Ok(task) => task,
@@ -49,13 +50,19 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
                 );
             }
             Ok(summary) => {
-                if summary_generator_for_result.persist_summary(
+                if let Err(cache_error) = summary_generator_for_result.persist_summary(
                     &state_for_result,
                     &video_id_for_result,
                     summary,
                 ) {
-                    refresh_video_lists(&state_for_result, &ui_context_for_result);
+                    error!(
+                        "Failed to cache prefetched summary for {}: {}",
+                        video_id_for_result, cache_error
+                    );
+                    return;
                 }
+
+                refresh_video_lists(&state_for_result, &ui_context_for_result);
             }
         }
     });
@@ -77,7 +84,8 @@ fn start_summary_generation_for_dialog(
     buffer.set_text(loading_text);
     regenerate_button.set_sensitive(false);
 
-    let summary_generator = SummaryGenerator::new(ui_context.runtime.clone());
+    let summary_generator =
+        SummaryGenerator::new(ui_context.runtime.clone(), ui_context.http_client.clone());
     let generation_task =
         match summary_generator.start(&state_rc, &video_id, SummaryGenerationMode::Interactive) {
             Ok(task) => task,
@@ -122,13 +130,20 @@ fn start_summary_generation_for_dialog(
                 buffer_for_result.set_text(&format!("Error: {}", generation_error));
             }
             Ok(summary) => {
-                if summary_generator_for_result.persist_summary(
+                if let Err(cache_error) = summary_generator_for_result.persist_summary(
                     &state_for_result,
                     &video_id_for_result,
                     summary,
                 ) {
-                    refresh_video_lists(&state_for_result, &ui_context_for_result);
+                    buffer_for_result.set_text(&format!("Error: {}", cache_error));
+                    error!(
+                        "Failed to cache interactive summary for {}: {}",
+                        video_id_for_result, cache_error
+                    );
+                    return;
                 }
+
+                refresh_video_lists(&state_for_result, &ui_context_for_result);
             }
         }
     });
@@ -298,7 +313,12 @@ pub(super) fn show_transcript_dialog(
                 Ok(transcript) => {
                     buffer.set_text(&transcript);
                     let mut state = state_rc.borrow_mut();
-                    state.cache_video_transcript(&video_id, transcript);
+                    if let Err(cache_error) = state.cache_video_transcript(&video_id, transcript) {
+                        error!(
+                            "Failed to cache transcript for {}: {}",
+                            video_id, cache_error
+                        );
+                    }
                 }
                 Err(transcript_error) => {
                     buffer.set_text(&format!("Error: {}", transcript_error));
