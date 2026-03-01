@@ -15,7 +15,7 @@ use gtk::{
 };
 use log::{error, info, warn};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -35,6 +35,28 @@ struct AppState {
     http_client: reqwest::Client,
 }
 
+fn sync_video_index_by_id(video_index_by_id: &mut HashMap<String, usize>, videos: &[Video]) {
+    let mut seen_video_ids = HashSet::with_capacity(videos.len());
+
+    for (index, video) in videos.iter().enumerate() {
+        let video_id = video.video_id();
+        seen_video_ids.insert(video_id);
+
+        match video_index_by_id.entry(video_id.to_string()) {
+            Entry::Occupied(mut occupied) => {
+                if occupied.get() != &index {
+                    occupied.insert(index);
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(index);
+            }
+        }
+    }
+
+    video_index_by_id.retain(|video_id, _| seen_video_ids.contains(video_id.as_str()));
+}
+
 impl AppState {
     fn new(
         videos: Vec<Video>,
@@ -52,22 +74,13 @@ impl AppState {
             subs_file,
             http_client,
         };
-        state.rebuild_video_index();
+        sync_video_index_by_id(&mut state.video_index_by_id, &state.videos);
         state
-    }
-
-    fn rebuild_video_index(&mut self) {
-        self.video_index_by_id = self
-            .videos
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (v.video_id().to_string(), i))
-            .collect();
     }
 
     fn set_videos(&mut self, videos: Vec<Video>) {
         self.videos = videos;
-        self.rebuild_video_index();
+        sync_video_index_by_id(&mut self.video_index_by_id, &self.videos);
     }
 
     fn video_by_id(&self, video_id: &str) -> Option<&Video> {
@@ -188,6 +201,30 @@ fn update_flow_width(flow: &FlowBox, viewport_width: i32) {
     let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
     let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
     flow.set_size_request(optimal_width, -1);
+}
+
+fn connect_tab_button_to_stack(
+    tab_button: &gtk::ToggleButton,
+    stack: &Stack,
+    visible_child_name: &'static str,
+    active_flow: &FlowBox,
+    inactive_tabs: &[gtk::ToggleButton],
+) {
+    let stack = stack.clone();
+    let active_flow = active_flow.clone();
+    let inactive_tabs = inactive_tabs.to_vec();
+
+    tab_button.connect_toggled(move |button| {
+        if !button.is_active() {
+            return;
+        }
+
+        stack.set_visible_child_name(visible_child_name);
+        for tab in &inactive_tabs {
+            tab.set_active(false);
+        }
+        update_flow_width(&active_flow, stack.allocated_width());
+    });
 }
 
 fn create_video_grid() -> (ScrolledWindow, FlowBox) {
@@ -598,30 +635,20 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     }
 
     // Connect tab buttons to stack
-    {
-        let stack = stack.clone();
-        let watch_later_tab = watch_later_tab.clone();
-        let feed_flow = feed_flow.clone();
-        feed_tab.connect_toggled(move |btn| {
-            if btn.is_active() {
-                stack.set_visible_child_name("feed");
-                watch_later_tab.set_active(false);
-                update_flow_width(&feed_flow, stack.allocated_width());
-            }
-        });
-    }
-    {
-        let stack = stack.clone();
-        let feed_tab = feed_tab.clone();
-        let watch_later_flow = watch_later_flow.clone();
-        watch_later_tab.connect_toggled(move |btn| {
-            if btn.is_active() {
-                stack.set_visible_child_name("watch-later");
-                feed_tab.set_active(false);
-                update_flow_width(&watch_later_flow, stack.allocated_width());
-            }
-        });
-    }
+    connect_tab_button_to_stack(
+        &feed_tab,
+        &stack,
+        "feed",
+        &feed_flow,
+        std::slice::from_ref(&watch_later_tab),
+    );
+    connect_tab_button_to_stack(
+        &watch_later_tab,
+        &stack,
+        "watch-later",
+        &watch_later_flow,
+        std::slice::from_ref(&feed_tab),
+    );
 
     main_box.pack_start(&stack, true, true, 0);
     window.add(&main_box);
@@ -693,5 +720,58 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
         badge.show();
     } else {
         badge.hide();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_video_index_by_id;
+    use crate::data::Video;
+    use chrono::{TimeZone, Utc};
+    use std::collections::HashMap;
+
+    fn test_video(video_id: &str) -> Video {
+        let published = Utc
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid fixed test timestamp");
+
+        Video::new(
+            video_id.to_string(),
+            "channel-id".to_string(),
+            "channel-name".to_string(),
+            format!("title-{video_id}"),
+            published,
+            "https://example.com/thumb.jpg".to_string(),
+            None,
+        )
+    }
+
+    #[test]
+    fn sync_video_index_by_id_updates_changed_entries_and_removes_missing() {
+        let mut video_index_by_id = HashMap::new();
+        let initial_videos = vec![test_video("a"), test_video("b"), test_video("c")];
+        sync_video_index_by_id(&mut video_index_by_id, &initial_videos);
+
+        let updated_videos = vec![test_video("b"), test_video("d")];
+        sync_video_index_by_id(&mut video_index_by_id, &updated_videos);
+
+        assert_eq!(video_index_by_id.get("b"), Some(&0));
+        assert_eq!(video_index_by_id.get("d"), Some(&1));
+        assert!(!video_index_by_id.contains_key("a"));
+        assert!(!video_index_by_id.contains_key("c"));
+        assert_eq!(video_index_by_id.len(), 2);
+    }
+
+    #[test]
+    fn sync_video_index_by_id_tracks_last_index_for_duplicate_ids() {
+        let mut video_index_by_id = HashMap::new();
+        let videos = vec![test_video("dup"), test_video("x"), test_video("dup")];
+
+        sync_video_index_by_id(&mut video_index_by_id, &videos);
+
+        assert_eq!(video_index_by_id.get("dup"), Some(&2));
+        assert_eq!(video_index_by_id.get("x"), Some(&1));
+        assert_eq!(video_index_by_id.len(), 2);
     }
 }
