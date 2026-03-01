@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
 
 #[derive(Clone)]
 struct SummaryGenerationRequest {
@@ -52,28 +51,16 @@ fn spawn_summary_generation_stream(
     let (tx, rx) = async_channel::unbounded::<StreamingMessage>();
 
     runtime.spawn(async move {
-        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
-
-        let forward_stream = async {
-            while let Some(message) = chunk_rx.recv().await {
-                if tx.send(message).await.is_err() {
-                    break;
-                }
-            }
-        };
-
-        tokio::join!(
-            summarize_video_streaming(
-                client,
-                &request.video_id,
-                &request.video_url,
-                &request.video_title,
-                &request.channel_name,
-                &transcripts_work_dir,
-                chunk_tx,
-            ),
-            forward_stream,
-        );
+        summarize_video_streaming(
+            client,
+            &request.video_id,
+            &request.video_url,
+            &request.video_title,
+            &request.channel_name,
+            &transcripts_work_dir,
+            tx,
+        )
+        .await;
     });
 
     rx

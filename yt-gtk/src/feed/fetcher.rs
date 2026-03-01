@@ -17,7 +17,7 @@ const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
 const MAX_FEED_VIDEOS: usize = 400;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
-const MAX_BACKOFF_MS: u64 = 4_000;
+const MAX_BACKOFF_MULTIPLIER: u64 = 4;
 
 /// Progress updates during feed fetching
 #[derive(Debug, Clone)]
@@ -307,7 +307,10 @@ async fn fetch_channel_with_retries(
                             pending.not_before = Instant::now();
                             continue;
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            // No alternate uploads playlist was found (or it matches the current one),
+                            // so we intentionally fall through to the normal retry/terminal handling.
+                        }
                         Err(lookup_error) => {
                             warn!(
                                 "Failed resolving uploads playlist for {} after 404: {}",
@@ -596,11 +599,9 @@ fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
 }
 
 fn backoff_ms_with_base(base_ms: u64, attempt: usize) -> u64 {
-    let attempt_multiplier = 1u64 << attempt.saturating_sub(1).min(4);
-    // Cap exponential growth via the multiplier so large base delays (e.g. 20-30s) are preserved.
-    let max_multiplier = (MAX_BACKOFF_MS / INITIAL_BACKOFF_MS).max(1);
-
-    base_ms.saturating_mul(attempt_multiplier.min(max_multiplier))
+    let max_exponent = MAX_BACKOFF_MULTIPLIER.ilog2() as usize;
+    let attempt_multiplier = 1u64 << attempt.saturating_sub(1).min(max_exponent);
+    base_ms.saturating_mul(attempt_multiplier)
 }
 
 /// Load channel IDs from a file (one per line)

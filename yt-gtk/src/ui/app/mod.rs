@@ -97,12 +97,7 @@ struct UiContext {
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
     badge: Label,
-    card_button_index: Rc<RefCell<CardButtonIndex>>,
-}
-
-#[derive(Default)]
-struct CardButtonIndex {
-    feed: HashMap<String, Button>,
+    feed_watch_later_buttons: Rc<RefCell<HashMap<String, Button>>>,
 }
 
 const CARD_WIDTH: i32 = 320;
@@ -212,12 +207,10 @@ fn toggle_watch_later_and_download(
     video_title: &str,
 ) -> bool {
     let mut state = state_rc.borrow_mut();
-    let added = if state.watch_later.remove(video_id) {
-        false
-    } else {
+    let added = !state.watch_later.remove(video_id);
+    if added {
         state.watch_later.insert(video_id.to_string());
-        true
-    };
+    }
 
     let local_path = state.storage.find_video_path(video_id);
     if added && needs_download_upgrade(local_path.as_deref()) {
@@ -259,9 +252,8 @@ fn apply_watch_later_action(
 
 fn update_feed_watch_later_toggle(ui_context: &UiContext, video_id: &str, is_watch_later: bool) {
     let feed_toggle = ui_context
-        .card_button_index
+        .feed_watch_later_buttons
         .borrow()
-        .feed
         .get(video_id)
         .cloned();
     if let Some(button) = feed_toggle {
@@ -602,7 +594,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     main_box.pack_start(&stack, true, true, 0);
     window.add(&main_box);
 
-    let card_button_index = Rc::new(RefCell::new(CardButtonIndex::default()));
+    let feed_watch_later_buttons = Rc::new(RefCell::new(HashMap::<String, Button>::new()));
 
     // Create context menu with handlers connected once
     let context_menu = Popover::new(None::<&gtk::Widget>);
@@ -615,7 +607,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
         badge: wl_badge.clone(),
-        card_button_index: card_button_index.clone(),
+        feed_watch_later_buttons: feed_watch_later_buttons.clone(),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 

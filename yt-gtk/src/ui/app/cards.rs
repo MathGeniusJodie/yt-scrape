@@ -153,7 +153,7 @@ pub(super) fn populate_flow_box(
         flow_box.remove(child);
     });
     if tab == Tab::Feed {
-        ui_context.card_button_index.borrow_mut().feed.clear();
+        ui_context.feed_watch_later_buttons.borrow_mut().clear();
     }
 
     let state = state_rc.borrow();
@@ -180,9 +180,8 @@ pub(super) fn populate_flow_box(
         );
         if tab == Tab::Feed {
             ui_context
-                .card_button_index
+                .feed_watch_later_buttons
                 .borrow_mut()
-                .feed
                 .insert(video.video_id().to_string(), watch_later_toggle.clone());
         }
 

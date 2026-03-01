@@ -1,9 +1,9 @@
 use crate::cache::fetch_transcript;
 use anyhow::Result;
+use async_channel::Sender;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::sync::mpsc;
 
 const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -196,7 +196,7 @@ pub async fn summarize_video_streaming(
     video_title: &str,
     channel_name: &str,
     transcripts_work_dir: &Path,
-    tx: mpsc::UnboundedSender<StreamingMessage>,
+    tx: Sender<StreamingMessage>,
 ) {
     // Try Gemini flash first, then OpenRouter with transcript fallback.
     let gemini_result = match std::env::var("GEMINI_API_KEY") {
@@ -231,10 +231,12 @@ pub async fn summarize_video_streaming(
         )
         .await
         {
-            let _ = tx.send(StreamingMessage::Error(format!(
-                "Gemini failed: {}. OpenRouter fallback failed: {}",
-                gemini_error, openrouter_error
-            )));
+            let _ = tx
+                .send(StreamingMessage::Error(format!(
+                    "Gemini failed: {}. OpenRouter fallback failed: {}",
+                    gemini_error, openrouter_error
+                )))
+                .await;
         }
     }
 }
@@ -245,7 +247,7 @@ async fn call_gemini_streaming(
     model: &str,
     video_url: &str,
     prompt: &str,
-    tx: mpsc::UnboundedSender<StreamingMessage>,
+    tx: Sender<StreamingMessage>,
 ) -> Result<()> {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent",
@@ -308,21 +310,21 @@ async fn call_gemini_streaming(
 
         while let Some(event) = pop_next_sse_event(&mut buffer) {
             for text in parse_gemini_sse_event_text(&event) {
-                if !text.is_empty() {
-                    let _ = tx.send(StreamingMessage::Chunk(text));
+                if !text.is_empty() && tx.send(StreamingMessage::Chunk(text)).await.is_err() {
+                    return Ok(());
                 }
             }
         }
     }
 
-    let _ = tx.send(StreamingMessage::Done);
+    let _ = tx.send(StreamingMessage::Done).await;
     Ok(())
 }
 
 async fn call_openrouter_with_transcript(
     client: &reqwest::Client,
     input: OpenRouterSummaryInput<'_>,
-    tx: mpsc::UnboundedSender<StreamingMessage>,
+    tx: Sender<StreamingMessage>,
 ) -> Result<()> {
     let OpenRouterSummaryInput {
         video_id,
@@ -390,10 +392,10 @@ async fn call_openrouter_with_transcript(
         .ok_or_else(|| anyhow::anyhow!("OpenRouter returned no summary text"))?;
 
     let summary = content.trim().to_string();
-    if !summary.is_empty() {
-        let _ = tx.send(StreamingMessage::Chunk(summary));
+    if !summary.is_empty() && tx.send(StreamingMessage::Chunk(summary)).await.is_err() {
+        return Ok(());
     }
-    let _ = tx.send(StreamingMessage::Done);
+    let _ = tx.send(StreamingMessage::Done).await;
     Ok(())
 }
 

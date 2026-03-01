@@ -12,6 +12,7 @@ const VIDEOS_CACHE_FILE: &str = "videos.json";
 const VIDEO_SIDECARS_DIR: &str = "video_sidecars";
 const VIDEO_SIDECAR_EXTENSION: &str = "json";
 const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
+const YOUTUBE_VIDEO_ID_LENGTH: usize = 11;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct VideoMetadataSidecar {
@@ -28,9 +29,19 @@ impl VideoMetadataSidecar {
 }
 
 fn video_id_from_stem(stem: &str) -> Option<&str> {
-    // Split from the right so underscores in titles do not affect ID extraction.
-    let (_, video_id) = stem.rsplit_once('_')?;
-    (!video_id.is_empty()).then_some(video_id)
+    let id_start = stem.len().checked_sub(YOUTUBE_VIDEO_ID_LENGTH)?;
+    let video_id = stem.get(id_start..)?;
+    if !video_id
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return None;
+    }
+    if id_start == 0 || stem[..id_start].ends_with('_') {
+        Some(video_id)
+    } else {
+        None
+    }
 }
 
 fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
@@ -482,28 +493,34 @@ mod tests {
     }
 
     #[test]
-    fn video_id_from_stem_extracts_suffix_after_last_underscore() {
+    fn video_id_from_stem_extracts_trailing_youtube_id() {
         assert_eq!(
-            video_id_from_stem("title_with_underscores_abc123"),
-            Some("abc123")
+            video_id_from_stem("title_with_underscores_C9ww_8cg_5g"),
+            Some("C9ww_8cg_5g")
         );
-        assert_eq!(video_id_from_stem("_abc123"), Some("abc123"));
-        assert_eq!(video_id_from_stem("single_separator"), Some("separator"));
+        assert_eq!(video_id_from_stem("C9ww_8cg_5g"), Some("C9ww_8cg_5g"));
+        assert_eq!(
+            video_id_from_stem("trailing_abc123DEF45"),
+            Some("abc123DEF45")
+        );
+        assert_eq!(video_id_from_stem("single_separator"), None);
         assert_eq!(video_id_from_stem("missing_suffix_"), None);
+        assert_eq!(video_id_from_stem("invalid_id_prefix_abc123def$%"), None);
     }
 
     #[test]
     fn collect_cached_video_ids_from_dir_only_keeps_supported_video_files() {
         let temp_dir = create_unique_temp_dir();
 
-        File::create(temp_dir.join("my_title_abc123.mkv")).expect("Failed to create mkv file");
-        File::create(temp_dir.join("another_title_xyz789.mp4")).expect("Failed to create mp4 file");
+        File::create(temp_dir.join("my_title_C9ww_8cg_5g.mkv")).expect("Failed to create mkv file");
+        File::create(temp_dir.join("another_title_abc123DEF45.mp4"))
+            .expect("Failed to create mp4 file");
         File::create(temp_dir.join("skip_me.txt")).expect("Failed to create text file");
         File::create(temp_dir.join("missing_suffix_.webm")).expect("Failed to create webm file");
 
         let ids = collect_cached_video_ids_from_dir(&temp_dir);
-        assert!(ids.contains("abc123"));
-        assert!(ids.contains("xyz789"));
+        assert!(ids.contains("C9ww_8cg_5g"));
+        assert!(ids.contains("abc123DEF45"));
         assert_eq!(ids.len(), 2);
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
