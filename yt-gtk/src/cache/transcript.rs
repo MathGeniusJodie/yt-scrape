@@ -127,20 +127,11 @@ fn parse_json3(json: &str) -> Result<String, TranscriptError> {
         .events
         .ok_or(TranscriptError::MissingSubtitleEvents)?;
 
-    let mut text_parts: Vec<String> = Vec::new();
-
-    for event in events {
-        if let Some(segs) = event.segs {
-            for seg in segs {
-                if let Some(text) = seg.utf8 {
-                    text_parts.push(text);
-                }
-            }
-        }
-    }
-
-    // Join all text and clean it up
-    let raw_text = text_parts.join("");
+    let raw_text: String = events
+        .into_iter()
+        .flat_map(|event| event.segs.unwrap_or_default())
+        .filter_map(|segment| segment.utf8)
+        .collect();
 
     // Clean up the transcript:
     // - Normalize whitespace

@@ -43,5 +43,4 @@ pub fn show_text_dialog(parent: &ApplicationWindow, title: &str, content: &str) 
     });
 
     dialog.run();
-    dialog.close();
 }

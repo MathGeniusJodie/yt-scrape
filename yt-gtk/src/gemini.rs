@@ -190,6 +190,7 @@ fn configured_openrouter_models() -> Vec<String> {
 /// * `transcripts_work_dir` - Temporary directory for transcript extraction artifacts.
 /// * `tx` - Channel used to stream [`StreamingMessage`] updates.
 pub async fn summarize_video_streaming(
+    client: reqwest::Client,
     video_id: &str,
     video_url: &str,
     video_title: &str,
@@ -197,19 +198,6 @@ pub async fn summarize_video_streaming(
     transcripts_work_dir: &Path,
     tx: mpsc::UnboundedSender<StreamingMessage>,
 ) {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            let _ = tx.send(StreamingMessage::Error(format!(
-                "Failed to initialize HTTP client: {error}"
-            )));
-            return;
-        }
-    };
-
     // Try Gemini flash first, then OpenRouter with transcript fallback.
     let gemini_result = match std::env::var("GEMINI_API_KEY") {
         Ok(api_key) => {
@@ -260,8 +248,8 @@ async fn call_gemini_streaming(
     tx: mpsc::UnboundedSender<StreamingMessage>,
 ) -> Result<()> {
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent",
+        model
     );
 
     let request = GeminiRequest {
@@ -291,6 +279,7 @@ async fn call_gemini_streaming(
 
     let response = client
         .post(&url)
+        .query(&[("key", api_key), ("alt", "sse")])
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
@@ -317,32 +306,10 @@ async fn call_gemini_streaming(
         // Normalize CRLF → LF by dropping bare carriage returns
         buffer.extend(text.chars().filter(|&c| c != '\r'));
 
-        // Process complete SSE events (data: {...}\n\n)
-        while let Some(event_end) = buffer.find("\n\n") {
-            let event = buffer[..event_end].to_string();
-            buffer = buffer[event_end + 2..].to_string();
-
-            // Parse the SSE event - handle potential leading newlines
-            let event = event.trim_start_matches('\n');
-            if let Some(data) = event.strip_prefix("data: ") {
-                match serde_json::from_str::<GeminiResponse>(data) {
-                    Ok(response) => {
-                        if let Some(candidates) = response.candidates {
-                            if let Some(candidate) = candidates.first() {
-                                for part in &candidate.content.parts {
-                                    if let Some(ref text) = part.text {
-                                        let text = smartify_quotes(text);
-                                        if !text.is_empty() {
-                                            let _ = tx.send(StreamingMessage::Chunk(text));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Ignore parse errors for incomplete chunks
-                    }
+        while let Some(event) = pop_next_sse_event(&mut buffer) {
+            for text in parse_gemini_sse_event_text(&event) {
+                if !text.is_empty() {
+                    let _ = tx.send(StreamingMessage::Chunk(text));
                 }
             }
         }
@@ -422,7 +389,7 @@ async fn call_openrouter_with_transcript(
         .and_then(|choice| extract_openrouter_content(&choice.message.content))
         .ok_or_else(|| anyhow::anyhow!("OpenRouter returned no summary text"))?;
 
-    let summary = smartify_quotes(content.trim());
+    let summary = content.trim().to_string();
     if !summary.is_empty() {
         let _ = tx.send(StreamingMessage::Chunk(summary));
     }
@@ -449,32 +416,91 @@ fn extract_openrouter_content(content: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Convert straight quotes to curly/smart quotes
-fn smartify_quotes(text: &str) -> String {
-    use smart_quotes::{decide_quote_after, Decision};
+fn pop_next_sse_event(buffer: &mut String) -> Option<String> {
+    let event_end = buffer.find("\n\n")?;
+    let event = buffer[..event_end].trim_start_matches('\n').to_string();
+    buffer.drain(..event_end + 2);
+    Some(event)
+}
 
-    const OPEN_DOUBLE: char = '\u{201C}'; // "
-    const CLOSE_DOUBLE: char = '\u{201D}'; // "
-    const OPEN_SINGLE: char = '\u{2018}'; // '
-    const CLOSE_SINGLE: char = '\u{2019}'; // ' (also apostrophe)
+fn parse_gemini_sse_event_text(event: &str) -> Vec<String> {
+    let Some(data) = event.strip_prefix("data: ") else {
+        return Vec::new();
+    };
 
-    let mut result = String::with_capacity(text.len());
-    let mut prev_char: Option<char> = None;
+    let Ok(response) = serde_json::from_str::<GeminiResponse>(data) else {
+        return Vec::new();
+    };
 
-    for c in text.chars() {
-        match c {
-            '"' => match decide_quote_after(prev_char) {
-                Decision::Open => result.push(OPEN_DOUBLE),
-                Decision::Close => result.push(CLOSE_DOUBLE),
-            },
-            '\'' => match decide_quote_after(prev_char) {
-                Decision::Open => result.push(OPEN_SINGLE),
-                Decision::Close => result.push(CLOSE_SINGLE),
-            },
-            _ => result.push(c),
-        }
-        prev_char = Some(c);
+    response
+        .candidates
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .map(|candidate| {
+            candidate
+                .content
+                .parts
+                .into_iter()
+                .filter_map(|part| part.text)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_openrouter_content, parse_gemini_sse_event_text, pop_next_sse_event};
+
+    #[test]
+    fn extract_openrouter_content_reads_string_payload() {
+        let payload = serde_json::json!("summary text");
+        assert_eq!(
+            extract_openrouter_content(&payload),
+            Some("summary text".to_string())
+        );
     }
 
-    result
+    #[test]
+    fn extract_openrouter_content_reads_text_parts_array() {
+        let payload = serde_json::json!([
+            {"type": "text", "text": "Hello "},
+            {"type": "text", "text": "world"}
+        ]);
+        assert_eq!(
+            extract_openrouter_content(&payload),
+            Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_openrouter_content_rejects_empty_text_parts() {
+        let payload = serde_json::json!([{"type": "text", "text": "   "}]);
+        assert_eq!(extract_openrouter_content(&payload), None);
+    }
+
+    #[test]
+    fn pop_next_sse_event_drains_consumed_bytes() {
+        let mut buffer = String::from("data: one\n\ndata: two\n\n");
+        assert_eq!(
+            pop_next_sse_event(&mut buffer),
+            Some("data: one".to_string())
+        );
+        assert_eq!(buffer, "data: two\n\n");
+    }
+
+    #[test]
+    fn parse_gemini_sse_event_text_extracts_candidate_text() {
+        let event = r#"data: {"candidates":[{"content":{"parts":[{"text":"A "},{"text":"B"}]}}]}"#;
+        assert_eq!(
+            parse_gemini_sse_event_text(event),
+            vec!["A ".to_string(), "B".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_gemini_sse_event_text_ignores_non_data_or_invalid_json() {
+        assert!(parse_gemini_sse_event_text("event: ping").is_empty());
+        assert!(parse_gemini_sse_event_text("data: {").is_empty());
+    }
 }

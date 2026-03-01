@@ -47,11 +47,9 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    // Set program name for desktop environment integration
     glib::set_prgname(Some("yt-gtk"));
     glib::set_application_name("yt-gtk");
 
-    // Find the subs file
     let subs_file = find_subs_file().context("Failed locating youtube-subs.txt")?;
 
     let app = Application::builder()
@@ -75,7 +73,7 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
         )
     })?;
 
-    let candidates = vec![
+    let candidates = [
         exe_dir.join("youtube-subs.txt"),
         exe_dir.join("../youtube-subs.txt"),
         exe_dir.join("../../youtube-subs.txt"),

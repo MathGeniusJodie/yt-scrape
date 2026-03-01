@@ -39,12 +39,10 @@ log = "0.4"
 
 # Futures utilities
 futures = "0.3"
+humantime = "2.3"
 
 # Non-blocking channel compatible with both tokio and glib main contexts
 async-channel = "2"
-
-# Smart quotes
-smart_quotes = "0.1"
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause / start_paused in tests; not in `full`.

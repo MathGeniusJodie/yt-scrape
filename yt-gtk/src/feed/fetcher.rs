@@ -15,6 +15,7 @@ const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/vide
 const PLAYLIST_ITEMS_MAX_RESULTS: &str = "25";
 const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
+const MAX_FEED_VIDEOS: usize = 400;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 const MAX_BACKOFF_MS: u64 = 4_000;
 
@@ -132,7 +133,7 @@ struct PlaylistThumbnails {
 }
 
 impl PlaylistThumbnails {
-    fn best_url(&self) -> Option<String> {
+    fn preferred_url(&self) -> Option<String> {
         self.medium
             .as_ref()
             .or(self.high.as_ref())
@@ -224,10 +225,10 @@ pub async fn fetch_all_feeds(
     }
 
     // Sort by published date (newest first)
-    all_videos.sort_by(|a, b| b.published.cmp(&a.published));
+    all_videos.sort_by(|a, b| b.published().cmp(a.published()));
 
-    // Keep only the most recent 400
-    all_videos.truncate(400);
+    // Keep only the most recent videos to cap UI and cache churn.
+    all_videos.truncate(MAX_FEED_VIDEOS);
 
     let total_videos = all_videos.len();
     let _ = tx
@@ -278,10 +279,21 @@ async fn fetch_channel_with_retries(
                         Ok(Some(resolved_uploads_playlist_id))
                             if resolved_uploads_playlist_id != pending.uploads_playlist_id =>
                         {
+                            if pending.attempt >= MAX_FETCH_ATTEMPTS {
+                                let _ = tx
+                                    .send(FetchProgress::Error {
+                                        channel_id: pending.channel_id,
+                                        error: "Exceeded retry budget while resolving uploads playlist ID."
+                                            .to_string(),
+                                    })
+                                    .await;
+                                return ChannelFetchResult::Failed;
+                            }
+
                             let _ = tx
                                 .send(FetchProgress::RetryScheduled {
                                     channel_id: pending.channel_id.clone(),
-                                    next_attempt: pending.attempt,
+                                    next_attempt: pending.attempt + 1,
                                     max_attempts: MAX_FETCH_ATTEMPTS,
                                     delay_secs: 0,
                                     reason:
@@ -290,6 +302,7 @@ async fn fetch_channel_with_retries(
                                 })
                                 .await;
 
+                            pending.attempt += 1;
                             pending.uploads_playlist_id = resolved_uploads_playlist_id;
                             pending.not_before = Instant::now();
                             continue;
@@ -418,11 +431,11 @@ fn videos_from_playlist_items(
             let thumbnail_url = snippet
                 .thumbnails
                 .as_ref()
-                .and_then(PlaylistThumbnails::best_url)
+                .and_then(PlaylistThumbnails::preferred_url)
                 .unwrap_or_else(|| urls::thumbnail_url(&video_id));
             let duration_seconds = durations_by_video_id.get(&video_id).copied();
 
-            Some(Video {
+            Some(Video::new(
                 video_id,
                 channel_id,
                 channel_name,
@@ -430,9 +443,7 @@ fn videos_from_playlist_items(
                 published,
                 thumbnail_url,
                 duration_seconds,
-                transcript: None,
-                ai_summary: None,
-            })
+            ))
         })
         .collect()
 }
@@ -487,6 +498,15 @@ async fn fetch_video_durations(
 }
 
 fn parse_iso8601_duration_seconds(input: &str) -> Option<u32> {
+    let duration = humantime::parse_duration(&iso8601_to_humantime_duration(input)?).ok()?;
+    let seconds = duration.as_secs();
+    if duration.subsec_nanos() != 0 {
+        return None;
+    }
+    u32::try_from(seconds).ok()
+}
+
+fn iso8601_to_humantime_duration(input: &str) -> Option<String> {
     let mut chars = input.chars();
     if chars.next()? != 'P' {
         return None;
@@ -494,8 +514,8 @@ fn parse_iso8601_duration_seconds(input: &str) -> Option<u32> {
 
     let mut in_time = false;
     let mut saw_component = false;
-    let mut total_seconds = 0u64;
-    let mut current_number: Option<u64> = None;
+    let mut number = String::new();
+    let mut humantime = String::new();
 
     for ch in chars {
         if ch == 'T' {
@@ -504,34 +524,37 @@ fn parse_iso8601_duration_seconds(input: &str) -> Option<u32> {
         }
 
         if ch.is_ascii_digit() {
-            let digit = ch.to_digit(10)? as u64;
-            current_number = Some(
-                current_number
-                    .unwrap_or(0)
-                    .saturating_mul(10)
-                    .saturating_add(digit),
-            );
+            number.push(ch);
             continue;
         }
 
-        let value = current_number.take()?;
-        let unit_seconds = match (ch, in_time) {
-            ('W', false) => 7 * 24 * 60 * 60,
-            ('D', false) => 24 * 60 * 60,
-            ('H', true) => 60 * 60,
-            ('M', true) => 60,
-            ('S', true) => 1,
+        if number.is_empty() {
+            return None;
+        }
+
+        let unit = match (ch, in_time) {
+            ('W', false) => "w",
+            ('D', false) => "d",
+            ('H', true) => "h",
+            ('M', true) => "m",
+            ('S', true) => "s",
             _ => return None,
         };
-        total_seconds = total_seconds.saturating_add(value.saturating_mul(unit_seconds));
+
+        if !humantime.is_empty() {
+            humantime.push(' ');
+        }
+        humantime.push_str(&number);
+        humantime.push_str(unit);
+        number.clear();
         saw_component = true;
     }
 
-    if current_number.is_some() || !saw_component {
+    if !saw_component || !number.is_empty() {
         return None;
     }
 
-    u32::try_from(total_seconds).ok()
+    Some(humantime)
 }
 
 fn uploads_playlist_id_for_channel(channel_id: &str) -> Option<String> {
@@ -574,11 +597,7 @@ fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
 fn backoff_ms_with_base(base_ms: u64, attempt: usize) -> u64 {
     let attempt_multiplier = 1u64 << attempt.saturating_sub(1).min(4);
     // Cap exponential growth via the multiplier so large base delays (e.g. 20-30s) are preserved.
-    let max_multiplier = if INITIAL_BACKOFF_MS == 0 {
-        1
-    } else {
-        (MAX_BACKOFF_MS / INITIAL_BACKOFF_MS).max(1)
-    };
+    let max_multiplier = (MAX_BACKOFF_MS / INITIAL_BACKOFF_MS).max(1);
 
     base_ms.saturating_mul(attempt_multiplier.min(max_multiplier))
 }

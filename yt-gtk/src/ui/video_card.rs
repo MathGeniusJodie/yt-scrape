@@ -121,7 +121,7 @@ pub fn create_video_card(
     content_box.set_size_request(CARD_WIDTH - 16, -1); // card width minus 8px start/end margins
 
     // Title: wrap naturally and clamp to two lines using Pango layout.
-    let title_label = Label::new(Some(&video.title));
+    let title_label = Label::new(Some(video.title()));
     title_label.set_widget_name("video-title");
     title_label.set_line_wrap(true);
     title_label.set_line_wrap_mode(pango::WrapMode::WordChar);
@@ -139,15 +139,15 @@ pub fn create_video_card(
     let meta_box = gtk::Box::new(Orientation::Horizontal, 8);
     meta_box.set_widget_name("video-meta");
 
-    let channel_label = Label::new(Some(&video.channel_name));
+    let channel_label = Label::new(Some(video.channel_name()));
     channel_label.set_widget_name("channel-name");
     channel_label.set_ellipsize(pango::EllipsizeMode::End);
     channel_label.set_xalign(0.0);
     channel_label.set_hexpand(true);
     meta_box.pack_start(&channel_label, true, true, 0);
 
-    let time_ago = format_time_ago(&video.published);
-    let time_and_duration = match video.duration_seconds {
+    let time_ago = format_time_ago(video.published());
+    let time_and_duration = match video.duration_seconds() {
         Some(seconds) => format!("{} • {}", time_ago, format_video_duration(seconds)),
         None => time_ago,
     };

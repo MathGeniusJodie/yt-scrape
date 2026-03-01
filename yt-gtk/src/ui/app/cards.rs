@@ -60,12 +60,14 @@ pub(super) fn create_context_menu(
                 let playback = {
                     let state = state_rc.borrow();
                     state.video_by_id(&video.video_id).map(|current_video| {
-                        let video_title = current_video.title.clone();
+                        let video_title = current_video.title().to_string();
+                        let local_path = state.storage.find_video_path(&video.video_id);
                         let local_path = resolve_playback_path(
                             &state.storage,
                             ui_context.runtime.clone(),
                             &video.video_id,
                             &video_title,
+                            local_path,
                         );
                         (video_title, local_path)
                     })
@@ -137,7 +139,6 @@ pub(super) fn create_context_menu(
 
 pub(super) fn populate_flow_box(
     flow_box: &FlowBox,
-    state: &AppState,
     tab: Tab,
     downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
@@ -151,19 +152,20 @@ pub(super) fn populate_flow_box(
         ui_context.card_button_index.borrow_mut().feed.clear();
     }
 
+    let state = state_rc.borrow();
     let videos: Vec<&Video> = match tab {
         Tab::Feed => state.videos.iter().collect(),
         Tab::WatchLater => state
             .videos
             .iter()
-            .filter(|video| state.watch_later.contains(&video.video_id))
+            .filter(|video| state.watch_later.contains(video.video_id()))
             .collect(),
     };
 
     for video in videos {
-        let thumbnail_path = state.storage.thumbnail_path(&video.video_id);
-        let is_watch_later = state.watch_later.contains(&video.video_id);
-        let is_downloaded = downloaded_video_ids.contains(&video.video_id);
+        let thumbnail_path = state.storage.thumbnail_path(video.video_id());
+        let is_watch_later = state.watch_later.contains(video.video_id());
+        let is_downloaded = downloaded_video_ids.contains(video.video_id());
 
         let (card, watch_later_toggle, ai_summary_button) = create_video_card(
             video,
@@ -177,11 +179,11 @@ pub(super) fn populate_flow_box(
                 .card_button_index
                 .borrow_mut()
                 .feed
-                .insert(video.video_id.clone(), watch_later_toggle.clone());
+                .insert(video.video_id().to_string(), watch_later_toggle.clone());
         }
 
         let video_ref = SelectedVideo {
-            video_id: video.video_id.clone(),
+            video_id: video.video_id().to_string(),
         };
         let state_rc = state_rc.clone();
         let runtime = ui_context.runtime.clone();
@@ -210,12 +212,14 @@ pub(super) fn populate_flow_box(
                     let playback = {
                         let state = state_rc.borrow();
                         state.video_by_id(&video_id).map(|current_video| {
-                            let video_title = current_video.title.clone();
+                            let video_title = current_video.title().to_string();
+                            let local_path = state.storage.find_video_path(&video_id);
                             let local_path = resolve_playback_path(
                                 &state.storage,
                                 runtime.clone(),
                                 &video_id,
                                 &video_title,
+                                local_path,
                             );
                             (video_title, local_path)
                         })

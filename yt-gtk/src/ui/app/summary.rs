@@ -26,10 +26,10 @@ struct SummaryGenerationRequest {
 impl SummaryGenerationRequest {
     fn from_video(video: &Video) -> Self {
         Self {
-            video_id: video.video_id.clone(),
+            video_id: video.video_id().to_string(),
             video_url: video.watch_url(),
-            video_title: video.title.clone(),
-            channel_name: video.channel_name.clone(),
+            video_title: video.title().to_string(),
+            channel_name: video.channel_name().to_string(),
         }
     }
 }
@@ -43,8 +43,9 @@ fn summary_generation_request(
         .map(SummaryGenerationRequest::from_video)
 }
 
-fn spawn_summary_generation(
+fn spawn_buffered_summary_generation(
     runtime: Arc<Runtime>,
+    client: reqwest::Client,
     video_id: String,
     video_url: String,
     video_title: String,
@@ -57,6 +58,7 @@ fn spawn_summary_generation(
         let result = {
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
             summarize_video_streaming(
+                client.clone(),
                 &video_id,
                 &video_url,
                 &video_title,
@@ -103,19 +105,16 @@ fn persist_summary_to_cache(
     let mut state = state_rc.borrow_mut();
     state.summaries_in_progress.remove(video_id);
 
+    if let Err(save_error) = state.storage.save_video_ai_summary(video_id, &summary) {
+        error!(
+            "Failed to persist summary sidecar for {}: {}",
+            video_id, save_error
+        );
+    }
+
     let mut updated = false;
-    if let Some(video_index) = state
-        .videos
-        .iter()
-        .position(|video| video.video_id == video_id)
-    {
-        if let Err(save_error) = state.storage.save_video_ai_summary(video_id, &summary) {
-            error!(
-                "Failed to persist summary sidecar for {}: {}",
-                video_id, save_error
-            );
-        }
-        state.videos[video_index].ai_summary = Some(summary);
+    if let Some(video) = state.video_by_id_mut(video_id) {
+        video.set_ai_summary(Some(summary));
         updated = true;
     }
 
@@ -147,13 +146,16 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
         return;
     };
 
-    let transcripts_work_dir = state_rc
-        .borrow()
-        .storage
-        .transcripts_work_dir()
-        .to_path_buf();
-    let result_rx = spawn_summary_generation(
+    let (transcripts_work_dir, summary_client) = {
+        let state = state_rc.borrow();
+        (
+            state.storage.transcripts_work_dir().to_path_buf(),
+            state.http_client(),
+        )
+    };
+    let result_rx = spawn_buffered_summary_generation(
         ui_context.runtime.clone(),
+        summary_client,
         request.video_id.clone(),
         request.video_url,
         request.video_title,
@@ -217,13 +219,16 @@ fn start_summary_generation_for_dialog(
         return;
     };
 
-    let transcripts_work_dir = state_rc
-        .borrow()
-        .storage
-        .transcripts_work_dir()
-        .to_path_buf();
-    let result_rx = spawn_summary_generation(
+    let (transcripts_work_dir, summary_client) = {
+        let state = state_rc.borrow();
+        (
+            state.storage.transcripts_work_dir().to_path_buf(),
+            state.http_client(),
+        )
+    };
+    let result_rx = spawn_buffered_summary_generation(
         ui_context.runtime.clone(),
+        summary_client,
         summary_request.video_id.clone(),
         summary_request.video_url,
         summary_request.video_title,
@@ -275,10 +280,10 @@ pub(super) fn show_summary_dialog(
             return;
         };
         (
-            video.title.clone(),
+            video.title().to_string(),
             video
-                .ai_summary
-                .clone()
+                .ai_summary()
+                .map(ToString::to_string)
                 .filter(|summary| !summary.trim().is_empty()),
         )
     };
@@ -366,7 +371,10 @@ pub(super) fn show_transcript_dialog(
             );
             return;
         };
-        (video.title.clone(), video.transcript.clone())
+        (
+            video.title().to_string(),
+            video.transcript().map(ToString::to_string),
+        )
     };
 
     // Check if we already have the transcript cached
@@ -432,8 +440,8 @@ pub(super) fn show_transcript_dialog(
                             video_id, save_error
                         );
                     }
-                    if let Some(video) = state.videos.iter_mut().find(|v| v.video_id == video_id) {
-                        video.transcript = Some(transcript);
+                    if let Some(video) = state.video_by_id_mut(&video_id) {
+                        video.set_transcript(Some(transcript));
                     }
                 }
                 Err(transcript_error) => {

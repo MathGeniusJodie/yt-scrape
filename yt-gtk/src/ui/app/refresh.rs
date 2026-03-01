@@ -14,16 +14,16 @@ use std::sync::Arc;
 pub(super) fn merge_cached_video_fields(videos: &mut [Video], cached_videos: &[Video]) {
     let cached_by_id: HashMap<&str, &Video> = cached_videos
         .iter()
-        .map(|video| (video.video_id.as_str(), video))
+        .map(|video| (video.video_id(), video))
         .collect();
 
     for video in videos {
-        if let Some(cached) = cached_by_id.get(video.video_id.as_str()) {
-            if video.transcript.is_none() {
-                video.transcript = cached.transcript.clone();
+        if let Some(cached) = cached_by_id.get(video.video_id()) {
+            if video.transcript().is_none() {
+                video.set_transcript(cached.transcript().map(ToString::to_string));
             }
-            if video.ai_summary.is_none() {
-                video.ai_summary = cached.ai_summary.clone();
+            if video.ai_summary().is_none() {
+                video.set_ai_summary(cached.ai_summary().map(ToString::to_string));
             }
         }
     }
@@ -35,7 +35,6 @@ pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: 
     update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
     populate_flow_box(
         &ui_context.feed_flow,
-        &state_ref,
         Tab::Feed,
         &downloaded_video_ids,
         state_rc,
@@ -43,7 +42,6 @@ pub(super) fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: 
     );
     populate_flow_box(
         &ui_context.watch_later_flow,
-        &state_ref,
         Tab::WatchLater,
         &downloaded_video_ids,
         state_rc,
@@ -57,7 +55,6 @@ pub(super) fn refresh_watch_later_tab(state_rc: &Rc<RefCell<AppState>>, ui_conte
     update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
     populate_flow_box(
         &ui_context.watch_later_flow,
-        &state_ref,
         Tab::WatchLater,
         &downloaded_video_ids,
         state_rc,
@@ -81,6 +78,7 @@ pub(super) fn refresh_watch_later_tab(state_rc: &Rc<RefCell<AppState>>, ui_conte
 pub(super) fn download_missing_thumbnails(
     videos: &[Video],
     storage: &Storage,
+    client: reqwest::Client,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> Option<async_channel::Receiver<()>> {
     const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
@@ -88,11 +86,11 @@ pub(super) fn download_missing_thumbnails(
     let pending_downloads: Vec<(String, PathBuf)> = videos
         .iter()
         .filter_map(|video| {
-            let path = storage.thumbnail_path(&video.video_id);
+            let path = storage.thumbnail_path(video.video_id());
             if path.exists() {
                 None
             } else {
-                Some((video.thumbnail_url.clone(), path))
+                Some((video.thumbnail_url().to_string(), path))
             }
         })
         .collect();
@@ -103,8 +101,6 @@ pub(super) fn download_missing_thumbnails(
 
     let (completion_tx, completion_rx) = async_channel::bounded(1);
     runtime.spawn(async move {
-        let client = reqwest::Client::new();
-
         stream::iter(pending_downloads)
             .for_each_concurrent(THUMBNAIL_DOWNLOAD_CONCURRENCY, move |(url, path)| {
                 let client = client.clone();

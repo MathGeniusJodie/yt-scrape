@@ -82,3 +82,22 @@ pub fn play_video(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::mpv_base_command;
+
+    #[test]
+    fn mpv_base_command_sets_expected_flags() {
+        let command = mpv_base_command("Example Title");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args.contains(&"--title=Example Title".to_string()));
+        assert!(args.contains(&"--force-media-title=Example Title".to_string()));
+        assert!(args.contains(&"--sub-auto=all".to_string()));
+        assert!(args.contains(&"--sid=auto".to_string()));
+    }
+}

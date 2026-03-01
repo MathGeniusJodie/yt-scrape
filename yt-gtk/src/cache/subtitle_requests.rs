@@ -106,7 +106,9 @@ fn is_rate_limited(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_rate_limited, run_yt_dlp_subtitle_command, SubtitleRateLimiter, MAX_429_RETRIES};
+    use super::{
+        is_rate_limited, run_yt_dlp_subtitle_command, SubtitleRateLimiter, MAX_429_RETRIES,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -186,7 +188,11 @@ mod tests {
         .expect("io should not fail");
 
         assert!(result.status.success());
-        assert_eq!(call_count.load(Ordering::Relaxed), 1, "should not retry on success");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "should not retry on success"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -204,7 +210,11 @@ mod tests {
         .expect("io should not fail");
 
         assert!(!result.status.success());
-        assert_eq!(call_count.load(Ordering::Relaxed), 1, "non-429 failure should not retry");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "non-429 failure should not retry"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

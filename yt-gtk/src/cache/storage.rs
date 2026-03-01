@@ -58,7 +58,7 @@ fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
 fn sanitize_filename(input: &str) -> String {
     // Map invalid characters first so the trim operates on the final character set.
     // We trim_end after take() because truncation can land on a trailing space.
-    let s: String = input
+    let mut s: String = input
         .trim()
         .chars()
         .map(|character| match character {
@@ -68,7 +68,8 @@ fn sanitize_filename(input: &str) -> String {
         })
         .take(MAX_TITLE_LENGTH)
         .collect();
-    s.trim_end().to_string()
+    s.truncate(s.trim_end().len());
+    s
 }
 
 /// Manages filesystem-backed persistence for video metadata and cached assets.
@@ -95,9 +96,27 @@ impl Storage {
     pub fn new() -> Result<Self> {
         let project_dirs = directories::ProjectDirs::from("", "", "yt-gtk")
             .ok_or_else(|| anyhow::anyhow!("Could not determine project directories"))?;
+        Self::new_at(
+            project_dirs.data_dir().to_path_buf(),
+            project_dirs.cache_dir().to_path_buf(),
+        )
+    }
 
-        let data_dir = project_dirs.data_dir().to_path_buf();
-        let cache_dir = project_dirs.cache_dir().to_path_buf();
+    /// Creates storage rooted at explicit data/cache directories.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Directory used for persisted user data.
+    /// * `cache_dir` - Directory used for cache artifacts.
+    ///
+    /// # Returns
+    ///
+    /// A fully initialized [`Storage`] value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if directory creation fails.
+    pub fn new_at(data_dir: PathBuf, cache_dir: PathBuf) -> Result<Self> {
         let thumbnails_dir = cache_dir.join("thumbnails");
         let videos_dir = cache_dir.join("videos");
         let video_sidecars_dir = cache_dir.join(VIDEO_SIDECARS_DIR);
@@ -308,12 +327,12 @@ impl Storage {
         };
 
         for video in &mut videos {
-            if let Some(sidecar) = self.read_video_sidecar(&video.video_id) {
+            if let Some(sidecar) = self.read_video_sidecar(video.video_id()) {
                 if let Some(transcript) = sidecar.transcript {
-                    video.transcript = Some(transcript);
+                    video.set_transcript(Some(transcript));
                 }
                 if let Some(ai_summary) = sidecar.ai_summary {
-                    video.ai_summary = Some(ai_summary);
+                    video.set_ai_summary(Some(ai_summary));
                 }
             }
         }
@@ -337,6 +356,33 @@ impl Storage {
         Ok(())
     }
 
+    /// Persists transcript and/or AI summary in a per-video sidecar file.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_id` - YouTube video identifier.
+    /// * `transcript` - Optional transcript text to write.
+    /// * `ai_summary` - Optional summary text to write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sidecar loading, serialization, or file writes fail.
+    pub fn save_video_metadata(
+        &self,
+        video_id: &str,
+        transcript: Option<&str>,
+        ai_summary: Option<&str>,
+    ) -> Result<()> {
+        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
+        if let Some(transcript) = transcript {
+            sidecar.transcript = Some(transcript.to_string());
+        }
+        if let Some(ai_summary) = ai_summary {
+            sidecar.ai_summary = Some(ai_summary.to_string());
+        }
+        self.write_video_sidecar(video_id, &sidecar)
+    }
+
     /// Persists transcript text in a per-video sidecar file.
     ///
     /// # Arguments
@@ -352,9 +398,7 @@ impl Storage {
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
     pub fn save_video_transcript(&self, video_id: &str, transcript: &str) -> Result<()> {
-        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
-        sidecar.transcript = Some(transcript.to_string());
-        self.write_video_sidecar(video_id, &sidecar)
+        self.save_video_metadata(video_id, Some(transcript), None)
     }
 
     /// Persists AI summary text in a per-video sidecar file.
@@ -372,9 +416,7 @@ impl Storage {
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
     pub fn save_video_ai_summary(&self, video_id: &str, ai_summary: &str) -> Result<()> {
-        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
-        sidecar.ai_summary = Some(ai_summary.to_string());
-        self.write_video_sidecar(video_id, &sidecar)
+        self.save_video_metadata(video_id, None, Some(ai_summary))
     }
 }
 
@@ -382,7 +424,7 @@ impl Storage {
 mod tests {
     use super::{
         collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem, Storage,
-        VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE, VIDEO_SIDECARS_DIR,
+        VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE,
     };
     use crate::data::Video;
     use chrono::{DateTime, Utc};
@@ -407,46 +449,21 @@ mod tests {
     fn create_test_storage(root: &Path) -> Storage {
         let data_dir = root.join("data");
         let cache_dir = root.join("cache");
-        let thumbnails_dir = cache_dir.join("thumbnails");
-        let videos_dir = cache_dir.join("videos");
-        let video_sidecars_dir = cache_dir.join(VIDEO_SIDECARS_DIR);
-        let transcripts_work_dir = cache_dir.join("transcripts_work");
-
-        for dir in [
-            &data_dir,
-            &cache_dir,
-            &thumbnails_dir,
-            &videos_dir,
-            &video_sidecars_dir,
-            &transcripts_work_dir,
-        ] {
-            std::fs::create_dir_all(dir).expect("Failed to create storage directory");
-        }
-
-        Storage {
-            data_dir,
-            cache_dir,
-            thumbnails_dir,
-            videos_dir,
-            video_sidecars_dir,
-            transcripts_work_dir,
-        }
+        Storage::new_at(data_dir, cache_dir).expect("test storage should initialize")
     }
 
     fn sample_video(video_id: &str) -> Video {
         let published =
             DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("timestamp should parse");
-        Video {
-            video_id: video_id.to_string(),
-            channel_id: "UC123".to_string(),
-            channel_name: "Channel".to_string(),
-            title: format!("Title {video_id}"),
-            published: published.with_timezone(&Utc),
-            thumbnail_url: "https://example.com/thumb.jpg".to_string(),
-            duration_seconds: Some(120),
-            transcript: None,
-            ai_summary: None,
-        }
+        Video::new(
+            video_id.to_string(),
+            "UC123".to_string(),
+            "Channel".to_string(),
+            format!("Title {video_id}"),
+            published.with_timezone(&Utc),
+            "https://example.com/thumb.jpg".to_string(),
+            Some(120),
+        )
     }
 
     #[test]
@@ -506,11 +523,8 @@ mod tests {
             std::fs::read_to_string(&videos_path).expect("Baseline videos cache should exist");
 
         storage
-            .save_video_transcript("abc123", "Transcript body")
-            .expect("Saving transcript sidecar should succeed");
-        storage
-            .save_video_ai_summary("abc123", "Summary body")
-            .expect("Saving summary sidecar should succeed");
+            .save_video_metadata("abc123", Some("Transcript body"), Some("Summary body"))
+            .expect("Saving sidecar metadata should succeed");
 
         let videos_after =
             std::fs::read_to_string(&videos_path).expect("Videos cache should remain readable");
@@ -549,13 +563,10 @@ mod tests {
 
         let mixed_loaded = loaded
             .iter()
-            .find(|video| video.video_id == "mixed456")
+            .find(|video| video.video_id() == "mixed456")
             .expect("Video should be present");
-        assert_eq!(
-            mixed_loaded.transcript.as_deref(),
-            Some("sidecar transcript")
-        );
-        assert_eq!(mixed_loaded.ai_summary.as_deref(), Some("sidecar summary"));
+        assert_eq!(mixed_loaded.transcript(), Some("sidecar transcript"));
+        assert_eq!(mixed_loaded.ai_summary(), Some("sidecar summary"));
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }

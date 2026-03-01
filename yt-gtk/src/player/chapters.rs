@@ -27,6 +27,8 @@ fn secs_to_ms(seconds: f64) -> i64 {
     (seconds.max(0.0) * 1000.0).round() as i64
 }
 
+// Kept local ffmetadata generation because there is no maintained writer crate
+// available in this offline dependency set.
 fn escape_ffmetadata(value: &str) -> String {
     value
         .replace('\\', "\\\\")
