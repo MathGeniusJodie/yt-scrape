@@ -5,7 +5,7 @@ use crate::gemini::{summarize_video_streaming, StreamingMessage};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
@@ -78,7 +78,7 @@ pub(super) enum SummaryGenerationError {
 pub(super) struct SummaryGenerator {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
-    summaries_in_progress: Arc<Mutex<HashSet<String>>>,
+    summaries_in_progress: Arc<RwLock<HashSet<String>>>,
 }
 
 impl SummaryGenerator {
@@ -87,7 +87,7 @@ impl SummaryGenerator {
         Self {
             runtime,
             http_client,
-            summaries_in_progress: Arc::new(Mutex::new(HashSet::new())),
+            summaries_in_progress: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -102,12 +102,22 @@ impl SummaryGenerator {
         video_id: &str,
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
+        if mode.should_skip_in_progress()
+            && self
+                .summaries_in_progress
+                .read()
+                .expect("summary in-progress rwlock must not be poisoned")
+                .contains(video_id)
+        {
+            return Err(StartSummaryGenerationError::AlreadyInProgress);
+        }
+
         let video = {
             let state = state_rc.borrow();
             let mut summaries_in_progress = self
                 .summaries_in_progress
-                .lock()
-                .expect("summary in-progress mutex must not be poisoned");
+                .write()
+                .expect("summary in-progress rwlock must not be poisoned");
             prepare_summary_generation_video(&state, &mut summaries_in_progress, video_id, mode)?
         };
 
@@ -133,8 +143,8 @@ impl SummaryGenerator {
     /// Removes a video's in-progress marker after a failed or cancelled generation.
     pub(super) fn clear_in_progress(&self, video_id: &str) {
         self.summaries_in_progress
-            .lock()
-            .expect("summary in-progress mutex must not be poisoned")
+            .write()
+            .expect("summary in-progress rwlock must not be poisoned")
             .remove(video_id);
     }
 
@@ -146,8 +156,8 @@ impl SummaryGenerator {
         summary: String,
     ) -> Result<(), CacheVideoError> {
         self.summaries_in_progress
-            .lock()
-            .expect("summary in-progress mutex must not be poisoned")
+            .write()
+            .expect("summary in-progress rwlock must not be poisoned")
             .remove(video_id);
         state_rc
             .borrow_mut()
