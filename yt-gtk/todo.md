@@ -1,5 +1,3 @@
-- [ ] **Dowload and cache AI summary on add to watch later**
-
 - [ ] **Single source of truth for video state** — Videos are duplicated across `AppState.videos`, closures captured in card widgets, and both `feed_cards`/`watch_later_cards` maps. Normalize so cards hold only a video ID and read from `AppState` on demand.
 
 - [ ] **Flatten `UiContext` → `AsyncContext` / `WidgetContext` nesting** — The triple-layer context wrapping forces callers to write `ui_ctx.async_ctx.runtime` and `ui_ctx.widgets.feed_flow`. Merge into a single flat `AppContext` struct.
