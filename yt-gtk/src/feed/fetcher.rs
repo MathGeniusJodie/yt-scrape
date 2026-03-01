@@ -502,63 +502,11 @@ async fn fetch_video_durations(
 }
 
 fn parse_iso8601_duration_seconds(input: &str) -> Option<u32> {
-    let duration = humantime::parse_duration(&iso8601_to_humantime_duration(input)?).ok()?;
-    let seconds = duration.as_secs();
-    if duration.subsec_nanos() != 0 {
-        return None;
-    }
-    u32::try_from(seconds).ok()
-}
-
-fn iso8601_to_humantime_duration(input: &str) -> Option<String> {
-    let mut chars = input.chars();
-    if chars.next()? != 'P' {
-        return None;
-    }
-
-    let mut in_time = false;
-    let mut saw_component = false;
-    let mut number = String::new();
-    let mut humantime = String::new();
-
-    for ch in chars {
-        if ch == 'T' {
-            in_time = true;
-            continue;
-        }
-
-        if ch.is_ascii_digit() {
-            number.push(ch);
-            continue;
-        }
-
-        if number.is_empty() {
-            return None;
-        }
-
-        let unit = match (ch, in_time) {
-            ('W', false) => "w",
-            ('D', false) => "d",
-            ('H', true) => "h",
-            ('M', true) => "m",
-            ('S', true) => "s",
-            _ => return None,
-        };
-
-        if !humantime.is_empty() {
-            humantime.push(' ');
-        }
-        humantime.push_str(&number);
-        humantime.push_str(unit);
-        number.clear();
-        saw_component = true;
-    }
-
-    if !saw_component || !number.is_empty() {
-        return None;
-    }
-
-    Some(humantime)
+    let duration = std::time::Duration::from(iso8601::duration(input).ok()?);
+    let rounded_seconds = duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_millis() >= 500));
+    u32::try_from(rounded_seconds).ok()
 }
 
 fn uploads_playlist_id_for_channel(channel_id: &str) -> Option<String> {
@@ -636,13 +584,21 @@ mod tests {
         assert_eq!(parse_iso8601_duration_seconds("PT15M33S"), Some(933));
         assert_eq!(parse_iso8601_duration_seconds("PT2H"), Some(7_200));
         assert_eq!(parse_iso8601_duration_seconds("P1DT2H3M4S"), Some(93_784));
+        assert_eq!(parse_iso8601_duration_seconds("P2W"), Some(1_209_600));
+        assert_eq!(parse_iso8601_duration_seconds("P1M"), Some(2_592_000));
+        assert_eq!(parse_iso8601_duration_seconds("P1Y"), Some(31_536_000));
     }
 
     #[test]
-    fn rejects_unsupported_or_invalid_durations() {
+    fn rejects_invalid_iso_durations() {
         assert_eq!(parse_iso8601_duration_seconds("15M"), None);
-        assert_eq!(parse_iso8601_duration_seconds("P1M"), None);
-        assert_eq!(parse_iso8601_duration_seconds("PT"), None);
+        assert_eq!(parse_iso8601_duration_seconds("PT"), Some(0));
+    }
+
+    #[test]
+    fn rounds_fractional_seconds() {
+        assert_eq!(parse_iso8601_duration_seconds("PT1.499S"), Some(1));
+        assert_eq!(parse_iso8601_duration_seconds("PT1.5S"), Some(2));
     }
 
     #[test]

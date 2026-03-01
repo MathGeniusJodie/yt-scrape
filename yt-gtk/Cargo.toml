@@ -28,6 +28,7 @@ serde_json = "1"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
+chrono-humanize = "0.2"
 
 # Directories
 directories = "5"
@@ -39,7 +40,7 @@ log = "0.4"
 
 # Futures utilities
 futures = "0.3"
-humantime = "2.3"
+iso8601 = "0.6"
 
 # Non-blocking channel compatible with both tokio and glib main contexts
 async-channel = "2"

@@ -1,5 +1,6 @@
 use crate::data::Video;
 use chrono::Utc;
+use chrono_humanize::{HumanTime,Accuracy,Tense};
 
 const CARD_WIDTH: i32 = 320;
 // 16:9 thumbnail height derived from card width
@@ -247,24 +248,7 @@ fn crop_to_16_9(pixbuf: &Pixbuf) -> Pixbuf {
 }
 
 fn format_time_ago(dt: chrono::DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(dt);
-
-    if duration.num_days() > 365 {
-        let years = duration.num_days() / 365;
-        format!("{}y ago", years)
-    } else if duration.num_days() > 30 {
-        let months = duration.num_days() / 30;
-        format!("{}mo ago", months)
-    } else if duration.num_days() > 0 {
-        format!("{}d ago", duration.num_days())
-    } else if duration.num_hours() > 0 {
-        format!("{}h ago", duration.num_hours())
-    } else if duration.num_minutes() > 0 {
-        format!("{}m ago", duration.num_minutes())
-    } else {
-        "just now".to_string()
-    }
+    HumanTime::from(dt).to_text_en(Accuracy::Rough, Tense::Past)
 }
 
 fn format_video_duration(total_seconds: u32) -> String {
