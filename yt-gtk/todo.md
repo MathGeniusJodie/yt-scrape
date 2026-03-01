@@ -1,10 +1,6 @@
 # Structural Improvements
 
-- [ ] **Split `AppState` by concern** (`src/ui/app/mod.rs:30-88`) — Currently holds videos, watch-later state, HTTP client, storage, in-progress tracking, and video index. Extract `VideoCache` (videos + index + storage) and `WatchLaterManager` to separate persistence from UI state.
-
-- [ ] **Split `UiContext` by concern** (`src/ui/app/mod.rs:90-100`) — Mixes window refs, layout widgets, `Arc<Runtime>`, UI state, and button tracking. Separate into `WindowContext`, `LayoutContext`, and `UiState`.
-
-- [ ] **Extract `SummaryGenerator` service** (`src/ui/app/summary.rs:186-280`) — `start_summary_generation_for_dialog()` does request validation, streaming, cache writes, state mutations, and UI buffer updates. Business logic belongs in a service, not the UI layer.
+- [ ] **Extract `SummaryGenerator` service** (`src/ui/app/summary.rs`) — `start_summary_generation_for_dialog()` does request validation, streaming, cache writes, state mutations, and UI buffer updates. Business logic belongs in a service, not the UI layer.
 
 ## Medium Priority
 
