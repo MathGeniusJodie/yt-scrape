@@ -1,4 +1,3 @@
-- [ ] iso8601_to_humantime_duration should use a library for this purpose, don't reinvent the wheel
 - [ ] video_id_from_stem — dense boundary predicate
 
   if id_start == 0 || stem[..id_start].ends_with('_') {
@@ -19,4 +18,3 @@
   is already handled by checked_sub, so the ? on get is technically
   redundant (the slice can't fail after checked_sub succeeds on valid
   UTF-8 boundaries). Not a bug, just belt-and-suspenders.
-- [ ] gemini.rs call_gemini_streaming: use the non streaming api to greatly simplify the code

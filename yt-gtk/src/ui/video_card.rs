@@ -1,6 +1,6 @@
 use crate::data::Video;
 use chrono::Utc;
-use chrono_humanize::{HumanTime,Accuracy,Tense};
+use chrono_humanize::{Accuracy, HumanTime, Tense};
 
 const CARD_WIDTH: i32 = 320;
 // 16:9 thumbnail height derived from card width

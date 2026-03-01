@@ -1,7 +1,6 @@
 use crate::cache::fetch_transcript;
 use anyhow::Result;
 use async_channel::Sender;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -250,7 +249,7 @@ async fn call_gemini_streaming(
     tx: Sender<StreamingMessage>,
 ) -> Result<()> {
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
         model
     );
 
@@ -281,15 +280,15 @@ async fn call_gemini_streaming(
 
     let response = client
         .post(&url)
-        .query(&[("key", api_key), ("alt", "sse")])
+        .query(&[("key", api_key)])
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
         .await?;
 
     let status = response.status();
+    let body = response.text().await?;
     if !status.is_success() {
-        let body = response.text().await?;
         if let Ok(error_response) = serde_json::from_str::<GeminiResponse>(&body) {
             if let Some(error) = error_response.error {
                 return Err(anyhow::anyhow!("{}: {}", status, error.message));
@@ -298,23 +297,16 @@ async fn call_gemini_streaming(
         return Err(anyhow::anyhow!("{}: {}", status, body));
     }
 
-    // Process the SSE stream
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let gemini_response: GeminiResponse = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Gemini response: {}", e))?;
+    if let Some(error) = &gemini_response.error {
+        return Err(anyhow::anyhow!("Gemini API error: {}", error.message));
+    }
+    let summary = extract_gemini_content(&gemini_response)
+        .ok_or_else(|| anyhow::anyhow!("Gemini returned no summary text"))?;
 
-    while let Some(result) = stream.next().await {
-        let chunk = result?;
-        let text = String::from_utf8_lossy(&chunk);
-        // Normalize CRLF → LF by dropping bare carriage returns
-        buffer.extend(text.chars().filter(|&c| c != '\r'));
-
-        while let Some(event) = pop_next_sse_event(&mut buffer) {
-            for text in parse_gemini_sse_event_text(&event) {
-                if !text.is_empty() && tx.send(StreamingMessage::Chunk(text)).await.is_err() {
-                    return Ok(());
-                }
-            }
-        }
+    if tx.send(StreamingMessage::Chunk(summary)).await.is_err() {
+        return Ok(());
     }
 
     let _ = tx.send(StreamingMessage::Done).await;
@@ -418,41 +410,27 @@ fn extract_openrouter_content(content: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn pop_next_sse_event(buffer: &mut String) -> Option<String> {
-    let event_end = buffer.find("\n\n")?;
-    let event = buffer[..event_end].trim_start_matches('\n').to_string();
-    buffer.drain(..event_end + 2);
-    Some(event)
-}
-
-fn parse_gemini_sse_event_text(event: &str) -> Vec<String> {
-    let Some(data) = event.strip_prefix("data: ") else {
-        return Vec::new();
-    };
-
-    let Ok(response) = serde_json::from_str::<GeminiResponse>(data) else {
-        return Vec::new();
-    };
-
-    response
+fn extract_gemini_content(response: &GeminiResponse) -> Option<String> {
+    let text = response
         .candidates
-        .unwrap_or_default()
-        .into_iter()
-        .next()
-        .map(|candidate| {
-            candidate
-                .content
-                .parts
-                .into_iter()
-                .filter_map(|part| part.text)
-                .collect()
-        })
-        .unwrap_or_default()
+        .as_ref()?
+        .first()?
+        .content
+        .parts
+        .iter()
+        .filter_map(|part| part.text.as_deref())
+        .collect::<String>();
+
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_openrouter_content, parse_gemini_sse_event_text, pop_next_sse_event};
+    use super::{extract_gemini_content, extract_openrouter_content, GeminiResponse};
 
     #[test]
     fn extract_openrouter_content_reads_string_payload() {
@@ -482,27 +460,32 @@ mod tests {
     }
 
     #[test]
-    fn pop_next_sse_event_drains_consumed_bytes() {
-        let mut buffer = String::from("data: one\n\ndata: two\n\n");
-        assert_eq!(
-            pop_next_sse_event(&mut buffer),
-            Some("data: one".to_string())
-        );
-        assert_eq!(buffer, "data: two\n\n");
+    fn extract_gemini_content_reads_text_parts() {
+        let payload = serde_json::json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": "A "}, {"text": "B"}]
+                    }
+                }
+            ]
+        });
+        let response: GeminiResponse = serde_json::from_value(payload).expect("valid payload");
+        assert_eq!(extract_gemini_content(&response), Some("A B".to_string()));
     }
 
     #[test]
-    fn parse_gemini_sse_event_text_extracts_candidate_text() {
-        let event = r#"data: {"candidates":[{"content":{"parts":[{"text":"A "},{"text":"B"}]}}]}"#;
-        assert_eq!(
-            parse_gemini_sse_event_text(event),
-            vec!["A ".to_string(), "B".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_gemini_sse_event_text_ignores_non_data_or_invalid_json() {
-        assert!(parse_gemini_sse_event_text("event: ping").is_empty());
-        assert!(parse_gemini_sse_event_text("data: {").is_empty());
+    fn extract_gemini_content_rejects_empty_text() {
+        let payload = serde_json::json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": "   "}]
+                    }
+                }
+            ]
+        });
+        let response: GeminiResponse = serde_json::from_value(payload).expect("valid payload");
+        assert_eq!(extract_gemini_content(&response), None);
     }
 }
