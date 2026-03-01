@@ -13,6 +13,7 @@ All code you write MUST be fully optimized.
 - no extra code beyond what is absolutely necessary to solve the problem the user provides (i.e. no technical debt)
 - before completing, ask: "Am I adding anything that wasn't explicitly requested?"
 - Make code self-documenting. Comments explain why, never what.
+- Always use a library function if there exists one, don't reinvent the wheel unless there is a very good reason and add a comment explaining that reason.
 
 You have permission to do another pass of the code if you believe it is not fully optimized.
 
@@ -145,3 +146,4 @@ pub fn calculate_total(items: &[Item], tax_rate: f64) -> Result<f64, Calculation
 ---
 
 **Remember:** Prioritize clarity and maintainability over cleverness.
+"gemini-3-flash-preview" IS A REAL MODEL, trust me!
