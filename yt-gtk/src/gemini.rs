@@ -169,10 +169,7 @@ fn configured_openrouter_models() -> Vec<String> {
         }
     }
 
-    OPENROUTER_MODELS
-        .iter()
-        .map(|model| model.to_string())
-        .collect()
+    OPENROUTER_MODELS.map(str::to_string).into()
 }
 
 /// Generates an AI summary for a video and streams partial results through a channel.
@@ -395,16 +392,11 @@ fn extract_openrouter_content(content: &serde_json::Value) -> Option<String> {
     match content {
         serde_json::Value::String(text) => Some(text.clone()),
         serde_json::Value::Array(parts) => {
-            let merged = parts
+            let merged: String = parts
                 .iter()
                 .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
-                .collect::<Vec<_>>()
-                .join("");
-            if merged.trim().is_empty() {
-                None
-            } else {
-                Some(merged)
-            }
+                .collect();
+            (!merged.trim().is_empty()).then_some(merged)
         }
         _ => None,
     }

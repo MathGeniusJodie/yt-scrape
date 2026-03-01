@@ -119,7 +119,7 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
         let state = state_rc.borrow();
         (
             state.storage.transcripts_work_dir().to_path_buf(),
-            state.http_client(),
+            state.http_client().clone(),
         )
     };
     let result_rx = spawn_summary_generation_stream(
@@ -134,47 +134,22 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
     let video_id_for_result = request.video_id.clone();
 
     glib::MainContext::default().spawn_local(async move {
-        let mut summary = String::new();
-        let mut summary_error = None;
-
-        while let Ok(message) = result_rx.recv().await {
-            match message {
-                StreamingMessage::Chunk(text) => summary.push_str(&text),
-                StreamingMessage::Done => break,
-                StreamingMessage::Error(error_text) => {
-                    summary_error = Some(error_text);
-                    break;
+        match collect_streaming_summary(result_rx).await {
+            Err(error) => {
+                state_for_result
+                    .borrow_mut()
+                    .summaries_in_progress
+                    .remove(&video_id_for_result);
+                error!(
+                    "Failed to prefetch summary for {}: {}",
+                    video_id_for_result, error
+                );
+            }
+            Ok(summary) => {
+                if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+                    refresh_video_lists(&state_for_result, &ui_context_for_result);
                 }
             }
-        }
-
-        if let Some(summary_error) = summary_error {
-            state_for_result
-                .borrow_mut()
-                .summaries_in_progress
-                .remove(&video_id_for_result);
-            error!(
-                "Failed to prefetch summary for {}: {}",
-                video_id_for_result, summary_error
-            );
-            return;
-        }
-
-        let summary = summary.trim().to_string();
-        if summary.is_empty() {
-            state_for_result
-                .borrow_mut()
-                .summaries_in_progress
-                .remove(&video_id_for_result);
-            error!(
-                "Failed to prefetch summary for {}: Summary was empty",
-                video_id_for_result
-            );
-            return;
-        }
-
-        if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
-            refresh_video_lists(&state_for_result, &ui_context_for_result);
         }
     });
 }
@@ -184,39 +159,28 @@ fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
     buffer.insert(&mut end, text);
 }
 
-fn finalize_summary_result(
-    state_for_result: &Rc<RefCell<AppState>>,
-    ui_context_for_result: &UiContext,
-    video_id_for_result: &str,
-    summary: String,
-    buffer_for_result: &gtk::TextBuffer,
-) {
+/// Collects all chunks from a streaming summary channel into a single trimmed string.
+///
+/// # Errors
+///
+/// Returns `Err` if the stream produces an error message or if the resulting summary is empty.
+async fn collect_streaming_summary(
+    rx: async_channel::Receiver<StreamingMessage>,
+) -> Result<String, String> {
+    let mut summary = String::new();
+    while let Ok(msg) = rx.recv().await {
+        match msg {
+            StreamingMessage::Chunk(text) => summary.push_str(&text),
+            StreamingMessage::Done => break,
+            StreamingMessage::Error(e) => return Err(e),
+        }
+    }
     let summary = summary.trim().to_string();
     if summary.is_empty() {
-        state_for_result
-            .borrow_mut()
-            .summaries_in_progress
-            .remove(video_id_for_result);
-        buffer_for_result.set_text("Error: Summary was empty");
-        return;
+        Err("Summary was empty".to_string())
+    } else {
+        Ok(summary)
     }
-
-    if persist_summary_to_cache(state_for_result, video_id_for_result, summary) {
-        refresh_video_lists(state_for_result, ui_context_for_result);
-    }
-}
-
-fn handle_summary_error(
-    state_for_result: &Rc<RefCell<AppState>>,
-    video_id_for_result: &str,
-    buffer_for_result: &gtk::TextBuffer,
-    summary_error: &str,
-) {
-    state_for_result
-        .borrow_mut()
-        .summaries_in_progress
-        .remove(video_id_for_result);
-    buffer_for_result.set_text(&format!("Error: {}", summary_error));
 }
 
 fn start_summary_generation_for_dialog(
@@ -249,7 +213,7 @@ fn start_summary_generation_for_dialog(
         let state = state_rc.borrow();
         (
             state.storage.transcripts_work_dir().to_path_buf(),
-            state.http_client(),
+            state.http_client().clone(),
         )
     };
     let result_rx = spawn_summary_generation_stream(
@@ -290,23 +254,28 @@ fn start_summary_generation_for_dialog(
 
         button_for_result.set_sensitive(true);
 
-        if let Some(summary_error) = summary_error {
-            handle_summary_error(
-                &state_for_result,
-                &video_id_for_result,
-                &buffer_for_result,
-                &summary_error,
-            );
+        if let Some(error) = summary_error {
+            state_for_result
+                .borrow_mut()
+                .summaries_in_progress
+                .remove(&video_id_for_result);
+            buffer_for_result.set_text(&format!("Error: {}", error));
             return;
         }
 
-        finalize_summary_result(
-            &state_for_result,
-            &ui_context_for_result,
-            &video_id_for_result,
-            summary,
-            &buffer_for_result,
-        );
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            state_for_result
+                .borrow_mut()
+                .summaries_in_progress
+                .remove(&video_id_for_result);
+            buffer_for_result.set_text("Error: Summary was empty");
+            return;
+        }
+
+        if persist_summary_to_cache(&state_for_result, &video_id_for_result, summary) {
+            refresh_video_lists(&state_for_result, &ui_context_for_result);
+        }
     });
 }
 

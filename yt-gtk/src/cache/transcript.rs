@@ -143,23 +143,18 @@ fn parse_json3(json: &str) -> Result<String, TranscriptError> {
 
 /// Clean up raw transcript text
 fn clean_transcript(text: &str) -> String {
-    let mut lines: Vec<&str> = Vec::new();
-    let mut prev_line = "";
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Skip duplicate consecutive lines
-        if trimmed != prev_line {
-            lines.push(trimmed);
-            prev_line = trimmed;
-        }
-    }
-
-    // Trimmed non-empty lines can be joined directly.
-    lines.join(" ")
+    let mut prev = "";
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // Skip duplicate consecutive lines (auto-subs repeat the previous line on each update).
+        .filter(|&line| {
+            let is_dup = line == prev;
+            prev = line;
+            !is_dup
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]

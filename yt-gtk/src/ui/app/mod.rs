@@ -83,8 +83,8 @@ impl AppState {
         self.videos.get_mut(index)
     }
 
-    fn http_client(&self) -> reqwest::Client {
-        self.http_client.clone()
+    fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
     }
 }
 
@@ -360,7 +360,7 @@ fn spawn_refreshed_videos_apply(
             let thumbnail_completion = download_missing_thumbnails(
                 &state.videos,
                 &state.storage,
-                state.http_client(),
+                state.http_client().clone(),
                 ui_context.runtime.clone(),
             );
             drop(state);
@@ -639,7 +639,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         download_missing_thumbnails(
             &state_ref.videos,
             &state_ref.storage,
-            state_ref.http_client(),
+            state_ref.http_client().clone(),
             runtime.clone(),
         )
     };

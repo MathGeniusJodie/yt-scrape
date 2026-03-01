@@ -1,7 +1,7 @@
 use crate::data::{Video, WatchLaterData};
 use anyhow::Result;
 use log::warn;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,27 @@ fn video_id_from_stem(stem: &str) -> Option<&str> {
         Some(video_id)
     } else {
         None
+    }
+}
+
+/// Reads and deserializes a JSON file, returning `None` on any failure.
+///
+/// Missing files are silently ignored; read/parse errors are logged as warnings.
+fn try_load_json_file<T: DeserializeOwned>(path: &Path, context: &str) -> Option<T> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            warn!("Failed to read {} {}: {}", context, path.display(), error);
+            return None;
+        }
+    };
+    match serde_json::from_str(&content) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            warn!("Failed to parse {} {}: {}", context, path.display(), error);
+            None
+        }
     }
 }
 
@@ -261,32 +282,9 @@ impl Storage {
     /// Saved IDs. If file loading or parsing fails, an empty set is returned.
     pub fn load_watch_later(&self) -> HashSet<String> {
         let path = self.data_dir.join(WATCH_LATER_FILE);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return HashSet::new();
-            }
-            Err(error) => {
-                warn!(
-                    "Failed to read watch-later file {}: {}",
-                    path.display(),
-                    error
-                );
-                return HashSet::new();
-            }
-        };
-
-        match serde_json::from_str::<WatchLaterData>(&content) {
-            Ok(data) => data.video_ids.into_iter().collect(),
-            Err(error) => {
-                warn!(
-                    "Failed to parse watch-later file {}: {}",
-                    path.display(),
-                    error
-                );
-                HashSet::new()
-            }
-        }
+        try_load_json_file::<WatchLaterData>(&path, "watch-later file")
+            .map(|data| data.video_ids.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Saves watch-later IDs to disk using deterministic ordering.
@@ -320,22 +318,8 @@ impl Storage {
     /// Cached videos, or an empty vector if cache loading/parsing fails.
     pub fn load_videos(&self) -> Vec<Video> {
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-            Err(error) => {
-                warn!("Failed to read videos cache {}: {}", path.display(), error);
-                return Vec::new();
-            }
-        };
-
-        let mut videos: Vec<Video> = match serde_json::from_str(&content) {
-            Ok(videos) => videos,
-            Err(error) => {
-                warn!("Failed to parse videos cache {}: {}", path.display(), error);
-                return Vec::new();
-            }
-        };
+        let mut videos: Vec<Video> =
+            try_load_json_file(&path, "videos cache").unwrap_or_default();
 
         for video in &mut videos {
             if let Some(sidecar) = self.read_video_sidecar(video.video_id()) {

@@ -73,7 +73,7 @@ pub fn play_video(
                 );
                 command.arg(format!("--chapters-file={}", chapters_file.display()));
             } else {
-                log::warn!(
+                log::debug!(
                     "No chapters metadata available for local video {}",
                     video_id
                 );
