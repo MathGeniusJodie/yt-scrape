@@ -1,7 +1,7 @@
 mod chapters;
 
 use crate::urls;
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use thiserror::Error;
@@ -25,8 +25,21 @@ fn mpv_base_command(title: &str) -> Command {
         .arg("--sid=auto")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
+}
+
+fn spawn_mpv_with_stderr_logging(command: &mut Command) -> Result<(), PlayerError> {
+    let mut child = command.spawn()?;
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                log::debug!("mpv: {}", line);
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Plays a video using `mpv` as a detached process.
@@ -65,7 +78,8 @@ pub fn play_video(
                     video_id
                 );
             }
-            command.arg(path).spawn()?;
+            command.arg(path);
+            spawn_mpv_with_stderr_logging(&mut command)?;
             return Ok(());
         }
 
@@ -78,7 +92,9 @@ pub fn play_video(
 
     // Fallback: stream from YouTube
     let url = urls::watch_url(video_id);
-    mpv_base_command(title).arg(&url).spawn()?;
+    let mut command = mpv_base_command(title);
+    command.arg(&url);
+    spawn_mpv_with_stderr_logging(&mut command)?;
 
     Ok(())
 }

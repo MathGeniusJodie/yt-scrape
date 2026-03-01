@@ -117,10 +117,11 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
     }
 
     let mut ffmeta = String::from(";FFMETADATA1\n");
+    let mut wrote_chapter = false;
     for (i, chapter) in chapters.iter().enumerate() {
-        // Prefer the chapter's own end time, then the next chapter's start, then the
-        // video duration, falling back to start + 1s so the range is always valid.
-        let end = chapter
+        // Prefer the chapter's own end time, then the next chapter's start, then video duration.
+        // If no valid bound exists, skip the chapter instead of inventing a 1-second segment.
+        let Some(end) = chapter
             .end
             .filter(|&e| e > chapter.start)
             .or_else(|| {
@@ -130,7 +131,9 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
                     .filter(|&s| s > chapter.start)
             })
             .or_else(|| info.duration.filter(|&d| d > chapter.start))
-            .unwrap_or(chapter.start + 1.0);
+        else {
+            continue;
+        };
 
         ffmeta.push_str("[CHAPTER]\nTIMEBASE=1/1000\n");
         ffmeta.push_str(&format!(
@@ -139,9 +142,10 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
             secs_to_ms(end),
             chapter.title,
         ));
+        wrote_chapter = true;
     }
 
-    Some(ffmeta)
+    wrote_chapter.then_some(ffmeta)
 }
 
 fn load_info_json(path: &Path) -> Option<InfoJson> {

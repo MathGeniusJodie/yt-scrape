@@ -61,8 +61,8 @@ impl Video {
     }
 
     /// Returns the publication timestamp in UTC.
-    pub fn published(&self) -> &DateTime<Utc> {
-        &self.published
+    pub fn published(&self) -> DateTime<Utc> {
+        self.published
     }
 
     /// Returns the thumbnail URL.

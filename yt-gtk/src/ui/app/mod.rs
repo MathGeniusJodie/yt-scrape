@@ -88,12 +88,6 @@ impl AppState {
     }
 }
 
-/// Identifier for the currently selected video, shared by context menu actions.
-#[derive(Clone)]
-struct SelectedVideo {
-    video_id: String,
-}
-
 #[derive(Clone)]
 struct UiContext {
     window: ApplicationWindow,
@@ -101,7 +95,7 @@ struct UiContext {
     runtime: Arc<Runtime>,
     feed_flow: FlowBox,
     watch_later_flow: FlowBox,
-    selected_video: Rc<RefCell<Option<SelectedVideo>>>,
+    selected_video: Rc<RefCell<Option<String>>>,
     badge: Label,
     card_button_index: Rc<RefCell<CardButtonIndex>>,
 }
@@ -162,6 +156,13 @@ fn configure_video_flow(flow: &FlowBox) {
     flow.set_row_spacing(CARD_SPACING as u32);
 }
 
+fn update_flow_width(flow: &FlowBox, viewport_width: i32) {
+    let available_width = (viewport_width - GRID_PADDING * 2).max(1);
+    let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
+    let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
+    flow.set_size_request(optimal_width, -1);
+}
+
 fn create_video_grid() -> (ScrolledWindow, FlowBox) {
     let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -176,10 +177,7 @@ fn create_video_grid() -> (ScrolledWindow, FlowBox) {
 
     let flow_for_resize = flow.clone();
     scroll.connect_size_allocate(move |_widget, allocation| {
-        let available_width = allocation.width() - GRID_PADDING * 2;
-        let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
-        let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
-        flow_for_resize.set_size_request(optimal_width, -1);
+        update_flow_width(&flow_for_resize, allocation.width());
     });
 
     scroll.add(&container);
@@ -237,32 +235,25 @@ fn toggle_watch_later_and_download(
 fn apply_watch_later_action(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &UiContext,
-    request: SelectedVideo,
+    video_id: String,
 ) {
     let video_title = {
         let state = state_rc.borrow();
         state
-            .video_by_id(&request.video_id)
+            .video_by_id(&video_id)
             .map(|video| video.title().to_string())
     };
     let Some(video_title) = video_title else {
-        error!(
-            "Cannot toggle watch-later for missing video {}",
-            request.video_id
-        );
+        error!("Cannot toggle watch-later for missing video {}", video_id);
         return;
     };
 
-    let added = toggle_watch_later_and_download(
-        state_rc,
-        &ui_context.runtime,
-        &request.video_id,
-        &video_title,
-    );
-    update_feed_watch_later_toggle(ui_context, &request.video_id, added);
+    let added =
+        toggle_watch_later_and_download(state_rc, &ui_context.runtime, &video_id, &video_title);
+    update_feed_watch_later_toggle(ui_context, &video_id, added);
     refresh_watch_later_tab(state_rc, ui_context);
     if added {
-        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &request.video_id);
+        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
     }
 }
 
@@ -486,7 +477,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     )));
 
     // Selected video for context menu actions
-    let selected_video: Rc<RefCell<Option<SelectedVideo>>> = Rc::new(RefCell::new(None));
+    let selected_video: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     // Create main window
     let window = ApplicationWindow::builder()
@@ -573,30 +564,37 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     header.set_custom_title(Some(&tab_bar));
 
+    {
+        let feed_flow = feed_flow.clone();
+        let watch_later_flow = watch_later_flow.clone();
+        stack.connect_size_allocate(move |_stack, allocation| {
+            update_flow_width(&feed_flow, allocation.width());
+            update_flow_width(&watch_later_flow, allocation.width());
+        });
+    }
+
     // Connect tab buttons to stack
     {
         let stack = stack.clone();
         let watch_later_tab = watch_later_tab.clone();
-        let feed_scroll = feed_scroll.clone();
+        let feed_flow = feed_flow.clone();
         feed_tab.connect_toggled(move |btn| {
             if btn.is_active() {
                 stack.set_visible_child_name("feed");
                 watch_later_tab.set_active(false);
-                // Trigger column recalculation
-                feed_scroll.queue_resize();
+                update_flow_width(&feed_flow, stack.allocated_width());
             }
         });
     }
     {
         let stack = stack.clone();
         let feed_tab = feed_tab.clone();
-        let watch_later_scroll = watch_later_scroll.clone();
+        let watch_later_flow = watch_later_flow.clone();
         watch_later_tab.connect_toggled(move |btn| {
             if btn.is_active() {
                 stack.set_visible_child_name("watch-later");
                 feed_tab.set_active(false);
-                // Trigger column recalculation
-                watch_later_scroll.queue_resize();
+                update_flow_width(&watch_later_flow, stack.allocated_width());
             }
         });
     }

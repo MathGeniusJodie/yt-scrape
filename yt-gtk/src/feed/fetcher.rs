@@ -12,7 +12,7 @@ use tokio::time::{sleep, Duration, Instant};
 const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
-const PLAYLIST_ITEMS_MAX_RESULTS: &str = "25";
+const PLAYLIST_ITEMS_MAX_RESULTS: u32 = 25;
 const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
 const MAX_FEED_VIDEOS: usize = 400;
@@ -225,7 +225,7 @@ pub async fn fetch_all_feeds(
     }
 
     // Sort by published date (newest first)
-    all_videos.sort_by(|a, b| b.published().cmp(a.published()));
+    all_videos.sort_by_key(|video| std::cmp::Reverse(video.published()));
 
     // Keep only the most recent videos to cap UI and cache churn.
     all_videos.truncate(MAX_FEED_VIDEOS);
@@ -352,12 +352,13 @@ async fn fetch_channel_once(
     uploads_playlist_id: &str,
     channel_id: &str,
 ) -> Result<Vec<Video>, reqwest::Error> {
+    let max_results = PLAYLIST_ITEMS_MAX_RESULTS.to_string();
     let response = client
         .get(YOUTUBE_PLAYLIST_ITEMS_API_URL)
         .query(&[
             ("part", "snippet"),
             ("playlistId", uploads_playlist_id),
-            ("maxResults", PLAYLIST_ITEMS_MAX_RESULTS),
+            ("maxResults", max_results.as_str()),
             ("key", api_key),
         ])
         .send()
@@ -568,10 +569,10 @@ fn should_retry(error: &reqwest::Error) -> bool {
         return true;
     }
 
+    // 404 is handled by uploads-playlist resolution in the caller and is not transient here.
     match error.status() {
         Some(status) => {
             status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::NOT_FOUND
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
                 || status.is_server_error()
         }
@@ -585,7 +586,7 @@ fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
     } else {
         match error.status() {
             Some(s) if s == reqwest::StatusCode::TOO_MANY_REQUESTS => 30_000,
-            Some(s) if s == reqwest::StatusCode::NOT_FOUND || s.is_server_error() => 20_000,
+            Some(s) if s.is_server_error() => 20_000,
             Some(s) if s == reqwest::StatusCode::REQUEST_TIMEOUT => 12_000,
             _ => INITIAL_BACKOFF_MS,
         }

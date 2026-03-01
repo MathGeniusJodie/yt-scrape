@@ -246,9 +246,9 @@ fn crop_to_16_9(pixbuf: &Pixbuf) -> Pixbuf {
     pixbuf.new_subpixbuf(crop_x, crop_y, crop_width, crop_height)
 }
 
-fn format_time_ago(dt: &chrono::DateTime<Utc>) -> String {
+fn format_time_ago(dt: chrono::DateTime<Utc>) -> String {
     let now = Utc::now();
-    let duration = now.signed_duration_since(*dt);
+    let duration = now.signed_duration_since(dt);
 
     if duration.num_days() > 365 {
         let years = duration.num_days() / 365;
