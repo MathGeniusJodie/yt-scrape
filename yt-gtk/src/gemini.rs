@@ -168,62 +168,6 @@ enum ProviderCallError {
     NoOpenRouterModels,
 }
 
-trait ProviderResponse: for<'de> Deserialize<'de> {
-    fn provider_name() -> &'static str;
-    fn error_message(&self) -> Option<&str>;
-    fn with_text_parts(&self, emit: &mut dyn FnMut(&str));
-
-    fn extract_content(&self) -> Option<String> {
-        let mut merged = String::new();
-        self.with_text_parts(&mut |part| merged.push_str(part));
-        (!merged.trim().is_empty()).then_some(merged)
-    }
-}
-
-impl ProviderResponse for GeminiResponse {
-    fn provider_name() -> &'static str {
-        "Gemini"
-    }
-
-    fn error_message(&self) -> Option<&str> {
-        self.error.as_ref().map(|error| error.message.as_str())
-    }
-
-    fn with_text_parts(&self, emit: &mut dyn FnMut(&str)) {
-        let Some(candidate) = self
-            .candidates
-            .as_ref()
-            .and_then(|candidates| candidates.first())
-        else {
-            return;
-        };
-        for part in &candidate.content.parts {
-            if let Some(text) = part.text.as_deref() {
-                emit(text);
-            }
-        }
-    }
-}
-
-impl ProviderResponse for OpenRouterResponse {
-    fn provider_name() -> &'static str {
-        "OpenRouter"
-    }
-
-    fn error_message(&self) -> Option<&str> {
-        self.error
-            .as_ref()
-            .and_then(|error| error.message.as_deref())
-    }
-
-    fn with_text_parts(&self, emit: &mut dyn FnMut(&str)) {
-        let Some(choice) = self.choices.as_ref().and_then(|choices| choices.first()) else {
-            return;
-        };
-        visit_openrouter_content_parts(&choice.message.content, emit);
-    }
-}
-
 fn visit_openrouter_content_parts(content: &serde_json::Value, emit: &mut dyn FnMut(&str)) {
     match content {
         serde_json::Value::String(text) => emit(text),
@@ -238,43 +182,58 @@ fn visit_openrouter_content_parts(content: &serde_json::Value, emit: &mut dyn Fn
     }
 }
 
-fn parse_provider_response<T: ProviderResponse>(body: &str) -> Result<String, ProviderCallError> {
-    let response: T =
+fn extract_gemini_text(body: &str) -> Result<String, ProviderCallError> {
+    let response: GeminiResponse =
         serde_json::from_str(body).map_err(|source| ProviderCallError::ParseResponse {
-            provider: T::provider_name(),
+            provider: "Gemini",
             source,
         })?;
 
-    if let Some(message) = response.error_message() {
+    if let Some(message) = response.error.as_ref().map(|e| e.message.as_str()) {
         return Err(ProviderCallError::Api {
-            provider: T::provider_name(),
+            provider: "Gemini",
             message: message.to_string(),
         });
     }
 
-    response
-        .extract_content()
-        .ok_or(ProviderCallError::MissingSummary {
-            provider: T::provider_name(),
-        })
-}
-
-async fn check_http_response<T: ProviderResponse>(
-    response: reqwest::Response,
-) -> Result<String, ProviderCallError> {
-    let status = response.status();
-    let body = response.text().await?;
-
-    if status.is_success() {
-        return Ok(body);
+    let mut merged = String::new();
+    if let Some(candidate) = response.candidates.as_ref().and_then(|c| c.first()) {
+        for part in &candidate.content.parts {
+            if let Some(text) = part.text.as_deref() {
+                merged.push_str(text);
+            }
+        }
     }
 
-    let message = serde_json::from_str::<T>(&body)
-        .ok()
-        .and_then(|provider_response| provider_response.error_message().map(str::to_string))
-        .unwrap_or(body);
+    (!merged.trim().is_empty())
+        .then_some(merged)
+        .ok_or(ProviderCallError::MissingSummary { provider: "Gemini" })
+}
 
-    Err(ProviderCallError::HttpStatus { status, message })
+fn extract_openrouter_text(body: &str) -> Result<String, ProviderCallError> {
+    let response: OpenRouterResponse =
+        serde_json::from_str(body).map_err(|source| ProviderCallError::ParseResponse {
+            provider: "OpenRouter",
+            source,
+        })?;
+
+    if let Some(message) = response.error.as_ref().and_then(|e| e.message.as_deref()) {
+        return Err(ProviderCallError::Api {
+            provider: "OpenRouter",
+            message: message.to_string(),
+        });
+    }
+
+    let mut merged = String::new();
+    if let Some(choice) = response.choices.as_ref().and_then(|c| c.first()) {
+        visit_openrouter_content_parts(&choice.message.content, &mut |text| merged.push_str(text));
+    }
+
+    (!merged.trim().is_empty())
+        .then_some(merged)
+        .ok_or(ProviderCallError::MissingSummary {
+            provider: "OpenRouter",
+        })
 }
 
 /// Message sent through the streaming channel
@@ -424,10 +383,16 @@ async fn call_gemini_streaming(
         .send()
         .await?;
 
-    let body = check_http_response::<GeminiResponse>(response).await?;
-    let summary = parse_provider_response::<GeminiResponse>(&body)?
-        .trim()
-        .to_string();
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        let message = serde_json::from_str::<GeminiResponse>(&body)
+            .ok()
+            .and_then(|r| r.error.map(|e| e.message))
+            .unwrap_or(body);
+        return Err(ProviderCallError::HttpStatus { status, message });
+    }
+    let summary = extract_gemini_text(&body)?.trim().to_string();
 
     if tx.send(StreamingMessage::Chunk(summary)).await.is_err() {
         return Ok(());
@@ -488,8 +453,16 @@ async fn call_openrouter_with_transcript(
         .send()
         .await?;
 
-    let body = check_http_response::<OpenRouterResponse>(response).await?;
-    let content = parse_provider_response::<OpenRouterResponse>(&body)?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        let message = serde_json::from_str::<OpenRouterResponse>(&body)
+            .ok()
+            .and_then(|r| r.error.and_then(|e| e.message))
+            .unwrap_or(body);
+        return Err(ProviderCallError::HttpStatus { status, message });
+    }
+    let content = extract_openrouter_text(&body)?;
 
     let summary = content.trim().to_string();
     if !summary.is_empty() && tx.send(StreamingMessage::Chunk(summary)).await.is_err() {
@@ -501,69 +474,51 @@ async fn call_openrouter_with_transcript(
 
 #[cfg(test)]
 mod tests {
-    use super::{GeminiResponse, OpenRouterMessageResponse, OpenRouterResponse, ProviderResponse};
-
-    fn extract_content<T: ProviderResponse>(response: &T) -> Option<String> {
-        response.extract_content()
-    }
-
-    fn openrouter_response(content: serde_json::Value) -> OpenRouterResponse {
-        OpenRouterResponse {
-            choices: Some(vec![super::OpenRouterChoice {
-                message: OpenRouterMessageResponse { content },
-            }]),
-            error: None,
-        }
-    }
-
     #[test]
     fn extract_openrouter_content_reads_string_payload() {
-        let response = openrouter_response(serde_json::json!("summary text"));
-        assert_eq!(extract_content(&response), Some("summary text".to_string()));
+        let payload = serde_json::json!({
+            "choices": [{"message": {"content": "summary text"}}]
+        });
+        let result = super::extract_openrouter_text(&serde_json::to_string(&payload).unwrap());
+        assert_eq!(result.unwrap(), "summary text");
     }
 
     #[test]
     fn extract_openrouter_content_reads_text_parts_array() {
-        let response = openrouter_response(serde_json::json!([
-            {"type": "text", "text": "Hello "},
-            {"type": "text", "text": "world"}
-        ]));
-        assert_eq!(extract_content(&response), Some("Hello world".to_string()));
+        let payload = serde_json::json!({
+            "choices": [{"message": {"content": [
+                {"type": "text", "text": "Hello "},
+                {"type": "text", "text": "world"}
+            ]}}]
+        });
+        let result = super::extract_openrouter_text(&serde_json::to_string(&payload).unwrap());
+        assert_eq!(result.unwrap(), "Hello world");
     }
 
     #[test]
     fn extract_openrouter_content_rejects_empty_text_parts() {
-        let response = openrouter_response(serde_json::json!([{"type": "text", "text": "   "}]));
-        assert_eq!(extract_content(&response), None);
+        let payload = serde_json::json!({
+            "choices": [{"message": {"content": [{"type": "text", "text": "   "}]}}]
+        });
+        let result = super::extract_openrouter_text(&serde_json::to_string(&payload).unwrap());
+        assert!(result.is_err());
     }
 
     #[test]
     fn extract_gemini_content_reads_text_parts() {
         let payload = serde_json::json!({
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [{"text": "A "}, {"text": "B"}]
-                    }
-                }
-            ]
+            "candidates": [{"content": {"parts": [{"text": "A "}, {"text": "B"}]}}]
         });
-        let response: GeminiResponse = serde_json::from_value(payload).expect("valid payload");
-        assert_eq!(extract_content(&response), Some("A B".to_string()));
+        let result = super::extract_gemini_text(&serde_json::to_string(&payload).unwrap());
+        assert_eq!(result.unwrap(), "A B");
     }
 
     #[test]
     fn extract_gemini_content_rejects_empty_text() {
         let payload = serde_json::json!({
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [{"text": "   "}]
-                    }
-                }
-            ]
+            "candidates": [{"content": {"parts": [{"text": "   "}]}}]
         });
-        let response: GeminiResponse = serde_json::from_value(payload).expect("valid payload");
-        assert_eq!(extract_content(&response), None);
+        let result = super::extract_gemini_text(&serde_json::to_string(&payload).unwrap());
+        assert!(result.is_err());
     }
 }

@@ -470,42 +470,6 @@ impl Storage {
         }
         self.write_video_sidecar(video_id, &sidecar)
     }
-
-    /// Persists transcript text in a per-video sidecar file.
-    ///
-    /// # Arguments
-    ///
-    /// * `video_id` - YouTube video identifier.
-    /// * `transcript` - Normalized transcript text to cache.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` when the sidecar is persisted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when sidecar loading, serialization, or file writes fail.
-    pub fn save_video_transcript(&self, video_id: &str, transcript: &str) -> StorageResult<()> {
-        self.save_video_metadata(video_id, Some(transcript), None)
-    }
-
-    /// Persists AI summary text in a per-video sidecar file.
-    ///
-    /// # Arguments
-    ///
-    /// * `video_id` - YouTube video identifier.
-    /// * `ai_summary` - Summary text to cache.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` when the sidecar is persisted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when sidecar loading, serialization, or file writes fail.
-    pub fn save_video_ai_summary(&self, video_id: &str, ai_summary: &str) -> StorageResult<()> {
-        self.save_video_metadata(video_id, None, Some(ai_summary))
-    }
 }
 
 #[cfg(test)]

@@ -1,15 +1,18 @@
-use super::summary::{show_summary_dialog, show_transcript_dialog};
+use super::summary_generator::{show_summary_dialog, show_transcript_dialog};
 use super::{apply_watch_later_action, resolve_playback_path, AppContext, AppState};
-use crate::data::Tab;
+use crate::cache::Storage;
+use crate::data::{Tab, Video};
 use crate::player::play_video;
 use crate::ui::video_card::{create_video_card, set_watch_later_toggle_state, VideoCardWidgets};
 
+use futures::stream::{self, StreamExt};
 use glib::clone;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, FlowBox, Orientation, Popover};
-use log::error;
+use log::{error, warn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -385,4 +388,103 @@ pub(super) fn refresh_video_thumbnail(
     for_each_card_matching(ui_context, video_id, |card| {
         card.refresh_thumbnail(&thumbnail_path);
     });
+}
+
+/// Downloads thumbnails missing from local storage.
+///
+/// # Arguments
+///
+/// * `videos` - Videos whose thumbnails should be present locally.
+/// * `storage` - Storage backend used to resolve thumbnail paths.
+/// * `client` - HTTP client for fetching thumbnail images.
+/// * `runtime` - Tokio runtime used to execute network and file I/O.
+///
+/// # Returns
+///
+/// `Some(receiver)` when at least one thumbnail download was scheduled. The receiver yields once
+/// with the downloaded video's IDs when all scheduled downloads have completed (successfully or
+/// not). `None` when there is no work to do.
+pub(super) fn download_missing_thumbnails<'a>(
+    videos: impl IntoIterator<Item = &'a Video>,
+    storage: &Storage,
+    client: reqwest::Client,
+    runtime: Arc<tokio::runtime::Runtime>,
+) -> Option<async_channel::Receiver<Vec<String>>> {
+    const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
+
+    let pending_downloads: Vec<(String, String, PathBuf)> = videos
+        .into_iter()
+        .filter_map(|video| {
+            let path = storage.thumbnail_path(video.video_id());
+            if path.exists() {
+                None
+            } else {
+                Some((
+                    video.video_id().to_string(),
+                    video.thumbnail_url().to_string(),
+                    path,
+                ))
+            }
+        })
+        .collect();
+
+    if pending_downloads.is_empty() {
+        return None;
+    }
+
+    let (completion_tx, completion_rx) = async_channel::bounded(1);
+    let pending_video_ids = pending_downloads
+        .iter()
+        .map(|(video_id, _, _)| video_id.clone())
+        .collect::<Vec<_>>();
+    runtime.spawn(async move {
+        stream::iter(pending_downloads)
+            .for_each_concurrent(
+                THUMBNAIL_DOWNLOAD_CONCURRENCY,
+                move |(_video_id, url, path)| {
+                    let client = client.clone();
+                    async move {
+                        if path.exists() {
+                            return;
+                        }
+
+                        let response = match client.get(&url).send().await {
+                            Ok(response) => response,
+                            Err(error) => {
+                                warn!("Thumbnail request failed for {}: {}", url, error);
+                                return;
+                            }
+                        };
+
+                        let response = match response.error_for_status() {
+                            Ok(response) => response,
+                            Err(error) => {
+                                warn!("Thumbnail response failed for {}: {}", url, error);
+                                return;
+                            }
+                        };
+
+                        match response.bytes().await {
+                            Ok(bytes) => {
+                                if let Err(error) = tokio::fs::write(&path, &bytes).await {
+                                    warn!(
+                                        "Failed writing thumbnail to {}: {}",
+                                        path.display(),
+                                        error
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                warn!("Failed reading thumbnail bytes for {}: {}", url, error);
+                            }
+                        }
+                    }
+                },
+            )
+            .await;
+
+        let _ = completion_tx.send(pending_video_ids).await;
+    });
+
+    Some(completion_rx)
 }

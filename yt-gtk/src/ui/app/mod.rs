@@ -1,10 +1,8 @@
 mod cards;
-mod refresh;
-mod summary;
 mod summary_generator;
 
 use crate::cache::{download_video, Storage, StorageError};
-use crate::data::Video;
+use crate::data::{Tab, Video};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use crate::ui::video_card::VideoCardWidgets;
 
@@ -23,13 +21,11 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
-use cards::create_context_menu;
-use refresh::{
-    download_missing_thumbnails, refresh_video_lists, refresh_video_thumbnails,
-    sync_watch_later_card, update_watch_later_toggles,
+use cards::{
+    create_context_menu, download_missing_thumbnails, populate_flow_box, sync_watch_later_card,
+    update_watch_later_toggles,
 };
-use summary::maybe_prefetch_summary_for_watch_later;
-use summary_generator::SummaryGenerator;
+use summary_generator::{maybe_prefetch_summary_for_watch_later, SummaryGenerator};
 
 struct AppState {
     videos: IndexMap<String, Video>,
@@ -83,7 +79,7 @@ impl AppState {
         transcript: String,
     ) -> Result<(), CacheVideoError> {
         self.storage
-            .save_video_transcript(video_id, &transcript)
+            .save_video_metadata(video_id, Some(&transcript), None)
             .map_err(|source| CacheVideoError::Persist {
                 video_id: video_id.to_string(),
                 sidecar_name: "transcript",
@@ -105,7 +101,7 @@ impl AppState {
         ai_summary: String,
     ) -> Result<(), CacheVideoError> {
         self.storage
-            .save_video_ai_summary(video_id, &ai_summary)
+            .save_video_metadata(video_id, None, Some(&ai_summary))
             .map_err(|source| CacheVideoError::Persist {
                 video_id: video_id.to_string(),
                 sidecar_name: "summary",
@@ -323,6 +319,7 @@ fn apply_watch_later_action(
     let added =
         toggle_watch_later_and_download(state_rc, &ui_context.runtime, &video_id, &video_title);
     update_watch_later_toggles(ui_context, &video_id, added);
+    update_watch_later_badge(&ui_context.badge, state_rc.borrow().watch_later.len());
     sync_watch_later_card(state_rc, ui_context, &video_id);
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
@@ -445,12 +442,22 @@ fn spawn_refreshed_videos_apply(
                 let ui2 = ui_context.clone();
                 glib::MainContext::default().spawn_local(async move {
                     if let Ok(video_ids) = thumbnail_completion.recv().await {
-                        refresh_video_thumbnails(&state2, &ui2, &video_ids);
+                        for video_id in &video_ids {
+                            cards::refresh_video_thumbnail(&state2, &ui2, video_id);
+                        }
                     }
                 });
             }
         }
     });
+}
+
+fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
+    let state_ref = state_rc.borrow();
+    let downloaded_video_ids = state_ref.storage.cached_video_ids();
+    update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
+    populate_flow_box(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
+    populate_flow_box(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
 }
 
 fn start_feed_refresh(
@@ -723,7 +730,13 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let ui_context_for_startup = ui_context.clone();
         glib::MainContext::default().spawn_local(async move {
             if let Ok(video_ids) = startup_thumbnail_completion.recv().await {
-                refresh_video_thumbnails(&state_for_startup, &ui_context_for_startup, &video_ids);
+                for video_id in &video_ids {
+                    cards::refresh_video_thumbnail(
+                        &state_for_startup,
+                        &ui_context_for_startup,
+                        video_id,
+                    );
+                }
             }
         });
     }
