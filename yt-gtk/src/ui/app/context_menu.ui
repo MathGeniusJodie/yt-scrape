@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <!-- Popover content box for the video context menu -->
+  <object class="GtkBox" id="menu_box">
+    <property name="orientation">vertical</property>
+    <property name="margin-start">8</property>
+    <property name="margin-end">8</property>
+    <property name="margin-top">8</property>
+    <property name="margin-bottom">8</property>
+    <child>
+      <object class="GtkButton" id="play_button">
+        <property name="label">Play</property>
+        <property name="name">menu-play</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkButton" id="watch_later_button">
+        <property name="label">Toggle Watch Later</property>
+        <property name="name">menu-watch-later</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkButton" id="copy_url_button">
+        <property name="label">Copy URL</property>
+        <property name="name">menu-copy-url</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkButton" id="summary_button">
+        <property name="label">AI Summary</property>
+        <property name="name">menu-summary</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkButton" id="transcript_button">
+        <property name="label">Transcript</property>
+        <property name="name">menu-transcript</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
+  </object>
+</interface>

@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <!-- HeaderBar with refresh button, tab bar, spinner, and status label -->
+  <object class="GtkHeaderBar" id="header">
+    <property name="show-close-button">True</property>
+    <property name="title">yt-gtk</property>
+    <child>
+      <object class="GtkButton" id="refresh_button">
+        <property name="name">refresh-button</property>
+        <property name="tooltip-text" translatable="yes">Refresh feeds</property>
+        <child>
+          <object class="GtkImage">
+            <property name="icon-name">view-refresh-symbolic</property>
+            <property name="icon-size">1</property>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child type="title">
+      <object class="GtkBox" id="tab_bar">
+        <property name="name">tab-bar</property>
+        <property name="orientation">horizontal</property>
+        <style>
+          <class name="linked"/>
+        </style>
+        <child>
+          <object class="GtkToggleButton" id="feed_tab">
+            <property name="label">Feed</property>
+            <property name="name">tab-feed</property>
+            <property name="active">True</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="watch_later_tab">
+            <property name="name">tab-watch-later</property>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">6</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Watch Later</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="watch_later_badge">
+                    <property name="name">watch-later-badge</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkSpinner" id="spinner"/>
+      <packing>
+        <property name="pack-type">end</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkLabel" id="status_label">
+        <property name="name">status-label</property>
+      </object>
+      <packing>
+        <property name="pack-type">end</property>
+      </packing>
+    </child>
+  </object>
+
+  <!-- Stack with Feed and Watch Later tabs, each containing a scrollable FlowBox -->
+  <object class="GtkStack" id="stack">
+    <property name="transition-type">slide-left-right</property>
+    <child>
+      <object class="GtkScrolledWindow" id="feed_scroll">
+        <property name="hscrollbar-policy">never</property>
+        <property name="vscrollbar-policy">automatic</property>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">horizontal</property>
+            <property name="halign">center</property>
+            <property name="valign">start</property>
+            <child>
+              <object class="GtkFlowBox" id="feed_flow">
+                <property name="name">video-grid</property>
+                <property name="valign">start</property>
+                <property name="halign">center</property>
+                <property name="max-children-per-line">10</property>
+                <property name="min-children-per-line">1</property>
+                <property name="selection-mode">single</property>
+                <property name="homogeneous">False</property>
+                <property name="column-spacing">16</property>
+                <property name="row-spacing">16</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+      <packing>
+        <property name="name">feed</property>
+        <property name="title">Feed</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkScrolledWindow" id="watch_later_scroll">
+        <property name="hscrollbar-policy">never</property>
+        <property name="vscrollbar-policy">automatic</property>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">horizontal</property>
+            <property name="halign">center</property>
+            <property name="valign">start</property>
+            <child>
+              <object class="GtkFlowBox" id="watch_later_flow">
+                <property name="name">video-grid</property>
+                <property name="valign">start</property>
+                <property name="halign">center</property>
+                <property name="max-children-per-line">10</property>
+                <property name="min-children-per-line">1</property>
+                <property name="selection-mode">single</property>
+                <property name="homogeneous">False</property>
+                <property name="column-spacing">16</property>
+                <property name="row-spacing">16</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+      <packing>
+        <property name="name">watch-later</property>
+        <property name="title">Watch Later</property>
+      </packing>
+    </child>
+  </object>
+</interface>

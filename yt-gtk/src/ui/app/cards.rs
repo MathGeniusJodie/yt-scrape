@@ -70,31 +70,26 @@ pub(super) fn create_context_menu(
 ) {
     let popover = popover.clone();
     let selected_video = ui_context.selected_video.clone();
-    let menu_box = GtkBox::new(Orientation::Vertical, 0);
-    menu_box.set_margin_start(8);
-    menu_box.set_margin_end(8);
-    menu_box.set_margin_top(8);
-    menu_box.set_margin_bottom(8);
 
-    let play_button = Button::with_label("Play");
-    play_button.set_widget_name("menu-play");
-    menu_box.pack_start(&play_button, false, false, 4);
-
-    let watch_later_button = Button::with_label("Toggle Watch Later");
-    watch_later_button.set_widget_name("menu-watch-later");
-    menu_box.pack_start(&watch_later_button, false, false, 4);
-
-    let copy_url_button = Button::with_label("Copy URL");
-    copy_url_button.set_widget_name("menu-copy-url");
-    menu_box.pack_start(&copy_url_button, false, false, 4);
-
-    let summary_button = Button::with_label("AI Summary");
-    summary_button.set_widget_name("menu-summary");
-    menu_box.pack_start(&summary_button, false, false, 4);
-
-    let transcript_button = Button::with_label("Transcript");
-    transcript_button.set_widget_name("menu-transcript");
-    menu_box.pack_start(&transcript_button, false, false, 4);
+    let builder = gtk::Builder::from_string(include_str!("context_menu.ui"));
+    let menu_box = builder
+        .object::<GtkBox>("menu_box")
+        .expect("menu_box in context_menu.ui");
+    let play_button = builder
+        .object::<Button>("play_button")
+        .expect("play_button in context_menu.ui");
+    let watch_later_button = builder
+        .object::<Button>("watch_later_button")
+        .expect("watch_later_button in context_menu.ui");
+    let copy_url_button = builder
+        .object::<Button>("copy_url_button")
+        .expect("copy_url_button in context_menu.ui");
+    let summary_button = builder
+        .object::<Button>("summary_button")
+        .expect("summary_button in context_menu.ui");
+    let transcript_button = builder
+        .object::<Button>("transcript_button")
+        .expect("transcript_button in context_menu.ui");
 
     popover.add(&menu_box);
     menu_box.show_all();

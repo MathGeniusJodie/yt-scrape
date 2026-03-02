@@ -8,8 +8,8 @@ use cards::VideoCardWidgets;
 
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Box as GtkBox, Button, FlowBox, HeaderBar, Label, Orientation,
-    Popover, ScrolledWindow, Spinner, Stack,
+    Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow, Spinner,
+    Stack,
 };
 use indexmap::IndexMap;
 use log::{error, info, warn};
@@ -202,68 +202,11 @@ fn resolve_playback_path(
     }
 }
 
-fn configure_video_flow(flow: &FlowBox) {
-    flow.set_widget_name("video-grid");
-    flow.set_valign(gtk::Align::Start);
-    flow.set_halign(gtk::Align::Center);
-    flow.set_max_children_per_line(10);
-    flow.set_min_children_per_line(1);
-    flow.set_selection_mode(gtk::SelectionMode::Single);
-    flow.set_homogeneous(false);
-    flow.set_column_spacing(CARD_SPACING as u32);
-    flow.set_row_spacing(CARD_SPACING as u32);
-}
-
 fn update_flow_width(flow: &FlowBox, viewport_width: i32) {
     let available_width = (viewport_width - GRID_PADDING * 2).max(1);
     let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
     let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
     flow.set_size_request(optimal_width, -1);
-}
-
-fn connect_tab_button_to_stack(
-    tab_button: &gtk::ToggleButton,
-    stack: &Stack,
-    visible_child_name: &'static str,
-    active_flow: &FlowBox,
-    inactive_tabs: &[gtk::ToggleButton],
-) {
-    let stack = stack.clone();
-    let active_flow = active_flow.clone();
-    let inactive_tabs = inactive_tabs.to_vec();
-
-    tab_button.connect_toggled(move |button| {
-        if !button.is_active() {
-            return;
-        }
-
-        stack.set_visible_child_name(visible_child_name);
-        for tab in &inactive_tabs {
-            tab.set_active(false);
-        }
-        update_flow_width(&active_flow, stack.allocated_width());
-    });
-}
-
-fn create_video_grid() -> (ScrolledWindow, FlowBox) {
-    let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-
-    let container = GtkBox::new(Orientation::Horizontal, 0);
-    container.set_halign(gtk::Align::Center);
-    container.set_valign(gtk::Align::Start);
-
-    let flow = FlowBox::new();
-    configure_video_flow(&flow);
-    container.pack_start(&flow, false, false, 0);
-
-    let flow_for_resize = flow.clone();
-    scroll.connect_size_allocate(move |_widget, allocation| {
-        update_flow_width(&flow_for_resize, allocation.width());
-    });
-
-    scroll.add(&container);
-    (scroll, flow)
 }
 
 fn toggle_watch_later_and_download(
@@ -510,7 +453,6 @@ fn start_feed_refresh(
 /// * `app` - Active GTK application instance.
 /// * `subs_file` - Path to the channel subscription file.
 pub fn build_ui(app: &Application, subs_file: PathBuf) {
-    // Create tokio runtime for async operations
     let runtime = match Runtime::new() {
         Ok(runtime) => Arc::new(runtime),
         Err(runtime_error) => {
@@ -519,7 +461,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         }
     };
 
-    // Initialize storage
     let storage = match Storage::new() {
         Ok(storage) => storage,
         Err(storage_error) => {
@@ -528,7 +469,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         }
     };
 
-    // Load cached data
     let watch_later = storage.load_watch_later();
     match storage.prune_cached_videos_not_in_watch_later(&watch_later) {
         Ok(removed_count) if removed_count > 0 => {
@@ -555,11 +495,8 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
 
     let state = Rc::new(RefCell::new(AppState::new(videos, watch_later, storage)));
-
-    // Selected video for context menu actions
     let selected_video: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
-    // Create main window
     let window = ApplicationWindow::builder()
         .application(app)
         .title("yt-gtk")
@@ -567,7 +504,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         .default_height(800)
         .build();
 
-    // Apply CSS
     let css_provider = gtk::CssProvider::new();
     if let Err(css_error) = css_provider.load_from_data(include_bytes!("../style.css")) {
         warn!("Failed to load CSS: {}", css_error);
@@ -580,102 +516,92 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         );
     }
 
-    // Header bar
-    let header = HeaderBar::new();
-    header.set_show_close_button(true);
-    header.set_title(Some("yt-gtk"));
-
-    // Refresh button with icon
-    let refresh_button =
-        Button::from_icon_name(Some("view-refresh-symbolic"), gtk::IconSize::Button);
-    refresh_button.set_widget_name("refresh-button");
-    refresh_button.set_tooltip_text(Some("Refresh feeds"));
-    header.pack_start(&refresh_button);
-
-    // Status label
-    let status_label = Label::new(None);
-    status_label.set_widget_name("status-label");
-    header.pack_end(&status_label);
-
-    // Spinner for loading
-    let spinner = Spinner::new();
-    header.pack_end(&spinner);
+    // Load static window structure from .ui file
+    let builder = gtk::Builder::from_string(include_str!("window.ui"));
+    let header = builder
+        .object::<gtk::HeaderBar>("header")
+        .expect("header in window.ui");
+    let refresh_button = builder
+        .object::<Button>("refresh_button")
+        .expect("refresh_button in window.ui");
+    let status_label = builder
+        .object::<Label>("status_label")
+        .expect("status_label in window.ui");
+    let spinner = builder
+        .object::<Spinner>("spinner")
+        .expect("spinner in window.ui");
+    let feed_tab = builder
+        .object::<gtk::ToggleButton>("feed_tab")
+        .expect("feed_tab in window.ui");
+    let watch_later_tab = builder
+        .object::<gtk::ToggleButton>("watch_later_tab")
+        .expect("watch_later_tab in window.ui");
+    let badge = builder
+        .object::<Label>("watch_later_badge")
+        .expect("watch_later_badge in window.ui");
+    let stack = builder
+        .object::<Stack>("stack")
+        .expect("stack in window.ui");
+    let feed_scroll = builder
+        .object::<ScrolledWindow>("feed_scroll")
+        .expect("feed_scroll in window.ui");
+    let feed_flow = builder
+        .object::<FlowBox>("feed_flow")
+        .expect("feed_flow in window.ui");
+    let watch_later_scroll = builder
+        .object::<ScrolledWindow>("watch_later_scroll")
+        .expect("watch_later_scroll in window.ui");
+    let watch_later_flow = builder
+        .object::<FlowBox>("watch_later_flow")
+        .expect("watch_later_flow in window.ui");
 
     window.set_titlebar(Some(&header));
+    window.add(&stack);
 
-    // Main layout
-    let main_box = GtkBox::new(Orientation::Vertical, 0);
-
-    // Stack for tabs
-    let stack = Stack::new();
-    stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
-
-    let (feed_scroll, feed_flow) = create_video_grid();
-    stack.add_titled(&feed_scroll, "feed", "Feed");
-
-    let (watch_later_scroll, watch_later_flow) = create_video_grid();
-    stack.add_titled(&watch_later_scroll, "watch-later", "Watch Later");
-
-    // Custom tab bar with stylish badge
-    let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
-    tab_bar.set_widget_name("tab-bar");
-    tab_bar.style_context().add_class("linked");
-
-    // Feed tab button
-    let feed_tab = gtk::ToggleButton::with_label("Feed");
-    feed_tab.set_widget_name("tab-feed");
-    feed_tab.set_active(true);
-    tab_bar.pack_start(&feed_tab, false, false, 0);
-
-    // Watch Later tab button with badge
-    let watch_later_tab = gtk::ToggleButton::new();
-    watch_later_tab.set_widget_name("tab-watch-later");
-
-    let wl_tab_box = GtkBox::new(Orientation::Horizontal, 6);
-    let wl_tab_label = Label::new(Some("Watch Later"));
-    wl_tab_box.pack_start(&wl_tab_label, false, false, 0);
-
-    let wl_badge = Label::new(None);
-    wl_badge.set_widget_name("watch-later-badge");
-    wl_tab_box.pack_start(&wl_badge, false, false, 0);
-
-    watch_later_tab.add(&wl_tab_box);
-    tab_bar.pack_start(&watch_later_tab, false, false, 0);
-
-    header.set_custom_title(Some(&tab_bar));
-
+    // Resize flow columns when scroll viewport changes
     {
         let feed_flow = feed_flow.clone();
-        let watch_later_flow = watch_later_flow.clone();
-        stack.connect_size_allocate(move |_stack, allocation| {
+        feed_scroll.connect_size_allocate(move |_, allocation| {
             update_flow_width(&feed_flow, allocation.width());
+        });
+    }
+    {
+        let watch_later_flow = watch_later_flow.clone();
+        watch_later_scroll.connect_size_allocate(move |_, allocation| {
             update_flow_width(&watch_later_flow, allocation.width());
         });
     }
 
-    // Connect tab buttons to stack
-    connect_tab_button_to_stack(
-        &feed_tab,
-        &stack,
-        "feed",
-        &feed_flow,
-        std::slice::from_ref(&watch_later_tab),
-    );
-    connect_tab_button_to_stack(
-        &watch_later_tab,
-        &stack,
-        "watch-later",
-        &watch_later_flow,
-        std::slice::from_ref(&feed_tab),
-    );
-
-    main_box.pack_start(&stack, true, true, 0);
-    window.add(&main_box);
+    // Tab toggle buttons switch the stack page and update sibling active state
+    {
+        let stack = stack.clone();
+        let watch_later_tab = watch_later_tab.clone();
+        let feed_flow = feed_flow.clone();
+        feed_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            stack.set_visible_child_name("feed");
+            watch_later_tab.set_active(false);
+            update_flow_width(&feed_flow, stack.allocated_width());
+        });
+    }
+    {
+        let stack = stack.clone();
+        let feed_tab = feed_tab.clone();
+        let watch_later_flow = watch_later_flow.clone();
+        watch_later_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            stack.set_visible_child_name("watch-later");
+            feed_tab.set_active(false);
+            update_flow_width(&watch_later_flow, stack.allocated_width());
+        });
+    }
 
     let feed_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let watch_later_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
-
-    // Create context menu with handlers connected once
     let context_menu = Popover::new(None::<&gtk::Widget>);
 
     let ui_context = AppContext {
@@ -687,23 +613,20 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         feed_flow: feed_flow.clone(),
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
-        badge: wl_badge.clone(),
+        badge: badge.clone(),
         feed_cards: feed_cards.clone(),
         watch_later_cards: watch_later_cards.clone(),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
-    // Set initial badge and populate videos
     refresh_video_lists(&state, &ui_context);
 
-    // Refresh button handler
     {
         let state = state.clone();
         let status_label = status_label.clone();
         let spinner = spinner.clone();
         let ui_context = ui_context.clone();
         let subs_file = subs_file.clone();
-
         refresh_button.connect_clicked(move |_| {
             start_feed_refresh(
                 state.clone(),
@@ -715,7 +638,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         });
     }
 
-    // Start thumbnail downloads for visible videos
     let startup_thumbnail_completion = {
         let state_ref = state.borrow();
         download_missing_thumbnails(

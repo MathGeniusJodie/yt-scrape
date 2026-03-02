@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <!-- Reusable read-only scrollable text view -->
+  <object class="GtkScrolledWindow" id="text_scroller">
+    <property name="hscrollbar-policy">automatic</property>
+    <property name="vscrollbar-policy">automatic</property>
+    <property name="vexpand">True</property>
+    <property name="hexpand">True</property>
+    <child>
+      <object class="GtkTextView" id="text_view">
+        <property name="editable">False</property>
+        <property name="wrap-mode">word</property>
+        <property name="left-margin">12</property>
+        <property name="right-margin">12</property>
+        <property name="top-margin">12</property>
+        <property name="bottom-margin">12</property>
+      </object>
+    </child>
+  </object>
+</interface>
