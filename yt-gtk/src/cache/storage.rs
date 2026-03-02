@@ -64,21 +64,17 @@ fn video_id_from_stem(stem: &str) -> Option<&str> {
 ///
 /// Missing files are silently ignored; read/parse errors are logged as warnings.
 fn try_load_json_file<T: DeserializeOwned>(path: &Path, context: &str) -> Option<T> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            warn!("Failed to read {} {}: {}", context, path.display(), error);
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!("Failed to read {} {}: {}", context, path.display(), e);
             return None;
         }
     };
-    match serde_json::from_str(&content) {
-        Ok(value) => Some(value),
-        Err(error) => {
-            warn!("Failed to parse {} {}: {}", context, path.display(), error);
-            None
-        }
-    }
+    serde_json::from_reader(file)
+        .map_err(|e| warn!("Failed to parse {} {}: {}", context, path.display(), e))
+        .ok()
 }
 
 fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
@@ -252,6 +248,19 @@ impl Storage {
         collect_cached_video_ids_from_dir(&self.videos_dir)
     }
 
+    /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
+    fn scan_video_files(&self) -> StorageResult<Vec<(PathBuf, String)>> {
+        Ok(std::fs::read_dir(&self.videos_dir)?
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let path = e.path();
+                // Convert to owned String before moving path out of the borrow.
+                let id = cached_video_id_for_path(&path)?.to_string();
+                Some((path, id))
+            })
+            .collect())
+    }
+
     /// Deletes all cached video files for a single video ID.
     ///
     /// This removes every matching file in the videos cache directory across supported
@@ -269,17 +278,13 @@ impl Storage {
     ///
     /// Returns an error if directory scanning or file deletion fails.
     pub fn remove_cached_video_files(&self, video_id: &str) -> StorageResult<usize> {
-        let entries = std::fs::read_dir(&self.videos_dir)?;
         let mut removed_count = 0usize;
-
-        for entry in entries {
-            let path = entry?.path();
-            if cached_video_id_for_path(&path) == Some(video_id) {
+        for (path, id) in self.scan_video_files()? {
+            if id == video_id {
                 std::fs::remove_file(path)?;
                 removed_count += 1;
             }
         }
-
         Ok(removed_count)
     }
 
@@ -300,21 +305,13 @@ impl Storage {
         &self,
         watch_later: &HashSet<String>,
     ) -> StorageResult<usize> {
-        let entries = std::fs::read_dir(&self.videos_dir)?;
         let mut removed_count = 0usize;
-
-        for entry in entries {
-            let path = entry?.path();
-            let Some(cached_video_id) = cached_video_id_for_path(&path) else {
-                continue;
-            };
-            if watch_later.contains(cached_video_id) {
-                continue;
+        for (path, id) in self.scan_video_files()? {
+            if !watch_later.contains(&id) {
+                std::fs::remove_file(path)?;
+                removed_count += 1;
             }
-            std::fs::remove_file(path)?;
-            removed_count += 1;
         }
-
         Ok(removed_count)
     }
 

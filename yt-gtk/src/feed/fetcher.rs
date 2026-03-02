@@ -175,6 +175,31 @@ struct PendingChannel {
     not_before: Instant,
 }
 
+impl PendingChannel {
+    fn schedule_retry(&mut self, delay_ms: u64) {
+        self.attempt += 1;
+        self.not_before = Instant::now() + Duration::from_millis(delay_ms);
+    }
+}
+
+async fn send_retry_progress(
+    tx: &Sender<FetchProgress>,
+    channel_id: &str,
+    next_attempt: usize,
+    delay_secs: u64,
+    reason: &str,
+) {
+    let _ = tx
+        .send(FetchProgress::RetryScheduled {
+            channel_id: channel_id.to_string(),
+            next_attempt,
+            max_attempts: MAX_FETCH_ATTEMPTS,
+            delay_secs,
+            reason: reason.to_string(),
+        })
+        .await;
+}
+
 enum ChannelFetchResult {
     Success { videos: Vec<Video> },
     Failed,
@@ -303,21 +328,17 @@ async fn fetch_channel_with_retries(
                                 return ChannelFetchResult::Failed;
                             }
 
-                            let _ = tx
-                                .send(FetchProgress::RetryScheduled {
-                                    channel_id: pending.channel_id.clone(),
-                                    next_attempt: pending.attempt + 1,
-                                    max_attempts: MAX_FETCH_ATTEMPTS,
-                                    delay_secs: 0,
-                                    reason:
-                                        "Resolved uploads playlist ID after 404; queued for retry."
-                                            .to_string(),
-                                })
-                                .await;
+                            send_retry_progress(
+                                &tx,
+                                &pending.channel_id,
+                                pending.attempt + 1,
+                                0,
+                                "Resolved uploads playlist ID after 404; queued for retry.",
+                            )
+                            .await;
 
-                            pending.attempt += 1;
+                            pending.schedule_retry(0);
                             pending.uploads_playlist_id = resolved_uploads_playlist_id;
-                            pending.not_before = Instant::now();
                             continue;
                         }
                         Ok(_) => {
@@ -335,18 +356,15 @@ async fn fetch_channel_with_retries(
 
                 if should_retry(&error) && pending.attempt < MAX_FETCH_ATTEMPTS {
                     let delay_ms = backoff_ms_for_attempt(pending.attempt, &error);
-                    let _ = tx
-                        .send(FetchProgress::RetryScheduled {
-                            channel_id: pending.channel_id.clone(),
-                            next_attempt: pending.attempt + 1,
-                            max_attempts: MAX_FETCH_ATTEMPTS,
-                            delay_secs: delay_ms.div_ceil(1000),
-                            reason: error.to_string(),
-                        })
-                        .await;
-
-                    pending.attempt += 1;
-                    pending.not_before = Instant::now() + Duration::from_millis(delay_ms);
+                    send_retry_progress(
+                        &tx,
+                        &pending.channel_id,
+                        pending.attempt + 1,
+                        delay_ms.div_ceil(1000),
+                        &error.to_string(),
+                    )
+                    .await;
+                    pending.schedule_retry(delay_ms);
                     continue;
                 }
 

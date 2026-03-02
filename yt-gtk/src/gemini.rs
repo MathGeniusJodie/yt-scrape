@@ -247,15 +247,6 @@ pub enum StreamingMessage {
     Error(String),
 }
 
-struct OpenRouterSummaryInput<'a> {
-    video_id: &'a str,
-    video_url: &'a str,
-    video_title: &'a str,
-    channel_name: &'a str,
-    prompt: &'a str,
-    transcripts_work_dir: &'a Path,
-}
-
 fn configured_openrouter_models() -> Vec<String> {
     if let Ok(models_raw) = std::env::var("OPENROUTER_MODELS") {
         let models = models_raw
@@ -315,14 +306,12 @@ pub async fn summarize_video_streaming(
     if let Err(gemini_error) = gemini_result {
         if let Err(openrouter_error) = call_openrouter_with_transcript(
             &client,
-            OpenRouterSummaryInput {
-                video_id,
-                video_url,
-                video_title,
-                channel_name,
-                prompt: SUMMARY_PROMPT,
-                transcripts_work_dir,
-            },
+            video_id,
+            video_url,
+            video_title,
+            channel_name,
+            SUMMARY_PROMPT,
+            transcripts_work_dir,
             tx.clone(),
         )
         .await
@@ -402,20 +391,17 @@ async fn call_gemini_streaming(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn call_openrouter_with_transcript(
     client: &reqwest::Client,
-    input: OpenRouterSummaryInput<'_>,
+    video_id: &str,
+    video_url: &str,
+    video_title: &str,
+    channel_name: &str,
+    prompt: &str,
+    transcripts_work_dir: &Path,
     tx: Sender<StreamingMessage>,
 ) -> Result<(), ProviderCallError> {
-    let OpenRouterSummaryInput {
-        video_id,
-        video_url,
-        video_title,
-        channel_name,
-        prompt,
-        transcripts_work_dir,
-    } = input;
-
     let api_key =
         std::env::var("OPENROUTER_API_KEY").map_err(|_| ProviderCallError::MissingEnvVar {
             variable: "OPENROUTER_API_KEY",

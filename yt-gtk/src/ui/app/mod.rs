@@ -4,7 +4,7 @@ mod summary_generator;
 use crate::cache::{download_video, Storage, StorageError};
 use crate::data::{Tab, Video};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
-use crate::ui::video_card::VideoCardWidgets;
+use cards::VideoCardWidgets;
 
 use gtk::prelude::*;
 use gtk::{

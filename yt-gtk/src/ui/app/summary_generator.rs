@@ -4,6 +4,7 @@ use crate::cache::fetch_transcript;
 use crate::data::Video;
 use crate::gemini::{summarize_video_streaming, StreamingMessage};
 use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
+use glib::clone;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Orientation};
 use log::error;
@@ -15,31 +16,6 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
-fn spawn_summary_generation_stream(
-    runtime: Arc<Runtime>,
-    client: reqwest::Client,
-    video: Video,
-    transcripts_work_dir: std::path::PathBuf,
-) -> async_channel::Receiver<StreamingMessage> {
-    let (tx, rx) = async_channel::unbounded::<StreamingMessage>();
-
-    runtime.spawn(async move {
-        let video_url = video.watch_url();
-        summarize_video_streaming(
-            client,
-            video.video_id(),
-            &video_url,
-            video.title(),
-            video.channel_name(),
-            &transcripts_work_dir,
-            tx,
-        )
-        .await;
-    });
-
-    rx
-}
-
 /// Configures request guards for starting summary generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SummaryGenerationMode {
@@ -47,16 +23,6 @@ pub(super) enum SummaryGenerationMode {
     Prefetch,
     /// Always start a new generation for explicit user actions.
     Interactive,
-}
-
-impl SummaryGenerationMode {
-    const fn should_skip_cached(self) -> bool {
-        matches!(self, Self::Prefetch)
-    }
-
-    const fn should_skip_in_progress(self) -> bool {
-        matches!(self, Self::Prefetch)
-    }
 }
 
 /// Start-time validation errors for summary generation.
@@ -108,7 +74,7 @@ impl SummaryGenerator {
         video_id: &str,
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
-        if mode.should_skip_in_progress()
+        if matches!(mode, SummaryGenerationMode::Prefetch)
             && self
                 .summaries_in_progress
                 .read()
@@ -133,12 +99,21 @@ impl SummaryGenerator {
         };
 
         let task_video_id = video.video_id().to_string();
-        let result_rx = spawn_summary_generation_stream(
-            self.runtime.clone(),
-            self.http_client.clone(),
-            video,
-            transcripts_work_dir,
-        );
+        let (tx, result_rx) = async_channel::unbounded::<StreamingMessage>();
+        let http_client = self.http_client.clone();
+        self.runtime.spawn(async move {
+            let video_url = video.watch_url();
+            summarize_video_streaming(
+                http_client,
+                video.video_id(),
+                &video_url,
+                video.title(),
+                video.channel_name(),
+                &transcripts_work_dir,
+                tx,
+            )
+            .await;
+        });
 
         Ok(SummaryGenerationTask {
             video_id: task_video_id,
@@ -168,6 +143,27 @@ impl SummaryGenerator {
         state_rc
             .borrow_mut()
             .cache_video_ai_summary(video_id, summary)
+    }
+
+    /// Persists a summary and refreshes the UI badge for the given video.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CacheVideoError`] if persisting fails.
+    pub(super) fn persist_and_refresh(
+        &self,
+        state_rc: &Rc<RefCell<AppState>>,
+        ui_context: &AppContext,
+        video_id: &str,
+        summary: String,
+    ) -> Result<(), CacheVideoError> {
+        self.persist_summary(state_rc, video_id, summary)?;
+        let has_summary = state_rc
+            .borrow()
+            .video_by_id(video_id)
+            .is_some_and(Video::has_ai_summary);
+        refresh_video_summary_badges(ui_context, video_id, has_summary);
+        Ok(())
     }
 }
 
@@ -240,10 +236,10 @@ fn prepare_summary_generation_video(
 
     let has_cached_summary = video.has_ai_summary();
 
-    if mode.should_skip_cached() && has_cached_summary {
+    if matches!(mode, SummaryGenerationMode::Prefetch) && has_cached_summary {
         return Err(StartSummaryGenerationError::AlreadyCached);
     }
-    if mode.should_skip_in_progress() && summaries_in_progress.contains(video_id) {
+    if matches!(mode, SummaryGenerationMode::Prefetch) && summaries_in_progress.contains(video_id) {
         return Err(StartSummaryGenerationError::AlreadyInProgress);
     }
 
@@ -272,45 +268,22 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
             }
         };
 
-    let state_for_result = state_rc.clone();
-    let ui_context_for_result = ui_context.clone();
-    let summary_generator_for_result = summary_generator.clone();
-
-    glib::MainContext::default().spawn_local(async move {
-        let video_id_for_result = generation_task.video_id().to_string();
+    glib::MainContext::default().spawn_local(clone!(@strong state_rc, @strong ui_context, @strong summary_generator => async move {
+        let video_id = generation_task.video_id().to_string();
         match generation_task.collect().await {
             Err(generation_error) => {
-                summary_generator_for_result.clear_in_progress(&video_id_for_result);
-                error!(
-                    "Failed to prefetch summary for {}: {}",
-                    video_id_for_result, generation_error
-                );
+                summary_generator.clear_in_progress(&video_id);
+                error!("Failed to prefetch summary for {}: {}", video_id, generation_error);
             }
             Ok(summary) => {
-                if let Err(cache_error) = summary_generator_for_result.persist_summary(
-                    &state_for_result,
-                    &video_id_for_result,
-                    summary,
-                ) {
-                    error!(
-                        "Failed to cache prefetched summary for {}: {}",
-                        video_id_for_result, cache_error
-                    );
-                    return;
+                if let Err(cache_error) =
+                    summary_generator.persist_and_refresh(&state_rc, &ui_context, &video_id, summary)
+                {
+                    error!("Failed to cache prefetched summary for {}: {}", video_id, cache_error);
                 }
-
-                let has_summary = state_for_result
-                    .borrow()
-                    .video_by_id(&video_id_for_result)
-                    .is_some_and(Video::has_ai_summary);
-                refresh_video_summary_badges(
-                    &ui_context_for_result,
-                    &video_id_for_result,
-                    has_summary,
-                );
             }
         }
-    });
+    }));
 }
 
 fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
@@ -346,58 +319,36 @@ fn start_summary_generation_for_dialog(
             }
         };
 
-    let state_for_result = state_rc.clone();
-    let ui_context_for_result = ui_context.clone();
-    let buffer_for_result = buffer.clone();
-    let button_for_result = regenerate_button.clone();
-    let summary_generator_for_result = summary_generator.clone();
-
-    glib::MainContext::default().spawn_local(async move {
-        let video_id_for_result = generation_task.video_id().to_string();
+    glib::MainContext::default().spawn_local(clone!(@strong state_rc, @strong ui_context, @strong buffer, @strong regenerate_button, @strong summary_generator => async move {
+        let video_id = generation_task.video_id().to_string();
         let mut received_chunk = false;
         let generation_result = generation_task
             .collect_with_chunks(|text| {
                 if !received_chunk {
-                    buffer_for_result.set_text("");
+                    buffer.set_text("");
                     received_chunk = true;
                 }
-                insert_stream_chunk(&buffer_for_result, text);
+                insert_stream_chunk(&buffer, text);
             })
             .await;
 
-        button_for_result.set_sensitive(true);
+        regenerate_button.set_sensitive(true);
 
         match generation_result {
             Err(generation_error) => {
-                summary_generator_for_result.clear_in_progress(&video_id_for_result);
-                buffer_for_result.set_text(&format!("Error: {}", generation_error));
+                summary_generator.clear_in_progress(&video_id);
+                buffer.set_text(&format!("Error: {}", generation_error));
             }
             Ok(summary) => {
-                if let Err(cache_error) = summary_generator_for_result.persist_summary(
-                    &state_for_result,
-                    &video_id_for_result,
-                    summary,
-                ) {
-                    buffer_for_result.set_text(&format!("Error: {}", cache_error));
-                    error!(
-                        "Failed to cache interactive summary for {}: {}",
-                        video_id_for_result, cache_error
-                    );
-                    return;
+                if let Err(cache_error) =
+                    summary_generator.persist_and_refresh(&state_rc, &ui_context, &video_id, summary)
+                {
+                    buffer.set_text(&format!("Error: {}", cache_error));
+                    error!("Failed to cache interactive summary for {}: {}", video_id, cache_error);
                 }
-
-                let has_summary = state_for_result
-                    .borrow()
-                    .video_by_id(&video_id_for_result)
-                    .is_some_and(Video::has_ai_summary);
-                refresh_video_summary_badges(
-                    &ui_context_for_result,
-                    &video_id_for_result,
-                    has_summary,
-                );
             }
         }
-    });
+    }));
 }
 
 pub(super) fn show_summary_dialog(
@@ -440,16 +391,14 @@ pub(super) fn show_summary_dialog(
         },
     );
 
-    let state_rc_for_dialog = state_rc.clone();
-    let ui_context_for_dialog = ui_context.clone();
     let video_id = video_id.to_string();
 
     if let Some(summary) = cached_summary {
         buffer.set_text(&summary);
     } else {
         start_summary_generation_for_dialog(
-            state_rc_for_dialog.clone(),
-            ui_context_for_dialog.clone(),
+            state_rc.clone(),
+            ui_context.clone(),
             video_id.clone(),
             buffer.clone(),
             regenerate_button.clone(),
@@ -457,24 +406,16 @@ pub(super) fn show_summary_dialog(
         );
     }
 
-    {
-        let state_rc_for_click = state_rc_for_dialog.clone();
-        let ui_context_for_click = ui_context_for_dialog.clone();
-        let buffer_for_click = buffer.clone();
-        let regenerate_button_for_click = regenerate_button.clone();
-        let video_id_for_click = video_id.clone();
-
-        regenerate_button.connect_clicked(move |_| {
-            start_summary_generation_for_dialog(
-                state_rc_for_click.clone(),
-                ui_context_for_click.clone(),
-                video_id_for_click.clone(),
-                buffer_for_click.clone(),
-                regenerate_button_for_click.clone(),
-                "Regenerating summary...",
-            );
-        });
-    }
+    regenerate_button.connect_clicked(clone!(@strong state_rc, @strong ui_context, @strong video_id, @strong buffer, @strong regenerate_button => move |_| {
+        start_summary_generation_for_dialog(
+            state_rc.clone(),
+            ui_context.clone(),
+            video_id.clone(),
+            buffer.clone(),
+            regenerate_button.clone(),
+            "Regenerating summary...",
+        );
+    }));
 }
 
 pub(super) fn show_transcript_dialog(
