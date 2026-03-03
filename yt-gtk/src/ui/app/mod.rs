@@ -8,8 +8,7 @@ use cards::VideoCardWidgets;
 
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow, Spinner,
-    Stack,
+    Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow, Spinner, Stack,
 };
 use indexmap::IndexMap;
 use log::{error, info, warn};
@@ -273,6 +272,7 @@ fn spawn_refresh_progress_updates(
     progress_rx: async_channel::Receiver<FetchProgress>,
     spinner: Spinner,
     status_label: Label,
+    refresh_button: Button,
 ) {
     glib::MainContext::default().spawn_local(async move {
         let mut total_channels = 0usize;
@@ -348,6 +348,9 @@ fn spawn_refresh_progress_updates(
                 }
             }
         }
+
+        spinner.stop();
+        refresh_button.set_sensitive(true);
     });
 }
 
@@ -408,8 +411,10 @@ fn start_feed_refresh(
     ui_context: AppContext,
     spinner: Spinner,
     status_label: Label,
+    refresh_button: Button,
     subs_file: PathBuf,
 ) {
+    refresh_button.set_sensitive(false);
     spinner.start();
     status_label.set_text("Refreshing...");
 
@@ -418,6 +423,7 @@ fn start_feed_refresh(
         Err(error) => {
             spinner.stop();
             status_label.set_text(&format!("Error: {}", error));
+            refresh_button.set_sensitive(true);
             return;
         }
     };
@@ -442,7 +448,7 @@ fn start_feed_refresh(
         }
     });
 
-    spawn_refresh_progress_updates(progress_rx, spinner, status_label);
+    spawn_refresh_progress_updates(progress_rx, spinner, status_label, refresh_button);
     spawn_refreshed_videos_apply(videos_rx, state, ui_context);
 }
 
@@ -627,12 +633,14 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let spinner = spinner.clone();
         let ui_context = ui_context.clone();
         let subs_file = subs_file.clone();
+        let refresh_button_for_handler = refresh_button.clone();
         refresh_button.connect_clicked(move |_| {
             start_feed_refresh(
                 state.clone(),
                 ui_context.clone(),
                 spinner.clone(),
                 status_label.clone(),
+                refresh_button_for_handler.clone(),
                 subs_file.clone(),
             );
         });
