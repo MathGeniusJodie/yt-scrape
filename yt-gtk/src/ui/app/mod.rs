@@ -173,19 +173,18 @@ fn persist_unsubscribe(runtime: Arc<Runtime>, subs_file: PathBuf, channel_id: St
     runtime.spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             let content = std::fs::read_to_string(&subs_file)?;
-            let lines: Vec<&str> = content
+            let mut output = content
                 .lines()
                 .filter(|line| {
                     let trimmed = line.trim();
                     // Keep comments, blank lines, and lines not matching this channel
                     trimmed.starts_with('#') || trimmed.is_empty() || trimmed != channel_id
                 })
-                .collect();
-            let output = if content.ends_with('\n') {
-                lines.join("\n") + "\n"
-            } else {
-                lines.join("\n")
-            };
+                .collect::<Vec<_>>()
+                .join("\n");
+            if content.ends_with('\n') {
+                output.push('\n');
+            }
             std::fs::write(&subs_file, output)
         })
         .await;

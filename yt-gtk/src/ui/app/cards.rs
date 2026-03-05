@@ -30,10 +30,10 @@ fn on_menu_action<F>(
     F: Fn(String) + 'static,
 {
     button.connect_clicked(move |_| {
+        context_menu.popdown();
         if let Some(video_id) = selected_video.borrow().clone() {
             action(video_id);
         }
-        context_menu.popdown();
     });
 }
 
@@ -159,20 +159,18 @@ pub(super) fn create_context_menu(
         },
     );
 
-    // Unsub pops the menu before showing the confirmation dialog so the popover
-    // is dismissed before the modal dialog steals focus.
-    unsub_button.connect_clicked({
-        let context_menu = ui_context.context_menu.clone();
-        let state_rc = state_rc.clone();
-        let ui_context = ui_context.clone();
-        move |_| {
-            let video_id = selected_video.borrow().clone();
-            context_menu.popdown();
-            if let Some(video_id) = video_id {
+    on_menu_action(
+        &unsub_button,
+        selected_video,
+        ui_context.context_menu.clone(),
+        {
+            let state_rc = state_rc.clone();
+            let ui_context = ui_context.clone();
+            move |video_id| {
                 super::unsubscribe_channel(&state_rc, &ui_context, video_id);
             }
-        }
-    });
+        },
+    );
 }
 
 fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
@@ -312,7 +310,6 @@ pub(super) fn populate_flow_box(
 
     flow_box.show_all();
 }
-
 
 pub(super) fn for_each_card_matching<F>(ui_context: &AppContext, video_id: &str, mut action: F)
 where
