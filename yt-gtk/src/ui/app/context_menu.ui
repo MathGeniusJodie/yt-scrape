@@ -62,5 +62,16 @@
         <property name="padding">4</property>
       </packing>
     </child>
+    <child>
+      <object class="GtkButton" id="unsub_button">
+        <property name="label">Unsub from Channel</property>
+        <property name="name">menu-unsub</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
   </object>
 </interface>

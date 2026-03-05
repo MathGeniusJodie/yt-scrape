@@ -50,6 +50,11 @@ impl Video {
         &self.video_id
     }
 
+    /// Returns the YouTube channel ID.
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
     /// Returns the channel display name.
     pub fn channel_name(&self) -> &str {
         &self.channel_name

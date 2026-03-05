@@ -132,6 +132,7 @@ struct AppContext {
     badge: Label,
     feed_cards: CardMap,
     watch_later_cards: CardMap,
+    subs_file: PathBuf,
 }
 
 const CARD_WIDTH: i32 = 320;
@@ -164,6 +165,35 @@ fn persist_watch_later(runtime: Arc<Runtime>, storage: Storage, watch_later: Has
             Err(join_error) => {
                 error!("Watch-later persistence task failed: {}", join_error);
             }
+        }
+    });
+}
+
+fn persist_unsubscribe(runtime: Arc<Runtime>, subs_file: PathBuf, channel_id: String) {
+    runtime.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let content = std::fs::read_to_string(&subs_file)?;
+            let lines: Vec<&str> = content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    // Keep comments, blank lines, and lines not matching this channel
+                    trimmed.starts_with('#') || trimmed.is_empty() || trimmed != channel_id
+                })
+                .collect();
+            let output = if content.ends_with('\n') {
+                lines.join("\n") + "\n"
+            } else {
+                lines.join("\n")
+            };
+            std::fs::write(&subs_file, output)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(io_error)) => error!("Failed to remove channel from subs file: {}", io_error),
+            Err(join_error) => error!("Unsubscribe task panicked: {}", join_error),
         }
     });
 }
@@ -266,6 +296,58 @@ fn apply_watch_later_action(
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
     }
+}
+
+/// Unsubscribes from the channel of the given video after a confirmation dialog.
+///
+/// Removes the channel ID from the subscriptions file and purges all videos from that channel
+/// from the in-memory state and UI. Also removes any affected watch-later entries and persists
+/// the updated watch-later list.
+///
+/// # Arguments
+///
+/// * `state_rc` - Shared application state.
+/// * `ui_context` - UI handle used to parent the dialog and update card lists.
+/// * `video_id` - ID of a video belonging to the channel to unsubscribe from.
+fn unsubscribe_channel(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: String,
+) {
+    let channel_info = {
+        let state = state_rc.borrow();
+        state
+            .video_by_id(&video_id)
+            .map(|v| (v.channel_id().to_string(), v.channel_name().to_string()))
+    };
+    let Some((channel_id, channel_name)) = channel_info else {
+        error!("Cannot unsubscribe: missing video {}", video_id);
+        return;
+    };
+
+    let dialog = gtk::MessageDialog::new(
+        Some(&ui_context.window),
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        gtk::MessageType::Question,
+        gtk::ButtonsType::YesNo,
+        &format!("Unsubscribe from {}?", channel_name),
+    );
+    dialog.set_secondary_text(Some(
+        "All videos from this channel will be removed from your feed.",
+    ));
+    let response = dialog.run();
+    dialog.close();
+
+    if response != gtk::ResponseType::Yes {
+        return;
+    }
+
+    // Only persist the change — videos disappear from the feed on next refresh.
+    persist_unsubscribe(
+        ui_context.runtime.clone(),
+        ui_context.subs_file.clone(),
+        channel_id,
+    );
 }
 
 fn spawn_refresh_progress_updates(
@@ -622,6 +704,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         badge: badge.clone(),
         feed_cards: feed_cards.clone(),
         watch_later_cards: watch_later_cards.clone(),
+        subs_file: subs_file.clone(),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
