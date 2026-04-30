@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 const MAX_429_RETRIES: usize = 3;
-const MIN_SUBTITLE_REQUEST_GAP: Duration = Duration::from_millis(1_500);
-// Exponential back-off: 2s → 4s → 8s across the three retries.
-const BASE_429_BACKOFF: Duration = Duration::from_millis(2_000);
+const MIN_SUBTITLE_REQUEST_GAP: Duration = Duration::from_millis(300);
+// Exponential back-off: 1s → 2s → 4s across the three retries.
+const BASE_429_BACKOFF: Duration = Duration::from_millis(1_000);
 
 /// A pacing mechanism that serializes subtitle requests and enforces a minimum
 /// gap between them to avoid triggering YouTube rate limits.

@@ -15,9 +15,9 @@ const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/ch
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
 const PLAYLIST_ITEMS_MAX_RESULTS: u32 = 25;
 const MAX_FETCH_ATTEMPTS: usize = 3;
-const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 8;
+const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 32;
 const MAX_FEED_VIDEOS: usize = 400;
-const INITIAL_BACKOFF_MS: u64 = 1_000;
+const INITIAL_BACKOFF_MS: u64 = 500;
 const MAX_BACKOFF_MULTIPLIER: u64 = 4;
 
 /// Errors that can occur while loading and fetching feed metadata.
@@ -564,12 +564,12 @@ fn should_retry(error: &reqwest::Error) -> bool {
 
 fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
     let base_ms = if error.is_timeout() || error.is_connect() {
-        12_000
+        3_000
     } else {
         match error.status() {
-            Some(s) if s == reqwest::StatusCode::TOO_MANY_REQUESTS => 30_000,
-            Some(s) if s.is_server_error() => 20_000,
-            Some(s) if s == reqwest::StatusCode::REQUEST_TIMEOUT => 12_000,
+            Some(s) if s == reqwest::StatusCode::TOO_MANY_REQUESTS => 10_000,
+            Some(s) if s.is_server_error() => 5_000,
+            Some(s) if s == reqwest::StatusCode::REQUEST_TIMEOUT => 3_000,
             _ => INITIAL_BACKOFF_MS,
         }
     };
@@ -637,10 +637,10 @@ mod tests {
 
     #[test]
     fn caps_growth_for_small_base() {
-        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 1), 1_000);
-        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 2), 2_000);
-        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 3), 4_000);
-        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 4), 4_000);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 1), 500);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 2), 1_000);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 3), 2_000);
+        assert_eq!(backoff_ms_with_base(INITIAL_BACKOFF_MS, 4), 2_000);
     }
 
     #[test]
