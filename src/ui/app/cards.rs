@@ -390,9 +390,15 @@ pub(super) fn refresh_video_summary_badges(
     });
 }
 
+pub(super) fn refresh_video_downloading_badge(ui_context: &AppContext, video_id: &str) {
+    for_each_card_matching(ui_context, video_id, |card| {
+        card.set_downloading();
+    });
+}
+
 pub(super) fn refresh_video_downloaded_badge(ui_context: &AppContext, video_id: &str) {
     for_each_card_matching(ui_context, video_id, |card| {
-        card.set_downloaded(true);
+        card.set_downloaded();
     });
 }
 
@@ -525,6 +531,7 @@ pub(super) struct VideoCardWidgets {
     watch_later_toggle: gtk::Button,
     summary_button: gtk::Button,
     downloaded_badge: gtk::Box,
+    download_spinner: gtk::Spinner,
     thumbnail: DrawingArea,
     thumbnail_pixbuf: Rc<RefCell<Option<Pixbuf>>>,
 }
@@ -550,9 +557,18 @@ impl VideoCardWidgets {
         self.summary_button.set_visible(has_summary);
     }
 
-    /// Shows or hides the downloaded (floppy) badge.
-    pub fn set_downloaded(&self, is_downloaded: bool) {
-        self.downloaded_badge.set_visible(is_downloaded);
+    /// Shows an active spinner, hiding the floppy badge.
+    pub fn set_downloading(&self) {
+        self.downloaded_badge.set_visible(false);
+        self.download_spinner.start();
+        self.download_spinner.set_visible(true);
+    }
+
+    /// Stops the spinner and shows the floppy badge.
+    pub fn set_downloaded(&self) {
+        self.download_spinner.stop();
+        self.download_spinner.set_visible(false);
+        self.downloaded_badge.set_visible(true);
     }
 
     /// Reloads the thumbnail image from disk and redraws the card.
@@ -726,6 +742,13 @@ fn create_video_card(
     spacer.set_hexpand(true);
     status_box.pack_start(&spacer, true, true, 0);
 
+    let download_spinner = gtk::Spinner::new();
+    download_spinner.set_tooltip_text(Some("Downloading…"));
+    download_spinner.show();
+    status_box.pack_end(&download_spinner, false, false, 0);
+    download_spinner.set_no_show_all(true);
+    download_spinner.set_visible(false);
+
     let downloaded_badge = gtk::Box::new(Orientation::Horizontal, 0);
     downloaded_badge.set_widget_name("status-downloaded");
     downloaded_badge.set_tooltip_text(Some("Downloaded"));
@@ -756,6 +779,7 @@ fn create_video_card(
         watch_later_toggle,
         summary_button,
         downloaded_badge,
+        download_spinner,
         thumbnail,
         thumbnail_pixbuf: pixbuf,
     }

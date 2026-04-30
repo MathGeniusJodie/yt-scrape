@@ -22,7 +22,8 @@ use tokio::runtime::Runtime;
 
 use cards::{
     create_context_menu, download_missing_thumbnails, populate_flow_box,
-    refresh_video_downloaded_badge, sync_watch_later_card, update_watch_later_toggles,
+    refresh_video_downloaded_badge, refresh_video_downloading_badge, sync_watch_later_card,
+    update_watch_later_toggles,
 };
 use summary_generator::{maybe_prefetch_summary_for_watch_later, SummaryGenerator};
 
@@ -310,6 +311,7 @@ fn apply_watch_later_action(
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
         if let Some(rx) = download_rx {
+            refresh_video_downloading_badge(ui_context, &video_id);
             let ui_ctx = ui_context.clone();
             glib::MainContext::default().spawn_local(async move {
                 if let Ok(completed_video_id) = rx.recv().await {
