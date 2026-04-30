@@ -21,7 +21,7 @@ fn mpv_base_command(title: &str) -> Command {
     command
         .arg(format!("--title={title}"))
         .arg(format!("--force-media-title={title}"))
-        .arg("--sub-auto=all")
+        .arg("--sub-auto=fuzzy")
         .arg("--sid=auto")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -113,7 +113,7 @@ mod tests {
 
         assert!(args.contains(&"--title=Example Title".to_string()));
         assert!(args.contains(&"--force-media-title=Example Title".to_string()));
-        assert!(args.contains(&"--sub-auto=all".to_string()));
+        assert!(args.contains(&"--sub-auto=fuzzy".to_string()));
         assert!(args.contains(&"--sid=auto".to_string()));
     }
 }
