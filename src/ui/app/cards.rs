@@ -390,6 +390,12 @@ pub(super) fn refresh_video_summary_badges(
     });
 }
 
+pub(super) fn refresh_video_downloaded_badge(ui_context: &AppContext, video_id: &str) {
+    for_each_card_matching(ui_context, video_id, |card| {
+        card.set_downloaded(true);
+    });
+}
+
 pub(super) fn refresh_video_thumbnail(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
@@ -518,6 +524,7 @@ pub(super) struct VideoCardWidgets {
     root: EventBox,
     watch_later_toggle: gtk::Button,
     summary_button: gtk::Button,
+    downloaded_badge: gtk::Box,
     thumbnail: DrawingArea,
     thumbnail_pixbuf: Rc<RefCell<Option<Pixbuf>>>,
 }
@@ -541,6 +548,11 @@ impl VideoCardWidgets {
     /// Shows or hides the AI summary button.
     pub fn set_summary_available(&self, has_summary: bool) {
         self.summary_button.set_visible(has_summary);
+    }
+
+    /// Shows or hides the downloaded (floppy) badge.
+    pub fn set_downloaded(&self, is_downloaded: bool) {
+        self.downloaded_badge.set_visible(is_downloaded);
     }
 
     /// Reloads the thumbnail image from disk and redraws the card.
@@ -714,17 +726,16 @@ fn create_video_card(
     spacer.set_hexpand(true);
     status_box.pack_start(&spacer, true, true, 0);
 
-    if is_downloaded {
-        let downloaded_badge = gtk::Box::new(Orientation::Horizontal, 0);
-        downloaded_badge.set_widget_name("status-downloaded");
-        downloaded_badge.set_tooltip_text(Some("Downloaded"));
-
-        let downloaded_icon =
-            gtk::Image::from_icon_name(Some("media-floppy-symbolic"), gtk::IconSize::Menu);
-        downloaded_badge.pack_start(&downloaded_icon, false, false, 0);
-
-        status_box.pack_end(&downloaded_badge, false, false, 0);
-    }
+    let downloaded_badge = gtk::Box::new(Orientation::Horizontal, 0);
+    downloaded_badge.set_widget_name("status-downloaded");
+    downloaded_badge.set_tooltip_text(Some("Downloaded"));
+    let downloaded_icon =
+        gtk::Image::from_icon_name(Some("media-floppy-symbolic"), gtk::IconSize::Menu);
+    downloaded_icon.show();
+    downloaded_badge.pack_start(&downloaded_icon, false, false, 0);
+    status_box.pack_end(&downloaded_badge, false, false, 0);
+    downloaded_badge.set_no_show_all(true);
+    downloaded_badge.set_visible(is_downloaded);
 
     let summary_button = gtk::Button::with_label("AI");
     summary_button.set_widget_name("status-ai-summary-button");
@@ -732,6 +743,7 @@ fn create_video_card(
     summary_button.set_can_focus(false);
     summary_button.set_tooltip_text(Some("Show cached AI summary"));
     status_box.pack_end(&summary_button, false, false, 0);
+    summary_button.set_no_show_all(true);
     summary_button.set_visible(has_ai_summary);
 
     content_box.pack_start(&status_box, false, false, 0);
@@ -743,6 +755,7 @@ fn create_video_card(
         root: event_box,
         watch_later_toggle,
         summary_button,
+        downloaded_badge,
         thumbnail,
         thumbnail_pixbuf: pixbuf,
     }

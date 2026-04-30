@@ -21,8 +21,8 @@ use thiserror::Error;
 use tokio::runtime::Runtime;
 
 use cards::{
-    create_context_menu, download_missing_thumbnails, populate_flow_box, sync_watch_later_card,
-    update_watch_later_toggles,
+    create_context_menu, download_missing_thumbnails, populate_flow_box,
+    refresh_video_downloaded_badge, sync_watch_later_card, update_watch_later_toggles,
 };
 use summary_generator::{maybe_prefetch_summary_for_watch_later, SummaryGenerator};
 
@@ -147,12 +147,20 @@ fn needs_download_upgrade(local_path: Option<&Path>) -> bool {
     local_path.map(is_legacy_download).unwrap_or(true)
 }
 
-fn spawn_video_download(runtime: Arc<Runtime>, video_id: String, video_path: PathBuf) {
+fn spawn_video_download(
+    runtime: Arc<Runtime>,
+    video_id: String,
+    video_path: PathBuf,
+) -> async_channel::Receiver<String> {
+    let (tx, rx) = async_channel::bounded(1);
     runtime.spawn(async move {
         if let Err(download_error) = download_video(&video_id, &video_path).await {
             error!("Failed to download video {}: {}", video_id, download_error);
+        } else {
+            let _ = tx.send(video_id).await;
         }
     });
+    rx
 }
 
 fn persist_watch_later(runtime: Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
@@ -242,8 +250,8 @@ fn toggle_watch_later_and_download(
     runtime: &Arc<Runtime>,
     video_id: &str,
     video_title: &str,
-) -> bool {
-    let (added, storage, watch_later_snapshot) = {
+) -> (bool, Option<async_channel::Receiver<String>>) {
+    let (added, download_rx, storage, watch_later_snapshot) = {
         let mut state = state_rc.borrow_mut();
         let added = !state.watch_later.remove(video_id);
         if added {
@@ -251,10 +259,17 @@ fn toggle_watch_later_and_download(
         }
 
         let local_path = state.storage.find_video_path(video_id);
-        if added && needs_download_upgrade(local_path.as_deref()) {
+        let download_rx = if added && needs_download_upgrade(local_path.as_deref()) {
             let video_path = state.storage.video_path(video_id, video_title);
-            spawn_video_download(runtime.clone(), video_id.to_string(), video_path);
-        }
+            Some(spawn_video_download(
+                runtime.clone(),
+                video_id.to_string(),
+                video_path,
+            ))
+        } else {
+            None
+        };
+
         if !added {
             if let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
                 error!(
@@ -264,11 +279,11 @@ fn toggle_watch_later_and_download(
             }
         }
 
-        (added, state.storage.clone(), state.watch_later.clone())
+        (added, download_rx, state.storage.clone(), state.watch_later.clone())
     };
 
     persist_watch_later(runtime.clone(), storage, watch_later_snapshot);
-    added
+    (added, download_rx)
 }
 
 fn apply_watch_later_action(
@@ -287,13 +302,21 @@ fn apply_watch_later_action(
         return;
     };
 
-    let added =
+    let (added, download_rx) =
         toggle_watch_later_and_download(state_rc, &ui_context.runtime, &video_id, &video_title);
     update_watch_later_toggles(ui_context, &video_id, added);
     update_watch_later_badge(&ui_context.badge, state_rc.borrow().watch_later.len());
     sync_watch_later_card(state_rc, ui_context, &video_id);
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
+        if let Some(rx) = download_rx {
+            let ui_ctx = ui_context.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Ok(completed_video_id) = rx.recv().await {
+                    refresh_video_downloaded_badge(&ui_ctx, &completed_video_id);
+                }
+            });
+        }
     }
 }
 
