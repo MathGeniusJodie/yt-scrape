@@ -95,6 +95,23 @@ impl AppState {
         Ok(())
     }
 
+    fn set_video_watched(&mut self, video_id: &str, watched: bool) -> Result<(), CacheVideoError> {
+        self.storage
+            .save_video_watched(video_id, watched)
+            .map_err(|source| CacheVideoError::Persist {
+                video_id: video_id.to_string(),
+                sidecar_name: "watched",
+                source,
+            })?;
+        let video =
+            self.video_by_id_mut(video_id)
+                .ok_or_else(|| CacheVideoError::MissingVideo {
+                    video_id: video_id.to_string(),
+                })?;
+        video.set_watched(watched);
+        Ok(())
+    }
+
     fn cache_video_ai_summary(
         &mut self,
         video_id: &str,

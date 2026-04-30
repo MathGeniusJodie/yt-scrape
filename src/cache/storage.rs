@@ -30,17 +30,23 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
 }
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct VideoMetadataSidecar {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ai_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    watched: bool,
 }
 
 impl VideoMetadataSidecar {
     fn is_empty(&self) -> bool {
-        self.transcript.is_none() && self.ai_summary.is_none()
+        self.transcript.is_none() && self.ai_summary.is_none() && !self.watched
     }
 }
 
@@ -346,6 +352,7 @@ impl Storage {
         if let Some(ai_summary) = sidecar.ai_summary {
             video.set_ai_summary(Some(ai_summary));
         }
+        video.set_watched(sidecar.watched);
     }
 
     fn write_video_sidecar(
@@ -465,6 +472,22 @@ impl Storage {
         if let Some(ai_summary) = ai_summary {
             sidecar.ai_summary = Some(ai_summary.to_string());
         }
+        self.write_video_sidecar(video_id, &sidecar)
+    }
+
+    /// Persists the watched state for a video in its sidecar file.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_id` - YouTube video identifier.
+    /// * `watched` - Whether the video has been watched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sidecar loading, serialization, or file writes fail.
+    pub fn save_video_watched(&self, video_id: &str, watched: bool) -> StorageResult<()> {
+        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
+        sidecar.watched = watched;
         self.write_video_sidecar(video_id, &sidecar)
     }
 }
@@ -653,6 +676,7 @@ mod tests {
                 &VideoMetadataSidecar {
                     transcript: Some("sidecar transcript".to_string()),
                     ai_summary: Some("sidecar summary".to_string()),
+                    watched: false,
                 },
             )
             .expect("Writing existing sidecar should succeed");
@@ -681,6 +705,7 @@ mod tests {
                 &VideoMetadataSidecar {
                     transcript: Some("sidecar transcript".to_string()),
                     ai_summary: Some("sidecar summary".to_string()),
+                    watched: false,
                 },
             )
             .expect("Writing sidecar should succeed");

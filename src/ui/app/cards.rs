@@ -19,7 +19,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use tokio::runtime::Runtime;
 
 fn on_menu_action<F>(
     button: &Button,
@@ -37,7 +36,11 @@ fn on_menu_action<F>(
     });
 }
 
-fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, runtime: &Arc<Runtime>, video_id: &str) {
+fn play_selected_video(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: &str,
+) {
     let playback = {
         let state = state_rc.borrow();
         state.video_by_id(video_id).map(|current_video| {
@@ -45,7 +48,7 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, runtime: &Arc<Runtime>,
             let local_path = state.storage.find_video_path(video_id);
             let local_path = resolve_playback_path(
                 &state.storage,
-                runtime.clone(),
+                ui_context.runtime.clone(),
                 video_id,
                 &video_title,
                 local_path,
@@ -57,6 +60,12 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, runtime: &Arc<Runtime>,
     if let Some((video_title, local_path)) = playback {
         if let Err(play_error) = play_video(video_id, &video_title, local_path.as_deref()) {
             error!("Failed to play video {}: {}", video_id, play_error);
+            return;
+        }
+        if let Err(e) = state_rc.borrow_mut().set_video_watched(video_id, true) {
+            error!("Failed to mark video {} as watched: {}", video_id, e);
+        } else {
+            refresh_video_watched_badge(ui_context, video_id, true);
         }
     } else {
         error!("Cannot play missing video {}", video_id);
@@ -106,9 +115,9 @@ pub(super) fn create_context_menu(
         ui_context.context_menu.clone(),
         {
             let state_rc = state_rc.clone();
-            let runtime = ui_context.runtime.clone();
+            let ui_context = ui_context.clone();
             move |video_id| {
-                play_selected_video(&state_rc, &runtime, &video_id);
+                play_selected_video(&state_rc, &ui_context, &video_id);
             }
         },
     );
@@ -218,7 +227,7 @@ fn connect_card_handlers(
     card_widgets.root().connect_button_press_event(
         clone!(@strong video_id, @strong state_rc, @strong ui_context => move |widget, event| {
             if event.button() == 1 && event.event_type() == gdk::EventType::DoubleButtonPress {
-                play_selected_video(&state_rc, &ui_context.runtime, &video_id);
+                play_selected_video(&state_rc, &ui_context, &video_id);
                 return glib::Propagation::Stop;
             }
 
@@ -236,6 +245,16 @@ fn connect_card_handlers(
     card_widgets.watch_later_toggle().connect_clicked(
         clone!(@strong state_rc, @strong ui_context, @strong video_id => move |_| {
             apply_watch_later_action(&state_rc, &ui_context, video_id.clone());
+        }),
+    );
+
+    card_widgets.watched_button().connect_clicked(
+        clone!(@strong state_rc, @strong ui_context, @strong video_id => move |_| {
+            if let Err(e) = state_rc.borrow_mut().set_video_watched(&video_id, false) {
+                error!("Failed to unmark video {} as watched: {}", video_id, e);
+            } else {
+                refresh_video_watched_badge(&ui_context, &video_id, false);
+            }
         }),
     );
 }
@@ -272,6 +291,7 @@ fn build_video_card(
             is_watch_later,
             is_downloaded,
             video.has_ai_summary(),
+            video.is_watched(),
         )
     };
     connect_card_handlers(state_rc, ui_context, video_id, &card_widgets);
@@ -387,6 +407,16 @@ pub(super) fn refresh_video_summary_badges(
 ) {
     for_each_card_matching(ui_context, video_id, |card| {
         card.set_summary_available(has_summary);
+    });
+}
+
+pub(super) fn refresh_video_watched_badge(
+    ui_context: &AppContext,
+    video_id: &str,
+    is_watched: bool,
+) {
+    for_each_card_matching(ui_context, video_id, |card| {
+        card.set_watched(is_watched);
     });
 }
 
@@ -530,6 +560,7 @@ pub(super) struct VideoCardWidgets {
     root: EventBox,
     watch_later_toggle: gtk::Button,
     summary_button: gtk::Button,
+    watched_button: gtk::Button,
     downloaded_badge: gtk::Box,
     download_spinner: gtk::Spinner,
     thumbnail: DrawingArea,
@@ -555,6 +586,16 @@ impl VideoCardWidgets {
     /// Shows or hides the AI summary button.
     pub fn set_summary_available(&self, has_summary: bool) {
         self.summary_button.set_visible(has_summary);
+    }
+
+    /// Returns the watched button.
+    pub fn watched_button(&self) -> &gtk::Button {
+        &self.watched_button
+    }
+
+    /// Shows or hides the watched checkmark badge.
+    pub fn set_watched(&self, is_watched: bool) {
+        self.watched_button.set_visible(is_watched);
     }
 
     /// Shows an active spinner, hiding the floppy badge.
@@ -607,6 +648,7 @@ fn create_video_card(
     is_watch_later: bool,
     is_downloaded: bool,
     has_ai_summary: bool,
+    is_watched: bool,
 ) -> VideoCardWidgets {
     let event_box = EventBox::new();
     event_box.set_above_child(false);
@@ -737,6 +779,19 @@ fn create_video_card(
     set_watch_later_toggle_state(&watch_later_toggle, is_watch_later);
     status_box.pack_start(&watch_later_toggle, false, false, 0);
 
+    let watched_button = gtk::Button::new();
+    watched_button.set_widget_name("watched-button");
+    watched_button.set_tooltip_text(Some("Watched — click to unmark"));
+    watched_button.set_relief(gtk::ReliefStyle::None);
+    watched_button.set_can_focus(false);
+    let watched_icon =
+        gtk::Image::from_icon_name(Some("object-select-symbolic"), gtk::IconSize::Menu);
+    watched_icon.show();
+    watched_button.add(&watched_icon);
+    status_box.pack_start(&watched_button, false, false, 0);
+    watched_button.set_no_show_all(true);
+    watched_button.set_visible(is_watched);
+
     // Spacer
     let spacer = gtk::Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
@@ -778,6 +833,7 @@ fn create_video_card(
         root: event_box,
         watch_later_toggle,
         summary_button,
+        watched_button,
         downloaded_badge,
         download_spinner,
         thumbnail,

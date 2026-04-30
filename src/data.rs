@@ -19,6 +19,9 @@ pub struct Video {
     // AI summaries are persisted in per-video sidecar files, not in `videos.json`.
     #[serde(default, skip_serializing)]
     ai_summary: Option<String>,
+    // Watched state is persisted in per-video sidecar files, not in `videos.json`.
+    #[serde(default, skip_serializing)]
+    watched: bool,
 }
 
 impl Video {
@@ -42,6 +45,7 @@ impl Video {
             duration_seconds,
             transcript: None,
             ai_summary: None,
+            watched: false,
         }
     }
 
@@ -110,6 +114,16 @@ impl Video {
         self.ai_summary
             .as_ref()
             .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Returns `true` when the video has been marked as watched.
+    pub fn is_watched(&self) -> bool {
+        self.watched
+    }
+
+    /// Sets the watched state.
+    pub fn set_watched(&mut self, watched: bool) {
+        self.watched = watched;
     }
 }
 
