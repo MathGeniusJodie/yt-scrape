@@ -101,3 +101,50 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
 
     Ok(())
 }
+
+/// Convert a downloaded video to the miyoo-compatible format using ffmpeg.
+///
+/// # Arguments
+///
+/// * `input_path` - Path to the source video file.
+/// * `output_path` - Destination path for the converted mp4.
+///
+/// # Errors
+///
+/// Returns an error when `ffmpeg` fails or returns a non-zero exit status.
+pub async fn convert_to_miyoo(input_path: &Path, output_path: &Path) -> Result<(), DownloadError> {
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-i")
+        .arg(input_path)
+        .arg("-vf")
+        .arg("scale=750:560:force_original_aspect_ratio=decrease,pad=750:560:(ow-iw)/2:(oh-ih)/2:black,fps=24")
+        .arg("-c:v").arg("libx264")
+        .arg("-preset").arg("veryfast")
+        .arg("-crf").arg("30")
+        .arg("-maxrate").arg("800k")
+        .arg("-bufsize").arg("1600k")
+        .arg("-profile:v").arg("main")
+        .arg("-level").arg("3.1")
+        .arg("-pix_fmt").arg("yuv420p")
+        .arg("-c:a").arg("aac")
+        .arg("-b:a").arg("96k")
+        .arg("-ac").arg("2")
+        .arg("-movflags").arg("+faststart")
+        .arg(output_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DownloadError::Failed {
+            exit_code: output.status.code(),
+            stderr: stderr.trim().to_string(),
+        });
+    }
+
+    Ok(())
+}

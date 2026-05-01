@@ -1,7 +1,7 @@
 mod cards;
 mod summary_generator;
 
-use crate::cache::{download_video, Storage, StorageError};
+use crate::cache::{convert_to_miyoo, download_video, Storage, StorageError};
 use crate::data::{Tab, Video};
 use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
 use cards::VideoCardWidgets;
@@ -169,13 +169,20 @@ fn spawn_video_download(
     runtime: Arc<Runtime>,
     video_id: String,
     video_path: PathBuf,
+    miyoo_path: PathBuf,
 ) -> async_channel::Receiver<String> {
     let (tx, rx) = async_channel::bounded(1);
     runtime.spawn(async move {
         if let Err(download_error) = download_video(&video_id, &video_path).await {
             error!("Failed to download video {}: {}", video_id, download_error);
         } else {
-            let _ = tx.send(video_id).await;
+            let _ = tx.send(video_id.clone()).await;
+            if let Err(convert_error) = convert_to_miyoo(&video_path, &miyoo_path).await {
+                error!(
+                    "Failed to convert video {} for miyoo: {}",
+                    video_id, convert_error
+                );
+            }
         }
     });
     rx
@@ -249,7 +256,8 @@ fn resolve_playback_path(
             // Legacy downloads lack embedded chapter/caption metadata. Upgrade in background
             // but still play the local file.
             let upgraded_path = storage.video_path(video_id, video_title);
-            spawn_video_download(runtime, video_id.to_string(), upgraded_path);
+            let miyoo_path = storage.miyoo_video_path(video_id, video_title);
+            spawn_video_download(runtime, video_id.to_string(), upgraded_path, miyoo_path);
             Some(path)
         }
         other => other,
@@ -279,10 +287,12 @@ fn toggle_watch_later_and_download(
         let local_path = state.storage.find_video_path(video_id);
         let download_rx = if added && needs_download_upgrade(local_path.as_deref()) {
             let video_path = state.storage.video_path(video_id, video_title);
+            let miyoo_path = state.storage.miyoo_video_path(video_id, video_title);
             Some(spawn_video_download(
                 runtime.clone(),
                 video_id.to_string(),
                 video_path,
+                miyoo_path,
             ))
         } else {
             None

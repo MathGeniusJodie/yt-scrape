@@ -130,6 +130,7 @@ pub struct Storage {
     cache_dir: PathBuf,
     thumbnails_dir: PathBuf,
     videos_dir: PathBuf,
+    miyoo_dir: PathBuf,
     video_sidecars_dir: PathBuf,
     transcripts_work_dir: PathBuf,
 }
@@ -171,6 +172,7 @@ impl Storage {
     pub fn new_at(data_dir: PathBuf, cache_dir: PathBuf) -> StorageResult<Self> {
         let thumbnails_dir = cache_dir.join("thumbnails");
         let videos_dir = cache_dir.join("videos");
+        let miyoo_dir = videos_dir.join("miyoo");
         let video_sidecars_dir = cache_dir.join(VIDEO_SIDECARS_DIR);
         let transcripts_work_dir = cache_dir.join("transcripts_work");
 
@@ -178,6 +180,7 @@ impl Storage {
         std::fs::create_dir_all(&cache_dir)?;
         std::fs::create_dir_all(&thumbnails_dir)?;
         std::fs::create_dir_all(&videos_dir)?;
+        std::fs::create_dir_all(&miyoo_dir)?;
         std::fs::create_dir_all(&video_sidecars_dir)?;
         std::fs::create_dir_all(&transcripts_work_dir)?;
 
@@ -186,6 +189,7 @@ impl Storage {
             cache_dir,
             thumbnails_dir,
             videos_dir,
+            miyoo_dir,
             video_sidecars_dir,
             transcripts_work_dir,
         })
@@ -225,6 +229,18 @@ impl Storage {
             .join(format!("{sanitized_title}_{video_id}.mkv"))
     }
 
+    /// Builds the target path for the miyoo-converted version of a video.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_id` - YouTube video identifier.
+    /// * `title` - Raw video title used for filename generation.
+    pub fn miyoo_video_path(&self, video_id: &str, title: &str) -> PathBuf {
+        let sanitized_title = sanitize_filename(title);
+        self.miyoo_dir
+            .join(format!("{sanitized_title}_{video_id}.mp4"))
+    }
+
     /// Finds an existing local video file for a given video ID.
     ///
     /// This lookup accepts any supported extension in [`VIDEO_EXTENSIONS`], regardless of title.
@@ -254,17 +270,21 @@ impl Storage {
         collect_cached_video_ids_from_dir(&self.videos_dir)
     }
 
-    /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
-    fn scan_video_files(&self) -> StorageResult<Vec<(PathBuf, String)>> {
-        Ok(std::fs::read_dir(&self.videos_dir)?
+    /// Scans a directory and returns all `(path, video_id)` pairs for cached video files.
+    fn scan_dir_video_files(dir: &Path) -> StorageResult<Vec<(PathBuf, String)>> {
+        Ok(std::fs::read_dir(dir)?
             .filter_map(Result::ok)
             .filter_map(|e| {
                 let path = e.path();
-                // Convert to owned String before moving path out of the borrow.
                 let id = cached_video_id_for_path(&path)?.to_string();
                 Some((path, id))
             })
             .collect())
+    }
+
+    /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
+    fn scan_video_files(&self) -> StorageResult<Vec<(PathBuf, String)>> {
+        Self::scan_dir_video_files(&self.videos_dir)
     }
 
     /// Deletes all cached video files for a single video ID.
@@ -289,6 +309,13 @@ impl Storage {
             if id == video_id {
                 std::fs::remove_file(path)?;
                 removed_count += 1;
+            }
+        }
+        if let Ok(miyoo_files) = Self::scan_dir_video_files(&self.miyoo_dir) {
+            for (path, id) in miyoo_files {
+                if id == video_id {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
         Ok(removed_count)
@@ -316,6 +343,13 @@ impl Storage {
             if !watch_later.contains(&id) {
                 std::fs::remove_file(path)?;
                 removed_count += 1;
+            }
+        }
+        if let Ok(miyoo_files) = Self::scan_dir_video_files(&self.miyoo_dir) {
+            for (path, id) in miyoo_files {
+                if !watch_later.contains(&id) {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
         Ok(removed_count)
