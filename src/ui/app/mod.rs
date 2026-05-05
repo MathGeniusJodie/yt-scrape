@@ -176,13 +176,13 @@ fn spawn_video_download(
         if let Err(download_error) = download_video(&video_id, &video_path).await {
             error!("Failed to download video {}: {}", video_id, download_error);
         } else {
-            let _ = tx.send(video_id.clone()).await;
             if let Err(convert_error) = convert_to_miyoo(&video_path, &miyoo_path).await {
                 error!(
                     "Failed to convert video {} for miyoo: {}",
                     video_id, convert_error
                 );
             }
+            let _ = tx.send(video_id.clone()).await;
         }
     });
     rx
