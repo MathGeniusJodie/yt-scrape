@@ -5,7 +5,6 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 use thiserror::Error;
-use tokio::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct Json3Subtitle {
@@ -62,7 +61,7 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String,
 
     // Run yt-dlp to download auto-generated subtitles in json3 format.
     let output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
-        let mut command = Command::new("yt-dlp");
+        let mut command = super::nice_command("yt-dlp");
         command
             .arg("--write-auto-sub")
             .arg("--sub-format")

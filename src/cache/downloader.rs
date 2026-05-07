@@ -4,7 +4,6 @@ use log::warn;
 use std::path::Path;
 use std::process::Stdio;
 use thiserror::Error;
-use tokio::process::Command;
 
 /// Errors that can occur while downloading a video with `yt-dlp`.
 #[derive(Debug, Error)]
@@ -37,7 +36,7 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
 
     // Phase 1: Always download video + chapter/info metadata.
     // Keep this independent from subtitle fetching so subtitle rate limits don't fail downloads.
-    let output = Command::new("yt-dlp")
+    let output = super::nice_command("yt-dlp")
         .arg("-f")
         .arg("bestvideo[height<=720]+bestaudio/best[height<=720]")
         .arg("--add-metadata")
@@ -69,7 +68,7 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
 
     // Phase 2: Fetch subtitles as best effort. Failure here should not break local playback.
     let subs_output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
-        let mut command = Command::new("yt-dlp");
+        let mut command = super::nice_command("yt-dlp");
         command
             .arg("--write-subs")
             .arg("--write-auto-subs")
@@ -113,7 +112,7 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
 ///
 /// Returns an error when `ffmpeg` fails or returns a non-zero exit status.
 pub async fn convert_to_miyoo(input_path: &Path, output_path: &Path) -> Result<(), DownloadError> {
-    let output = Command::new("ffmpeg")
+    let output = super::nice_command("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(input_path)
