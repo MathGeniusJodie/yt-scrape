@@ -47,6 +47,9 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
         .arg("--embed-thumbnail")
         .arg("--merge-output-format")
         .arg("mkv")
+        // Single-file downloads are not merged, so force the cache container invariant here too.
+        .arg("--remux-video")
+        .arg("mkv")
         .arg("-o")
         .arg(&output_template)
         .arg("--no-playlist")

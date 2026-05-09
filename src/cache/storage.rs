@@ -1,7 +1,7 @@
 use crate::data::{Video, WatchLaterData};
 use log::warn;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -103,6 +103,15 @@ fn cached_video_id_for_path(path: &Path) -> Option<&str> {
 
     let stem = path.file_stem().and_then(OsStr::to_str)?;
     video_id_from_stem(stem)
+}
+
+fn video_cache_preference(path: &Path) -> usize {
+    match path.extension().and_then(OsStr::to_str) {
+        Some("mkv") => 0,
+        Some("mp4") => 1,
+        Some("webm") => 2,
+        Some(_) | None => usize::MAX,
+    }
 }
 
 /// Sanitizes free-form title text into a stable filename-safe component.
@@ -285,6 +294,50 @@ impl Storage {
     /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
     fn scan_video_files(&self) -> StorageResult<Vec<(PathBuf, String)>> {
         Self::scan_dir_video_files(&self.videos_dir)
+    }
+
+    /// Finds cached videos that do not have a matching Miyoo conversion.
+    ///
+    /// # Returns
+    ///
+    /// A list of source video paths, target Miyoo paths, and video IDs that need conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the video or Miyoo cache directories cannot be scanned.
+    pub fn missing_miyoo_conversions(&self) -> StorageResult<Vec<(PathBuf, PathBuf, String)>> {
+        let converted_ids = Self::scan_dir_video_files(&self.miyoo_dir)?
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect::<HashSet<_>>();
+        let mut missing_by_id = HashMap::<String, PathBuf>::new();
+
+        for (input_path, video_id) in self.scan_video_files()? {
+            if converted_ids.contains(&video_id) {
+                continue;
+            }
+
+            match missing_by_id.entry(video_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if video_cache_preference(&input_path) < video_cache_preference(entry.get()) {
+                        entry.insert(input_path);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(input_path);
+                }
+            }
+        }
+
+        Ok(missing_by_id
+            .into_iter()
+            .filter_map(|(video_id, input_path)| {
+                let mut output_file_name = input_path.file_stem()?.to_os_string();
+                output_file_name.push(".mp4");
+                let output_path = self.miyoo_dir.join(output_file_name);
+                Some((input_path, output_path, video_id))
+            })
+            .collect())
     }
 
     /// Deletes all cached video files for a single video ID.
@@ -661,6 +714,32 @@ mod tests {
         assert!(storage.find_video_path("C9ww_8cg_5g").is_some());
         assert!(storage.find_video_path("abc123DEF45").is_none());
         assert!(storage.videos_dir.join("ignore.txt").exists());
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn missing_miyoo_conversions_returns_only_unconverted_cached_videos() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+
+        let missing_source = storage.videos_dir.join("missing_C9ww_8cg_5g.mkv");
+        touch(&missing_source);
+        touch(&storage.videos_dir.join("missing_copy_C9ww_8cg_5g.mp4"));
+        touch(&storage.videos_dir.join("converted_abc123DEF45.mkv"));
+        touch(&storage.miyoo_dir.join("converted_abc123DEF45.mp4"));
+
+        let conversions = storage
+            .missing_miyoo_conversions()
+            .expect("missing Miyoo conversion scan should succeed");
+
+        assert_eq!(conversions.len(), 1);
+        assert_eq!(conversions[0].0, missing_source);
+        assert_eq!(
+            conversions[0].1,
+            storage.miyoo_dir.join("missing_C9ww_8cg_5g.mp4")
+        );
+        assert_eq!(conversions[0].2, "C9ww_8cg_5g");
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }

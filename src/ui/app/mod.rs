@@ -188,6 +188,49 @@ fn spawn_video_download(
     rx
 }
 
+fn retry_missing_miyoo_conversions(runtime: Arc<Runtime>, storage: Storage) {
+    runtime.spawn(async move {
+        let storage_for_scan = storage.clone();
+        let missing_conversions =
+            match tokio::task::spawn_blocking(move || storage_for_scan.missing_miyoo_conversions())
+                .await
+            {
+                Ok(Ok(missing_conversions)) => missing_conversions,
+                Ok(Err(scan_error)) => {
+                    warn!(
+                        "Failed to scan for missing Miyoo conversions: {}",
+                        scan_error
+                    );
+                    return;
+                }
+                Err(join_error) => {
+                    error!("Miyoo conversion scan task failed: {}", join_error);
+                    return;
+                }
+            };
+
+        if missing_conversions.is_empty() {
+            return;
+        }
+
+        info!(
+            "Retrying {} missing Miyoo video conversions",
+            missing_conversions.len()
+        );
+        for (input_path, output_path, video_id) in missing_conversions {
+            if output_path.exists() {
+                continue;
+            }
+            if let Err(convert_error) = convert_to_miyoo(&input_path, &output_path).await {
+                error!(
+                    "Failed to retry Miyoo conversion for video {}: {}",
+                    video_id, convert_error
+                );
+            }
+        }
+    });
+}
+
 fn persist_watch_later(runtime: Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
     runtime.spawn(async move {
         match tokio::task::spawn_blocking(move || storage.save_watch_later(&watch_later)).await {
@@ -307,7 +350,12 @@ fn toggle_watch_later_and_download(
             }
         }
 
-        (added, download_rx, state.storage.clone(), state.watch_later.clone())
+        (
+            added,
+            download_rx,
+            state.storage.clone(),
+            state.watch_later.clone(),
+        )
     };
 
     persist_watch_later(runtime.clone(), storage, watch_later_snapshot);
@@ -622,6 +670,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         }
     }
     let videos = storage.load_videos();
+    retry_missing_miyoo_conversions(runtime.clone(), storage.clone());
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()

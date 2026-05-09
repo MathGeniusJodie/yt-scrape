@@ -36,11 +36,7 @@ fn on_menu_action<F>(
     });
 }
 
-fn play_selected_video(
-    state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &AppContext,
-    video_id: &str,
-) {
+fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
     let playback = {
         let state = state_rc.borrow();
         state.video_by_id(video_id).map(|current_video| {
