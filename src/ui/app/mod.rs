@@ -14,6 +14,7 @@ use indexmap::IndexMap;
 use log::{error, info, warn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -156,6 +157,22 @@ struct AppContext {
 const CARD_WIDTH: i32 = 320;
 const CARD_SPACING: i32 = 16;
 const GRID_PADDING: i32 = 16;
+const FROGPOINTS_REFRESH_COST: i64 = 10;
+const FROGPOINTS_RELATIVE_PATH: &[&str] = &["Desktop", "RemoteVault", "frogpoints.md"];
+
+#[derive(Debug, Error)]
+enum FrogpointsError {
+    #[error("HOME is not set")]
+    MissingHome,
+    #[error("Failed to read frogpoints: {0}")]
+    Read(#[source] std::io::Error),
+    #[error("frogpoints.md must contain a whole number")]
+    InvalidNumber(#[source] std::num::ParseIntError),
+    #[error("Need {cost} frogpoints to refresh, but only {available} remain")]
+    Insufficient { available: i64, cost: i64 },
+    #[error("Failed to save frogpoints: {0}")]
+    Write(#[source] std::io::Error),
+}
 
 fn is_legacy_download(path: &Path) -> bool {
     !matches!(path.extension().and_then(|ext| ext.to_str()), Some("mkv"))
@@ -163,6 +180,38 @@ fn is_legacy_download(path: &Path) -> bool {
 
 fn needs_download_upgrade(local_path: Option<&Path>) -> bool {
     local_path.map(is_legacy_download).unwrap_or(true)
+}
+
+fn frogpoints_path() -> Result<PathBuf, FrogpointsError> {
+    let mut path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(FrogpointsError::MissingHome)?;
+    path.extend(FROGPOINTS_RELATIVE_PATH);
+    Ok(path)
+}
+
+fn debit_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
+    let contents = fs::read_to_string(path).map_err(FrogpointsError::Read)?;
+    let current = contents
+        .trim()
+        .parse::<i64>()
+        .map_err(FrogpointsError::InvalidNumber)?;
+
+    if current < cost {
+        return Err(FrogpointsError::Insufficient {
+            available: current,
+            cost,
+        });
+    }
+
+    let remaining = current - cost;
+    fs::write(path, format!("{remaining}\n")).map_err(FrogpointsError::Write)?;
+    Ok(remaining)
+}
+
+fn debit_refresh_frogpoints() -> Result<i64, FrogpointsError> {
+    let path = frogpoints_path()?;
+    debit_frogpoints(&path, FROGPOINTS_REFRESH_COST)
 }
 
 fn spawn_video_download(
@@ -599,6 +648,18 @@ fn start_feed_refresh(
     spinner.start();
     status_label.set_text("Refreshing...");
 
+    match debit_refresh_frogpoints() {
+        Ok(remaining) => {
+            status_label.set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
+        }
+        Err(error) => {
+            spinner.stop();
+            status_label.set_text(&format!("Refresh blocked: {error}"));
+            refresh_button.set_sensitive(true);
+            return;
+        }
+    }
+
     let channel_ids = match load_channel_ids(&subs_file) {
         Ok(ids) => ids,
         Err(error) => {
@@ -868,7 +929,7 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{debit_frogpoints, AppState, FrogpointsError, FROGPOINTS_REFRESH_COST};
     use crate::cache::Storage;
     use crate::data::Video;
     use chrono::{TimeZone, Utc};
@@ -877,6 +938,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn temporary_frogpoints_path(test_name: &str) -> PathBuf {
+        let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "yt-gtk-{test_name}-{}-{unique_id}.md",
+            std::process::id()
+        ))
+    }
 
     struct TestDirs {
         root: PathBuf,
@@ -911,6 +980,46 @@ mod tests {
 
     fn test_storage(dirs: &TestDirs) -> Storage {
         Storage::new_at(dirs.data_dir(), dirs.cache_dir()).expect("test storage must initialize")
+    }
+
+    #[test]
+    fn debit_frogpoints_subtracts_cost_and_returns_remaining_balance() {
+        let path = temporary_frogpoints_path("debit");
+        std::fs::write(&path, "18").expect("write test frogpoints file");
+
+        let remaining =
+            debit_frogpoints(&path, FROGPOINTS_REFRESH_COST).expect("debit enough frogpoints");
+
+        assert_eq!(remaining, 8);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
+            "8\n"
+        );
+
+        std::fs::remove_file(path).expect("remove test frogpoints file");
+    }
+
+    #[test]
+    fn debit_frogpoints_blocks_when_balance_is_too_small() {
+        let path = temporary_frogpoints_path("block");
+        std::fs::write(&path, "9").expect("write test frogpoints file");
+
+        let error = debit_frogpoints(&path, FROGPOINTS_REFRESH_COST)
+            .expect_err("block insufficient frogpoints");
+
+        assert!(matches!(
+            error,
+            FrogpointsError::Insufficient {
+                available: 9,
+                cost: FROGPOINTS_REFRESH_COST
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read unchanged frogpoints file"),
+            "9"
+        );
+
+        std::fs::remove_file(path).expect("remove test frogpoints file");
     }
 
     fn test_video(video_id: &str) -> Video {
