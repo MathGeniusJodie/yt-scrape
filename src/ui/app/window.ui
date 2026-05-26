@@ -31,6 +31,12 @@
           </object>
         </child>
         <child>
+          <object class="GtkToggleButton" id="search_tab">
+            <property name="label">Search</property>
+            <property name="name">tab-search</property>
+          </object>
+        </child>
+        <child>
           <object class="GtkToggleButton" id="watch_later_tab">
             <property name="name">tab-watch-later</property>
             <child>
@@ -69,7 +75,7 @@
     </child>
   </object>
 
-  <!-- Stack with Feed and Watch Later tabs, each containing a scrollable FlowBox -->
+  <!-- Stack with Feed, Search, and Watch Later tabs, each containing a scrollable FlowBox -->
   <object class="GtkStack" id="stack">
     <property name="transition-type">slide-left-right</property>
     <child>
@@ -100,6 +106,70 @@
       <packing>
         <property name="name">feed</property>
         <property name="title">Feed</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkBox" id="search_page">
+        <property name="orientation">vertical</property>
+        <child>
+          <object class="GtkBox" id="search_bar">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">8</property>
+            <property name="margin-start">16</property>
+            <property name="margin-end">16</property>
+            <property name="margin-top">16</property>
+            <property name="margin-bottom">8</property>
+            <child>
+              <object class="GtkSearchEntry" id="search_entry">
+                <property name="name">search-entry</property>
+                <property name="placeholder-text">Search YouTube</property>
+                <property name="hexpand">True</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="search_button">
+                <property name="tooltip-text" translatable="yes">Search YouTube</property>
+                <child>
+                  <object class="GtkImage">
+                    <property name="icon-name">system-search-symbolic</property>
+                    <property name="icon-size">1</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkScrolledWindow" id="search_scroll">
+            <property name="hscrollbar-policy">never</property>
+            <property name="vscrollbar-policy">automatic</property>
+            <property name="vexpand">True</property>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="halign">center</property>
+                <property name="valign">start</property>
+                <child>
+                  <object class="GtkFlowBox" id="search_flow">
+                    <property name="name">video-grid</property>
+                    <property name="valign">start</property>
+                    <property name="halign">center</property>
+                    <property name="max-children-per-line">10</property>
+                    <property name="min-children-per-line">1</property>
+                    <property name="selection-mode">single</property>
+                    <property name="homogeneous">False</property>
+                    <property name="column-spacing">16</property>
+                    <property name="row-spacing">16</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+      <packing>
+        <property name="name">search</property>
+        <property name="title">Search</property>
       </packing>
     </child>
     <child>

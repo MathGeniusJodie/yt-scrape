@@ -1,3 +1,3 @@
 mod fetcher;
 
-pub use fetcher::{fetch_all_feeds, load_channel_ids, FetchProgress};
+pub use fetcher::{fetch_all_feeds, fetch_youtube_search, load_channel_ids, FetchProgress};

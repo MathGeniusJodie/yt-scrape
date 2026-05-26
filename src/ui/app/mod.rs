@@ -3,12 +3,13 @@ mod summary_generator;
 
 use crate::cache::{convert_to_miyoo, download_video, Storage, StorageError};
 use crate::data::{Tab, Video};
-use crate::feed::{fetch_all_feeds, load_channel_ids, FetchProgress};
+use crate::feed::{fetch_all_feeds, fetch_youtube_search, load_channel_ids, FetchProgress};
 use cards::VideoCardWidgets;
 
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow, Spinner, Stack,
+    Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow, SearchEntry,
+    Spinner, Stack,
 };
 use indexmap::IndexMap;
 use log::{error, info, warn};
@@ -30,6 +31,8 @@ use summary_generator::{maybe_prefetch_summary_for_watch_later, SummaryGenerator
 
 struct AppState {
     videos: IndexMap<String, Video>,
+    feed_video_ids: Vec<String>,
+    search_result_ids: Vec<String>,
     watch_later: HashSet<String>,
     storage: Storage,
 }
@@ -49,11 +52,15 @@ pub(super) enum CacheVideoError {
 
 impl AppState {
     fn new(videos: Vec<Video>, watch_later: HashSet<String>, storage: Storage) -> Self {
+        let videos = videos
+            .into_iter()
+            .map(|video| (video.video_id().to_string(), video))
+            .collect::<IndexMap<_, _>>();
+        let feed_video_ids = videos.keys().cloned().collect();
         Self {
-            videos: videos
-                .into_iter()
-                .map(|video| (video.video_id().to_string(), video))
-                .collect(),
+            videos,
+            feed_video_ids,
+            search_result_ids: Vec::new(),
             watch_later,
             storage,
         }
@@ -64,6 +71,22 @@ impl AppState {
             .into_iter()
             .map(|video| (video.video_id().to_string(), video))
             .collect();
+        self.feed_video_ids = self.videos.keys().cloned().collect();
+    }
+
+    fn set_search_results(&mut self, videos: Vec<Video>) {
+        let mut search_result_ids = Vec::with_capacity(videos.len());
+        let mut seen_video_ids = HashSet::with_capacity(videos.len());
+
+        for video in videos {
+            let video_id = video.video_id().to_string();
+            if seen_video_ids.insert(video_id.clone()) {
+                search_result_ids.push(video_id.clone());
+            }
+            self.videos.insert(video_id, video);
+        }
+
+        self.search_result_ids = search_result_ids;
     }
 
     fn video_by_id(&self, video_id: &str) -> Option<&Video> {
@@ -72,6 +95,14 @@ impl AppState {
 
     fn video_by_id_mut(&mut self, video_id: &str) -> Option<&mut Video> {
         self.videos.get_mut(video_id)
+    }
+
+    fn feed_video_ids(&self) -> Vec<String> {
+        self.feed_video_ids.clone()
+    }
+
+    fn search_video_ids(&self) -> Vec<String> {
+        self.search_result_ids.clone()
     }
 
     fn cache_video_transcript(
@@ -146,10 +177,12 @@ struct AppContext {
     window: ApplicationWindow,
     context_menu: Popover,
     feed_flow: FlowBox,
+    search_flow: FlowBox,
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
     badge: Label,
     feed_cards: CardMap,
+    search_cards: CardMap,
     watch_later_cards: CardMap,
     subs_file: PathBuf,
 }
@@ -633,7 +666,92 @@ fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     let downloaded_video_ids = state_ref.storage.cached_video_ids();
     update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
     populate_flow_box(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
+    populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
     populate_flow_box(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
+}
+
+fn refresh_search_results(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
+    let downloaded_video_ids = state_rc.borrow().storage.cached_video_ids();
+    populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
+}
+
+fn start_youtube_search(
+    state_rc: Rc<RefCell<AppState>>,
+    ui_context: AppContext,
+    spinner: Spinner,
+    status_label: Label,
+    search_button: Button,
+    query: String,
+) {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        state_rc.borrow_mut().set_search_results(Vec::new());
+        refresh_search_results(&state_rc, &ui_context);
+        status_label.set_text("");
+        return;
+    }
+
+    search_button.set_sensitive(false);
+    spinner.start();
+    status_label.set_text(&format!("Searching YouTube for \"{query}\"..."));
+
+    let (results_tx, results_rx) = async_channel::bounded(1);
+    let client = ui_context.http_client.clone();
+    let runtime = ui_context.runtime.clone();
+    runtime.spawn(async move {
+        let search_result = fetch_youtube_search(&client, &query).await;
+        let _ = results_tx.send(search_result).await;
+    });
+
+    glib::MainContext::default().spawn_local(async move {
+        match results_rx.recv().await {
+            Ok(Ok(mut videos)) => {
+                let result_count = videos.len();
+                let thumbnail_completion = {
+                    let mut state = state_rc.borrow_mut();
+                    state.storage.hydrate_videos_from_sidecars(&mut videos);
+                    let completion = download_missing_thumbnails(
+                        videos.iter(),
+                        &state.storage,
+                        ui_context.http_client.clone(),
+                        ui_context.runtime.clone(),
+                    );
+                    state.set_search_results(videos);
+                    completion
+                };
+
+                refresh_search_results(&state_rc, &ui_context);
+                status_label.set_text(&format!("{result_count} search results"));
+
+                if let Some(thumbnail_completion) = thumbnail_completion {
+                    let state_for_thumbnails = state_rc.clone();
+                    let ui_context_for_thumbnails = ui_context.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        if let Ok(video_ids) = thumbnail_completion.recv().await {
+                            for video_id in &video_ids {
+                                cards::refresh_video_thumbnail(
+                                    &state_for_thumbnails,
+                                    &ui_context_for_thumbnails,
+                                    video_id,
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+            Ok(Err(error)) => {
+                status_label.set_text(&format!("Search failed: {error}"));
+                error!("YouTube search failed: {}", error);
+            }
+            Err(error) => {
+                status_label.set_text("Search failed");
+                error!("YouTube search result channel closed: {}", error);
+            }
+        }
+
+        spinner.stop();
+        search_button.set_sensitive(true);
+    });
 }
 
 fn start_feed_refresh(
@@ -782,6 +900,9 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let feed_tab = builder
         .object::<gtk::ToggleButton>("feed_tab")
         .expect("feed_tab in window.ui");
+    let search_tab = builder
+        .object::<gtk::ToggleButton>("search_tab")
+        .expect("search_tab in window.ui");
     let watch_later_tab = builder
         .object::<gtk::ToggleButton>("watch_later_tab")
         .expect("watch_later_tab in window.ui");
@@ -797,6 +918,18 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let feed_flow = builder
         .object::<FlowBox>("feed_flow")
         .expect("feed_flow in window.ui");
+    let search_entry = builder
+        .object::<SearchEntry>("search_entry")
+        .expect("search_entry in window.ui");
+    let search_button = builder
+        .object::<Button>("search_button")
+        .expect("search_button in window.ui");
+    let search_scroll = builder
+        .object::<ScrolledWindow>("search_scroll")
+        .expect("search_scroll in window.ui");
+    let search_flow = builder
+        .object::<FlowBox>("search_flow")
+        .expect("search_flow in window.ui");
     let watch_later_scroll = builder
         .object::<ScrolledWindow>("watch_later_scroll")
         .expect("watch_later_scroll in window.ui");
@@ -820,10 +953,17 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             update_flow_width(&watch_later_flow, allocation.width());
         });
     }
+    {
+        let search_flow = search_flow.clone();
+        search_scroll.connect_size_allocate(move |_, allocation| {
+            update_flow_width(&search_flow, allocation.width());
+        });
+    }
 
     // Tab toggle buttons switch the stack page and update sibling active state
     {
         let stack = stack.clone();
+        let search_tab = search_tab.clone();
         let watch_later_tab = watch_later_tab.clone();
         let feed_flow = feed_flow.clone();
         feed_tab.connect_toggled(move |button| {
@@ -831,6 +971,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 return;
             }
             stack.set_visible_child_name("feed");
+            search_tab.set_active(false);
             watch_later_tab.set_active(false);
             update_flow_width(&feed_flow, stack.allocated_width());
         });
@@ -838,6 +979,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     {
         let stack = stack.clone();
         let feed_tab = feed_tab.clone();
+        let search_tab = search_tab.clone();
         let watch_later_flow = watch_later_flow.clone();
         watch_later_tab.connect_toggled(move |button| {
             if !button.is_active() {
@@ -845,11 +987,30 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             }
             stack.set_visible_child_name("watch-later");
             feed_tab.set_active(false);
+            search_tab.set_active(false);
             update_flow_width(&watch_later_flow, stack.allocated_width());
+        });
+    }
+    {
+        let stack = stack.clone();
+        let feed_tab = feed_tab.clone();
+        let watch_later_tab = watch_later_tab.clone();
+        let search_entry = search_entry.clone();
+        let search_flow = search_flow.clone();
+        search_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            stack.set_visible_child_name("search");
+            feed_tab.set_active(false);
+            watch_later_tab.set_active(false);
+            update_flow_width(&search_flow, stack.allocated_width());
+            search_entry.grab_focus();
         });
     }
 
     let feed_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
+    let search_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let watch_later_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let context_menu = Popover::new(None::<&gtk::Widget>);
 
@@ -860,16 +1021,53 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         window: window.clone(),
         context_menu: context_menu.clone(),
         feed_flow: feed_flow.clone(),
+        search_flow: search_flow.clone(),
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
         badge: badge.clone(),
         feed_cards: feed_cards.clone(),
+        search_cards: search_cards.clone(),
         watch_later_cards: watch_later_cards.clone(),
         subs_file: subs_file.clone(),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
     refresh_video_lists(&state, &ui_context);
+
+    {
+        let state = state.clone();
+        let ui_context = ui_context.clone();
+        let spinner = spinner.clone();
+        let status_label = status_label.clone();
+        let search_button = search_button.clone();
+        search_entry.connect_activate(move |entry| {
+            start_youtube_search(
+                state.clone(),
+                ui_context.clone(),
+                spinner.clone(),
+                status_label.clone(),
+                search_button.clone(),
+                entry.text().to_string(),
+            );
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_context = ui_context.clone();
+        let spinner = spinner.clone();
+        let status_label = status_label.clone();
+        let search_entry = search_entry.clone();
+        search_button.connect_clicked(move |button| {
+            start_youtube_search(
+                state.clone(),
+                ui_context.clone(),
+                spinner.clone(),
+                status_label.clone(),
+                button.clone(),
+                search_entry.text().to_string(),
+            );
+        });
+    }
 
     {
         let state = state.clone();
@@ -1023,6 +1221,10 @@ mod tests {
     }
 
     fn test_video(video_id: &str) -> Video {
+        test_video_with_metadata(video_id, "channel-name", &format!("title-{video_id}"))
+    }
+
+    fn test_video_with_metadata(video_id: &str, channel_name: &str, title: &str) -> Video {
         let published = Utc
             .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
             .single()
@@ -1031,8 +1233,8 @@ mod tests {
         Video::new(
             video_id.to_string(),
             "channel-id".to_string(),
-            "channel-name".to_string(),
-            format!("title-{video_id}"),
+            channel_name.to_string(),
+            title.to_string(),
             published,
             "https://example.com/thumb.jpg".to_string(),
             None,
@@ -1058,6 +1260,23 @@ mod tests {
         state.set_videos(vec![test_video("dup"), test_video("x"), test_video("dup")]);
         let ids = state.videos.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(ids, vec!["dup", "x"]);
+        assert_eq!(state.feed_video_ids(), vec!["dup", "x"]);
         assert_eq!(state.videos.len(), 2);
+    }
+
+    #[test]
+    fn app_state_search_results_do_not_change_feed_ids() {
+        let dirs = TestDirs::new();
+        let mut state = AppState::new(
+            vec![test_video("feed-a"), test_video("feed-b")],
+            HashSet::new(),
+            test_storage(&dirs),
+        );
+
+        state.set_search_results(vec![test_video("search-a"), test_video("feed-a")]);
+
+        assert_eq!(state.feed_video_ids(), vec!["feed-a", "feed-b"]);
+        assert_eq!(state.search_video_ids(), vec!["search-a", "feed-a"]);
+        assert!(state.video_by_id("search-a").is_some());
     }
 }

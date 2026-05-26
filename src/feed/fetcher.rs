@@ -13,7 +13,9 @@ use tokio::time::{sleep, Duration, Instant};
 const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
+const YOUTUBE_SEARCH_API_URL: &str = "https://www.googleapis.com/youtube/v3/search";
 const PLAYLIST_ITEMS_MAX_RESULTS: u32 = 25;
+const SEARCH_MAX_RESULTS: u32 = 25;
 const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 32;
 const MAX_FEED_VIDEOS: usize = 400;
@@ -33,6 +35,17 @@ pub enum FeedError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// Errors that can occur while fetching YouTube search results.
+#[derive(Debug, Error)]
+pub enum SearchError {
+    /// Required API key was not present in the process environment.
+    #[error("GOOGLE_API_KEY is not set. Set it before searching YouTube.")]
+    MissingApiKey,
+    /// YouTube search or metadata request failed.
+    #[error("YouTube search request failed: {0}")]
+    Request(#[from] reqwest::Error),
 }
 
 /// Progress updates during feed fetching
@@ -70,6 +83,12 @@ pub enum FetchProgress {
 struct PlaylistItemsResponse {
     #[serde(default)]
     items: Vec<PlaylistItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchResponse {
+    #[serde(default)]
+    items: Vec<SearchItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +138,12 @@ struct PlaylistItem {
 }
 
 #[derive(Debug, Deserialize)]
+struct SearchItem {
+    id: Option<SearchResourceId>,
+    snippet: Option<SearchSnippet>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PlaylistItemSnippet {
     #[serde(rename = "publishedAt")]
     published_at: Option<DateTime<Utc>>,
@@ -133,7 +158,25 @@ struct PlaylistItemSnippet {
 }
 
 #[derive(Debug, Deserialize)]
+struct SearchSnippet {
+    #[serde(rename = "publishedAt")]
+    published_at: Option<DateTime<Utc>>,
+    title: Option<String>,
+    #[serde(rename = "channelId")]
+    channel_id: Option<String>,
+    #[serde(rename = "channelTitle")]
+    channel_title: Option<String>,
+    thumbnails: Option<PlaylistThumbnails>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PlaylistResourceId {
+    #[serde(rename = "videoId")]
+    video_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchResourceId {
     #[serde(rename = "videoId")]
     video_id: Option<String>,
 }
@@ -278,6 +321,47 @@ pub async fn fetch_all_feeds(
         .await;
 
     Ok(all_videos)
+}
+
+/// Search YouTube for videos matching a query.
+///
+/// # Arguments
+///
+/// * `client` - HTTP client used for YouTube Data API requests.
+/// * `query` - Search text to send to YouTube.
+///
+/// # Returns
+///
+/// Video metadata in the order returned by YouTube search.
+///
+/// # Errors
+///
+/// Returns [`SearchError::MissingApiKey`] if `GOOGLE_API_KEY` is unset.
+/// Returns [`SearchError::Request`] if the YouTube search or duration request fails.
+pub async fn fetch_youtube_search(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<Video>, SearchError> {
+    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| SearchError::MissingApiKey)?;
+    let max_results = SEARCH_MAX_RESULTS.to_string();
+    let response = client
+        .get(YOUTUBE_SEARCH_API_URL)
+        .query(&[
+            ("part", "snippet"),
+            ("type", "video"),
+            ("maxResults", max_results.as_str()),
+            ("q", query),
+            ("key", api_key.as_str()),
+        ])
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let payload = response.json::<SearchResponse>().await?;
+    let video_ids = video_ids_from_search_items(&payload);
+    let durations_by_video_id = fetch_video_durations(client, &api_key, &video_ids).await?;
+
+    Ok(videos_from_search_items(payload, &durations_by_video_id))
 }
 
 async fn fetch_channel_with_retries(
@@ -495,6 +579,51 @@ fn video_ids_from_playlist_items(response: &PlaylistItemsResponse) -> Vec<String
                 .video_id
                 .clone()
         })
+        .collect()
+}
+
+fn videos_from_search_items(
+    response: SearchResponse,
+    durations_by_video_id: &HashMap<String, u32>,
+) -> Vec<Video> {
+    response
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let video_id = item.id?.video_id?;
+            let snippet = item.snippet?;
+            let published = snippet.published_at?;
+
+            let title = snippet.title.unwrap_or_else(|| "Untitled".to_string());
+            let channel_id = snippet.channel_id.unwrap_or_default();
+            let channel_name = snippet
+                .channel_title
+                .unwrap_or_else(|| "Unknown channel".to_string());
+            let thumbnail_url = snippet
+                .thumbnails
+                .as_ref()
+                .and_then(PlaylistThumbnails::preferred_url)
+                .unwrap_or_else(|| urls::thumbnail_url(&video_id));
+            let duration_seconds = durations_by_video_id.get(&video_id).copied();
+
+            Some(Video::new(
+                video_id,
+                channel_id,
+                channel_name,
+                title,
+                published,
+                thumbnail_url,
+                duration_seconds,
+            ))
+        })
+        .collect()
+}
+
+fn video_ids_from_search_items(response: &SearchResponse) -> Vec<String> {
+    response
+        .items
+        .iter()
+        .filter_map(|item| item.id.as_ref()?.video_id.clone())
         .collect()
 }
 

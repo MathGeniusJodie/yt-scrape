@@ -181,6 +181,7 @@ pub(super) fn create_context_menu(
 fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     match tab {
         Tab::Feed => &ui_context.feed_flow,
+        Tab::Search => &ui_context.search_flow,
         Tab::WatchLater => &ui_context.watch_later_flow,
     }
 }
@@ -191,13 +192,15 @@ fn card_map_for_tab(
 ) -> &Rc<RefCell<HashMap<String, VideoCardWidgets>>> {
     match tab {
         Tab::Feed => &ui_context.feed_cards,
+        Tab::Search => &ui_context.search_cards,
         Tab::WatchLater => &ui_context.watch_later_cards,
     }
 }
 
 fn video_ids_for_tab(state: &AppState, tab: Tab) -> Vec<String> {
     match tab {
-        Tab::Feed => state.videos.keys().cloned().collect(),
+        Tab::Feed => state.feed_video_ids(),
+        Tab::Search => state.search_video_ids(),
         Tab::WatchLater => state
             .videos
             .keys()
@@ -331,7 +334,11 @@ pub(super) fn for_each_card_matching<F>(ui_context: &AppContext, video_id: &str,
 where
     F: FnMut(&VideoCardWidgets),
 {
-    for card_map in [&ui_context.feed_cards, &ui_context.watch_later_cards] {
+    for card_map in [
+        &ui_context.feed_cards,
+        &ui_context.search_cards,
+        &ui_context.watch_later_cards,
+    ] {
         if let Some(card) = card_map.borrow().get(video_id).cloned() {
             action(&card);
         }
