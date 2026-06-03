@@ -274,20 +274,6 @@ fn connect_card_handlers(
     );
 }
 
-fn add_card_to_flow(flow_box: &FlowBox, card_widgets: &VideoCardWidgets, position: Option<usize>) {
-    match position {
-        Some(position) => flow_box.insert(card_widgets.root(), position as i32),
-        None => flow_box.add(card_widgets.root()),
-    }
-
-    if let Some(parent) = card_widgets.root().parent() {
-        if let Ok(flow_child) = parent.downcast::<gtk::FlowBoxChild>() {
-            flow_child.set_hexpand(false);
-            flow_child.set_halign(gtk::Align::Start);
-        }
-    }
-}
-
 fn build_video_card(
     video_id: &str,
     downloaded_video_ids: &HashSet<String>,
@@ -313,6 +299,20 @@ fn build_video_card(
     Some(card_widgets)
 }
 
+fn add_card_to_flow(flow_box: &FlowBox, card_widgets: &VideoCardWidgets, position: Option<usize>) {
+    match position {
+        Some(position) => flow_box.insert(card_widgets.root(), position as i32),
+        None => flow_box.add(card_widgets.root()),
+    }
+
+    if let Some(parent) = card_widgets.root().parent() {
+        if let Ok(flow_child) = parent.downcast::<gtk::FlowBoxChild>() {
+            flow_child.set_hexpand(false);
+            flow_child.set_halign(gtk::Align::Center);
+        }
+    }
+}
+
 pub(super) fn populate_flow_box(
     tab: Tab,
     downloaded_video_ids: &HashSet<String>,
@@ -322,7 +322,6 @@ pub(super) fn populate_flow_box(
     let flow_box = flow_for_tab(ui_context, tab);
     let card_map = card_map_for_tab(ui_context, tab);
 
-    // Clear existing children
     flow_box.foreach(|child| {
         flow_box.remove(child);
     });
@@ -772,7 +771,7 @@ fn create_video_card(
     title_label.set_ellipsize(pango::EllipsizeMode::End);
     title_label.set_xalign(0.0);
     title_label.set_yalign(0.0);
-    // Keep FlowBox card widths stable by constraining the label's natural width.
+    // Keep card widths stable by constraining the label's natural width.
     // This is a layout hint only; wrapping/ellipsizing still comes from Pango.
     title_label.set_width_chars(36);
     title_label.set_max_width_chars(36);

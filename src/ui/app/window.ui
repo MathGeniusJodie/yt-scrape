@@ -75,12 +75,12 @@
     </child>
   </object>
 
-  <!-- Stack with Feed, Search, and Watch Later tabs, each containing a scrollable FlowBox -->
+  <!-- Stack with Feed, Search, and Watch Later tabs, each containing a scrollable card grid -->
   <object class="GtkStack" id="stack">
     <property name="transition-type">slide-left-right</property>
     <child>
       <object class="GtkScrolledWindow" id="feed_scroll">
-        <property name="hscrollbar-policy">never</property>
+        <property name="hscrollbar-policy">automatic</property>
         <property name="vscrollbar-policy">automatic</property>
         <child>
           <object class="GtkBox">
@@ -141,7 +141,7 @@
         </child>
         <child>
           <object class="GtkScrolledWindow" id="search_scroll">
-            <property name="hscrollbar-policy">never</property>
+            <property name="hscrollbar-policy">automatic</property>
             <property name="vscrollbar-policy">automatic</property>
             <property name="vexpand">True</property>
             <child>
@@ -174,7 +174,7 @@
     </child>
     <child>
       <object class="GtkScrolledWindow" id="watch_later_scroll">
-        <property name="hscrollbar-policy">never</property>
+        <property name="hscrollbar-policy">automatic</property>
         <property name="vscrollbar-policy">automatic</property>
         <child>
           <object class="GtkBox">

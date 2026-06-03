@@ -9,8 +9,8 @@ use cards::VideoCardWidgets;
 
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow, SearchEntry,
-    Spinner, Stack,
+    Align, Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow,
+    SearchEntry, Spinner, Stack,
 };
 use indexmap::IndexMap;
 use log::{error, info, warn};
@@ -177,8 +177,12 @@ struct AppContext {
     summary_generator: SummaryGenerator,
     window: ApplicationWindow,
     context_menu: Popover,
+    stack: Stack,
+    feed_scroll: ScrolledWindow,
     feed_flow: FlowBox,
+    search_scroll: ScrolledWindow,
     search_flow: FlowBox,
+    watch_later_scroll: ScrolledWindow,
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
     badge: Label,
@@ -190,7 +194,6 @@ struct AppContext {
 
 const CARD_WIDTH: i32 = 320;
 const CARD_SPACING: i32 = 16;
-const GRID_PADDING: i32 = 16;
 const FROGPOINTS_REFRESH_COST: i64 = 10;
 const FROGPOINTS_RELATIVE_PATH: &[&str] = &["Desktop", "RemoteVault", "frogpoints.md"];
 
@@ -403,11 +406,153 @@ fn resolve_playback_path(
     }
 }
 
+fn flow_column_count_for_viewport(viewport_width: i32) -> u32 {
+    if viewport_width < CARD_WIDTH {
+        1
+    } else {
+        ((viewport_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1) as u32
+    }
+}
+
+fn flow_width_for_columns(column_count: u32) -> i32 {
+    let column_count = column_count as i32;
+    column_count * CARD_WIDTH + (column_count - 1) * CARD_SPACING
+}
+
+#[cfg(test)]
+fn flow_width_for_viewport(viewport_width: i32) -> i32 {
+    flow_width_for_columns(flow_column_count_for_viewport(viewport_width))
+}
+
 fn update_flow_width(flow: &FlowBox, viewport_width: i32) {
-    let available_width = (viewport_width - GRID_PADDING * 2).max(1);
-    let num_columns = ((available_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1);
-    let optimal_width = num_columns * CARD_WIDTH + (num_columns - 1) * CARD_SPACING;
-    flow.set_size_request(optimal_width, -1);
+    let column_count = flow_column_count_for_viewport(viewport_width);
+    flow.set_min_children_per_line(1);
+    flow.set_max_children_per_line(column_count);
+    flow.set_margin_start(0);
+    flow.set_margin_end(0);
+    flow.set_size_request(flow_width_for_columns(column_count), -1);
+    flow.queue_resize();
+}
+
+fn configure_flow_box_layout(flow: &FlowBox) {
+    flow.set_halign(Align::Center);
+    flow.set_hexpand(false);
+
+    if let Some(parent) = flow.parent() {
+        parent.set_halign(Align::Center);
+        parent.set_hexpand(false);
+    }
+}
+
+fn configure_scrolled_window_layout(scroll: &ScrolledWindow) {
+    scroll.set_propagate_natural_width(false);
+    scroll.set_min_content_width(CARD_WIDTH);
+}
+
+fn usable_viewport_width(viewport_width: i32, fallback_width: i32) -> Option<i32> {
+    if viewport_width > 1 {
+        Some(viewport_width)
+    } else if fallback_width > 1 {
+        Some(fallback_width)
+    } else {
+        None
+    }
+}
+
+fn update_flow_width_from_scroll(
+    ui_context: &AppContext,
+    tab: Tab,
+    scroll: &ScrolledWindow,
+    fallback_width: i32,
+) {
+    if let Some(viewport_width) = usable_viewport_width(scroll.allocated_width(), fallback_width) {
+        match tab {
+            Tab::Feed => update_flow_width(&ui_context.feed_flow, viewport_width),
+            Tab::Search => update_flow_width(&ui_context.search_flow, viewport_width),
+            Tab::WatchLater => update_flow_width(&ui_context.watch_later_flow, viewport_width),
+        }
+    }
+}
+
+fn top_level_viewport_width(ui_context: &AppContext) -> Option<i32> {
+    usable_viewport_width(
+        ui_context.stack.allocated_width(),
+        ui_context.window.allocated_width(),
+    )
+}
+
+fn update_visible_flow_width(ui_context: &AppContext) {
+    let Some(viewport_width) = top_level_viewport_width(ui_context) else {
+        return;
+    };
+
+    match ui_context.stack.visible_child_name().as_deref() {
+        Some("feed") => update_flow_width(&ui_context.feed_flow, viewport_width),
+        Some("search") => update_flow_width(&ui_context.search_flow, viewport_width),
+        Some("watch-later") => update_flow_width(&ui_context.watch_later_flow, viewport_width),
+        Some(_) | None => {}
+    }
+}
+
+fn update_all_flow_widths(ui_context: &AppContext) {
+    let fallback_width = ui_context
+        .stack
+        .allocated_width()
+        .max(ui_context.window.allocated_width());
+    update_flow_width_from_scroll(
+        ui_context,
+        Tab::Feed,
+        &ui_context.feed_scroll,
+        fallback_width,
+    );
+    update_flow_width_from_scroll(
+        ui_context,
+        Tab::Search,
+        &ui_context.search_scroll,
+        fallback_width,
+    );
+    update_flow_width_from_scroll(
+        ui_context,
+        Tab::WatchLater,
+        &ui_context.watch_later_scroll,
+        fallback_width,
+    );
+    update_visible_flow_width(ui_context);
+}
+
+fn queue_flow_width_update(ui_context: &AppContext) {
+    let ui_context = ui_context.clone();
+    glib::idle_add_local_once(move || {
+        update_all_flow_widths(&ui_context);
+    });
+}
+
+fn queue_settled_flow_width_updates(ui_context: &AppContext) {
+    update_all_flow_widths(ui_context);
+    queue_flow_width_update(ui_context);
+
+    for delay_ms in [16, 80] {
+        let ui_context = ui_context.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
+            update_all_flow_widths(&ui_context);
+        });
+    }
+}
+
+fn queue_settled_single_flow_width_update(
+    ui_context: &AppContext,
+    tab: Tab,
+    scroll: &ScrolledWindow,
+    stack: &Stack,
+) {
+    for delay_ms in [0, 16, 80] {
+        let scroll = scroll.clone();
+        let stack = stack.clone();
+        let ui_context = ui_context.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
+            update_flow_width_from_scroll(&ui_context, tab, &scroll, stack.allocated_width());
+        });
+    }
 }
 
 fn toggle_watch_later_and_download(
@@ -683,11 +828,13 @@ fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     populate_flow_box(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
     populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
     populate_flow_box(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
+    queue_settled_flow_width_updates(ui_context);
 }
 
 fn refresh_search_results(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
     let downloaded_video_ids = state_rc.borrow().storage.cached_video_ids();
     populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
+    queue_settled_flow_width_updates(ui_context);
 }
 
 fn start_youtube_search(
@@ -958,77 +1105,15 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         .object::<FlowBox>("watch_later_flow")
         .expect("watch_later_flow in window.ui");
 
+    configure_scrolled_window_layout(&feed_scroll);
+    configure_scrolled_window_layout(&search_scroll);
+    configure_scrolled_window_layout(&watch_later_scroll);
+    configure_flow_box_layout(&feed_flow);
+    configure_flow_box_layout(&search_flow);
+    configure_flow_box_layout(&watch_later_flow);
+
     window.set_titlebar(Some(&header));
     window.add(&stack);
-
-    // Resize flow columns when scroll viewport changes
-    {
-        let feed_flow = feed_flow.clone();
-        feed_scroll.connect_size_allocate(move |_, allocation| {
-            update_flow_width(&feed_flow, allocation.width());
-        });
-    }
-    {
-        let watch_later_flow = watch_later_flow.clone();
-        watch_later_scroll.connect_size_allocate(move |_, allocation| {
-            update_flow_width(&watch_later_flow, allocation.width());
-        });
-    }
-    {
-        let search_flow = search_flow.clone();
-        search_scroll.connect_size_allocate(move |_, allocation| {
-            update_flow_width(&search_flow, allocation.width());
-        });
-    }
-
-    // Tab toggle buttons switch the stack page and update sibling active state
-    {
-        let stack = stack.clone();
-        let search_tab = search_tab.clone();
-        let watch_later_tab = watch_later_tab.clone();
-        let feed_flow = feed_flow.clone();
-        feed_tab.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            stack.set_visible_child_name("feed");
-            search_tab.set_active(false);
-            watch_later_tab.set_active(false);
-            update_flow_width(&feed_flow, stack.allocated_width());
-        });
-    }
-    {
-        let stack = stack.clone();
-        let feed_tab = feed_tab.clone();
-        let search_tab = search_tab.clone();
-        let watch_later_flow = watch_later_flow.clone();
-        watch_later_tab.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            stack.set_visible_child_name("watch-later");
-            feed_tab.set_active(false);
-            search_tab.set_active(false);
-            update_flow_width(&watch_later_flow, stack.allocated_width());
-        });
-    }
-    {
-        let stack = stack.clone();
-        let feed_tab = feed_tab.clone();
-        let watch_later_tab = watch_later_tab.clone();
-        let search_entry = search_entry.clone();
-        let search_flow = search_flow.clone();
-        search_tab.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            stack.set_visible_child_name("search");
-            feed_tab.set_active(false);
-            watch_later_tab.set_active(false);
-            update_flow_width(&search_flow, stack.allocated_width());
-            search_entry.grab_focus();
-        });
-    }
 
     let feed_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let search_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
@@ -1041,8 +1126,12 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         http_client: http_client.clone(),
         window: window.clone(),
         context_menu: context_menu.clone(),
+        stack: stack.clone(),
+        feed_scroll: feed_scroll.clone(),
         feed_flow: feed_flow.clone(),
+        search_scroll: search_scroll.clone(),
         search_flow: search_flow.clone(),
+        watch_later_scroll: watch_later_scroll.clone(),
         watch_later_flow: watch_later_flow.clone(),
         selected_video: selected_video.clone(),
         badge: badge.clone(),
@@ -1052,6 +1141,131 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         subs_file: subs_file.clone(),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
+
+    // Resize card rows when scroll viewport changes.
+    {
+        let ui_context = ui_context.clone();
+        feed_scroll.connect_size_allocate(move |_, allocation| {
+            let viewport_width =
+                usable_viewport_width(allocation.width(), ui_context.stack.allocated_width());
+            if let Some(viewport_width) = viewport_width {
+                update_flow_width(&ui_context.feed_flow, viewport_width);
+            }
+        });
+    }
+    {
+        let ui_context = ui_context.clone();
+        watch_later_scroll.connect_size_allocate(move |_, allocation| {
+            let viewport_width =
+                usable_viewport_width(allocation.width(), ui_context.stack.allocated_width());
+            if let Some(viewport_width) = viewport_width {
+                update_flow_width(&ui_context.watch_later_flow, viewport_width);
+            }
+        });
+    }
+    {
+        let ui_context = ui_context.clone();
+        search_scroll.connect_size_allocate(move |_, allocation| {
+            let viewport_width =
+                usable_viewport_width(allocation.width(), ui_context.stack.allocated_width());
+            if let Some(viewport_width) = viewport_width {
+                update_flow_width(&ui_context.search_flow, viewport_width);
+            }
+        });
+    }
+
+    // Tab toggle buttons switch the stack page and update sibling active state.
+    {
+        let stack = stack.clone();
+        let search_tab = search_tab.clone();
+        let watch_later_tab = watch_later_tab.clone();
+        let feed_scroll = feed_scroll.clone();
+        let ui_context = ui_context.clone();
+        feed_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            stack.set_visible_child_name("feed");
+            search_tab.set_active(false);
+            watch_later_tab.set_active(false);
+            update_flow_width_from_scroll(
+                &ui_context,
+                Tab::Feed,
+                &feed_scroll,
+                stack.allocated_width(),
+            );
+            queue_settled_single_flow_width_update(&ui_context, Tab::Feed, &feed_scroll, &stack);
+        });
+    }
+    {
+        let stack = stack.clone();
+        let feed_tab = feed_tab.clone();
+        let search_tab = search_tab.clone();
+        let watch_later_scroll = watch_later_scroll.clone();
+        let ui_context = ui_context.clone();
+        watch_later_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            stack.set_visible_child_name("watch-later");
+            feed_tab.set_active(false);
+            search_tab.set_active(false);
+            update_flow_width_from_scroll(
+                &ui_context,
+                Tab::WatchLater,
+                &watch_later_scroll,
+                stack.allocated_width(),
+            );
+            queue_settled_single_flow_width_update(
+                &ui_context,
+                Tab::WatchLater,
+                &watch_later_scroll,
+                &stack,
+            );
+        });
+    }
+    {
+        let stack = stack.clone();
+        let feed_tab = feed_tab.clone();
+        let watch_later_tab = watch_later_tab.clone();
+        let search_entry = search_entry.clone();
+        let search_scroll = search_scroll.clone();
+        let ui_context = ui_context.clone();
+        search_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            stack.set_visible_child_name("search");
+            feed_tab.set_active(false);
+            watch_later_tab.set_active(false);
+            update_flow_width_from_scroll(
+                &ui_context,
+                Tab::Search,
+                &search_scroll,
+                stack.allocated_width(),
+            );
+            queue_settled_single_flow_width_update(
+                &ui_context,
+                Tab::Search,
+                &search_scroll,
+                &stack,
+            );
+            search_entry.grab_focus();
+        });
+    }
+
+    {
+        let ui_context = ui_context.clone();
+        window.connect_size_allocate(move |_, _| {
+            update_all_flow_widths(&ui_context);
+        });
+    }
+    {
+        let ui_context = ui_context.clone();
+        window.connect_map(move |_| {
+            queue_settled_flow_width_updates(&ui_context);
+        });
+    }
 
     refresh_video_lists(&state, &ui_context);
 
@@ -1135,6 +1349,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     }
 
     window.show_all();
+    queue_settled_flow_width_updates(&ui_context);
 }
 
 fn update_watch_later_badge(badge: &Label, count: usize) {
@@ -1148,7 +1363,11 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{debit_frogpoints, AppState, FrogpointsError, FROGPOINTS_REFRESH_COST};
+    use super::{
+        debit_frogpoints, flow_column_count_for_viewport, flow_width_for_viewport,
+        usable_viewport_width, AppState, FrogpointsError, CARD_SPACING, CARD_WIDTH,
+        FROGPOINTS_REFRESH_COST,
+    };
     use crate::cache::Storage;
     use crate::data::Video;
     use chrono::{TimeZone, Utc};
@@ -1164,6 +1383,56 @@ mod tests {
             "yt-gtk-{test_name}-{}-{unique_id}.md",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn flow_width_for_viewport_handles_startup_and_narrow_widths() {
+        assert_eq!(flow_width_for_viewport(0), CARD_WIDTH);
+        assert_eq!(flow_width_for_viewport(1), CARD_WIDTH);
+        assert_eq!(flow_width_for_viewport(CARD_WIDTH), CARD_WIDTH);
+    }
+
+    #[test]
+    fn flow_width_for_viewport_uses_largest_complete_column_count() {
+        let two_column_viewport = CARD_WIDTH * 2 + CARD_SPACING;
+        let almost_three_column_viewport = CARD_WIDTH * 3 + CARD_SPACING * 2 - 1;
+        let three_column_viewport = almost_three_column_viewport + 1;
+
+        assert_eq!(
+            flow_width_for_viewport(two_column_viewport),
+            CARD_WIDTH * 2 + CARD_SPACING
+        );
+        assert_eq!(
+            flow_width_for_viewport(almost_three_column_viewport),
+            CARD_WIDTH * 2 + CARD_SPACING
+        );
+        assert_eq!(
+            flow_width_for_viewport(three_column_viewport),
+            CARD_WIDTH * 3 + CARD_SPACING * 2
+        );
+    }
+
+    #[test]
+    fn flow_column_count_for_viewport_matches_available_card_slots() {
+        let two_column_viewport = CARD_WIDTH * 2 + CARD_SPACING;
+        let almost_three_column_viewport = CARD_WIDTH * 3 + CARD_SPACING * 2 - 1;
+        let three_column_viewport = almost_three_column_viewport + 1;
+
+        assert_eq!(flow_column_count_for_viewport(0), 1);
+        assert_eq!(flow_column_count_for_viewport(two_column_viewport), 2);
+        assert_eq!(
+            flow_column_count_for_viewport(almost_three_column_viewport),
+            2
+        );
+        assert_eq!(flow_column_count_for_viewport(three_column_viewport), 3);
+    }
+
+    #[test]
+    fn usable_viewport_width_uses_fallback_for_hidden_stack_pages() {
+        assert_eq!(usable_viewport_width(1, 900), Some(900));
+        assert_eq!(usable_viewport_width(700, 900), Some(700));
+        assert_eq!(usable_viewport_width(900, 700), Some(900));
+        assert_eq!(usable_viewport_width(1, 1), None);
     }
 
     struct TestDirs {
