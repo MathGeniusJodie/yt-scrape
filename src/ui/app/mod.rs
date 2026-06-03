@@ -481,17 +481,21 @@ fn top_level_viewport_width(ui_context: &AppContext) -> Option<i32> {
     )
 }
 
-fn update_visible_flow_width(ui_context: &AppContext) {
-    let Some(viewport_width) = top_level_viewport_width(ui_context) else {
-        return;
-    };
-
+fn update_visible_flow_width_for_viewport(ui_context: &AppContext, viewport_width: i32) {
     match ui_context.stack.visible_child_name().as_deref() {
         Some("feed") => update_flow_width(&ui_context.feed_flow, viewport_width),
         Some("search") => update_flow_width(&ui_context.search_flow, viewport_width),
         Some("watch-later") => update_flow_width(&ui_context.watch_later_flow, viewport_width),
         Some(_) | None => {}
     }
+}
+
+fn update_visible_flow_width(ui_context: &AppContext) {
+    let Some(viewport_width) = top_level_viewport_width(ui_context) else {
+        return;
+    };
+
+    update_visible_flow_width_for_viewport(ui_context, viewport_width);
 }
 
 fn update_all_flow_widths(ui_context: &AppContext) {
@@ -531,10 +535,22 @@ fn queue_settled_flow_width_updates(ui_context: &AppContext) {
     update_all_flow_widths(ui_context);
     queue_flow_width_update(ui_context);
 
-    for delay_ms in [16, 80] {
+    for delay_ms in [16, 80, 250] {
         let ui_context = ui_context.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
             update_all_flow_widths(&ui_context);
+        });
+    }
+}
+
+fn queue_window_size_flow_width_updates(ui_context: &AppContext) {
+    for delay_ms in [0, 16, 80, 250] {
+        let ui_context = ui_context.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
+            let (window_width, _) = ui_context.window.size();
+            if window_width > 1 {
+                update_visible_flow_width_for_viewport(&ui_context, window_width);
+            }
         });
     }
 }
@@ -1264,6 +1280,17 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let ui_context = ui_context.clone();
         window.connect_map(move |_| {
             queue_settled_flow_width_updates(&ui_context);
+            queue_window_size_flow_width_updates(&ui_context);
+        });
+    }
+    {
+        let ui_context = ui_context.clone();
+        window.connect_configure_event(move |_, event| {
+            let (window_width, _) = event.size();
+            if let Ok(window_width) = i32::try_from(window_width) {
+                update_visible_flow_width_for_viewport(&ui_context, window_width);
+            }
+            false
         });
     }
 
@@ -1350,6 +1377,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     window.show_all();
     queue_settled_flow_width_updates(&ui_context);
+    queue_window_size_flow_width_updates(&ui_context);
 }
 
 fn update_watch_later_badge(badge: &Label, count: usize) {
