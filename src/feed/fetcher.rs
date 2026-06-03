@@ -14,8 +14,12 @@ const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube
 const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
 const YOUTUBE_SEARCH_API_URL: &str = "https://www.googleapis.com/youtube/v3/search";
+const YOUTUBE_COMMENT_THREADS_API_URL: &str =
+    "https://www.googleapis.com/youtube/v3/commentThreads";
 const PLAYLIST_ITEMS_MAX_RESULTS: u32 = 25;
 const SEARCH_MAX_RESULTS: u32 = 25;
+const COMMENTS_PAGE_SIZE: u32 = 50;
+const MAX_COMMENT_THREADS: usize = 100;
 const MAX_FETCH_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CHANNEL_FETCHES: usize = 32;
 const MAX_FEED_VIDEOS: usize = 400;
@@ -45,6 +49,17 @@ pub enum SearchError {
     MissingApiKey,
     /// YouTube search or metadata request failed.
     #[error("YouTube search request failed: {0}")]
+    Request(#[from] reqwest::Error),
+}
+
+/// Errors that can occur while fetching YouTube comments.
+#[derive(Debug, Error)]
+pub enum CommentError {
+    /// Required API key was not present in the process environment.
+    #[error("GOOGLE_API_KEY is not set. Set it before loading comments.")]
+    MissingApiKey,
+    /// YouTube comments request failed.
+    #[error("YouTube comments request failed: {0}")]
     Request(#[from] reqwest::Error),
 }
 
@@ -101,6 +116,51 @@ struct ChannelsResponse {
 struct VideosResponse {
     #[serde(default)]
     items: Vec<YoutubeVideoItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentThreadsResponse {
+    #[serde(default)]
+    items: Vec<CommentThreadItem>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentThreadItem {
+    snippet: Option<CommentThreadSnippet>,
+    replies: Option<CommentThreadReplies>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentThreadSnippet {
+    #[serde(rename = "topLevelComment")]
+    top_level_comment: Option<CommentItem>,
+    #[serde(rename = "totalReplyCount")]
+    total_reply_count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentThreadReplies {
+    #[serde(default)]
+    comments: Vec<CommentItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentItem {
+    snippet: Option<CommentSnippet>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentSnippet {
+    #[serde(rename = "authorDisplayName")]
+    author_display_name: Option<String>,
+    #[serde(rename = "textDisplay")]
+    text_display: Option<String>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<DateTime<Utc>>,
+    #[serde(rename = "likeCount")]
+    like_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +424,64 @@ pub async fn fetch_youtube_search(
     Ok(videos_from_search_items(payload, &durations_by_video_id))
 }
 
+/// Fetches and formats public comments for a YouTube video.
+///
+/// # Arguments
+///
+/// * `client` - HTTP client used for YouTube Data API requests.
+/// * `video_id` - YouTube video ID whose public comment threads should be loaded.
+///
+/// # Returns
+///
+/// A readable text representation of relevant public comments and included replies.
+///
+/// # Errors
+///
+/// Returns [`CommentError::MissingApiKey`] if `GOOGLE_API_KEY` is unset.
+/// Returns [`CommentError::Request`] if YouTube rejects or fails the comments request.
+pub async fn fetch_youtube_comments(
+    client: &reqwest::Client,
+    video_id: &str,
+) -> Result<String, CommentError> {
+    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| CommentError::MissingApiKey)?;
+    let mut comments = Vec::with_capacity(MAX_COMMENT_THREADS);
+    let mut next_page_token = None::<String>;
+
+    while comments.len() < MAX_COMMENT_THREADS {
+        let page_size = COMMENTS_PAGE_SIZE
+            .min((MAX_COMMENT_THREADS - comments.len()) as u32)
+            .to_string();
+
+        let mut request = client.get(YOUTUBE_COMMENT_THREADS_API_URL).query(&[
+            ("part", "snippet,replies"),
+            ("videoId", video_id),
+            ("maxResults", page_size.as_str()),
+            ("order", "relevance"),
+            ("textFormat", "plainText"),
+            ("key", api_key.as_str()),
+        ]);
+
+        if let Some(page_token) = next_page_token.as_deref() {
+            request = request.query(&[("pageToken", page_token)]);
+        }
+
+        let response = request.send().await?.error_for_status()?;
+        let payload = response.json::<CommentThreadsResponse>().await?;
+
+        if payload.items.is_empty() {
+            break;
+        }
+
+        comments.extend(payload.items);
+        next_page_token = payload.next_page_token;
+        if next_page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(format_comment_threads(&comments))
+}
+
 async fn fetch_channel_with_retries(
     client: reqwest::Client,
     api_key: String,
@@ -525,6 +643,75 @@ async fn resolve_uploads_playlist_id(
         .items
         .into_iter()
         .find_map(|item| item.content_details?.related_playlists?.uploads))
+}
+
+fn format_comment_threads(items: &[CommentThreadItem]) -> String {
+    if items.is_empty() {
+        return "No public comments are available for this video.".to_string();
+    }
+
+    let mut output = String::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(snippet) = item.snippet.as_ref() else {
+            continue;
+        };
+        let Some(top_level_comment) = snippet.top_level_comment.as_ref() else {
+            continue;
+        };
+
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        push_formatted_comment(&mut output, index + 1, top_level_comment, "");
+
+        let replies = item
+            .replies
+            .as_ref()
+            .map(|replies| replies.comments.as_slice())
+            .unwrap_or_default();
+        for reply in replies {
+            push_formatted_comment(&mut output, 0, reply, "  ");
+        }
+
+        let loaded_reply_count = replies.len() as u32;
+        let total_reply_count = snippet.total_reply_count.unwrap_or(loaded_reply_count);
+        if total_reply_count > loaded_reply_count {
+            output.push_str(&format!(
+                "  ... {} more replies not loaded by YouTube in this response\n",
+                total_reply_count - loaded_reply_count
+            ));
+        }
+    }
+
+    if output.is_empty() {
+        "No public comments are available for this video.".to_string()
+    } else {
+        output
+    }
+}
+
+fn push_formatted_comment(output: &mut String, index: usize, comment: &CommentItem, indent: &str) {
+    let Some(snippet) = comment.snippet.as_ref() else {
+        return;
+    };
+
+    let author = snippet.author_display_name.as_deref().unwrap_or("Unknown");
+    let text = snippet.text_display.as_deref().unwrap_or("").trim();
+    let like_count = snippet.like_count.unwrap_or_default();
+    let published = snippet
+        .published_at
+        .map(|published| format!(" | {}", published.format("%Y-%m-%d")))
+        .unwrap_or_default();
+    let prefix = if index == 0 {
+        "-".to_string()
+    } else {
+        format!("{index}.")
+    };
+
+    output.push_str(&format!(
+        "{indent}{prefix} {author} | {like_count} likes{published}\n"
+    ));
+    output.push_str(&format!("{indent}{}\n", text.replace('\n', "\n  ")));
 }
 
 fn videos_from_playlist_items(
@@ -740,7 +927,12 @@ pub fn load_channel_ids(path: &Path) -> Result<Vec<String>, FeedError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backoff_ms_with_base, parse_iso8601_duration_seconds, INITIAL_BACKOFF_MS};
+    use super::{
+        backoff_ms_with_base, format_comment_threads, parse_iso8601_duration_seconds, CommentItem,
+        CommentSnippet, CommentThreadItem, CommentThreadReplies, CommentThreadSnippet,
+        INITIAL_BACKOFF_MS,
+    };
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn parses_common_iso_durations() {
@@ -777,5 +969,36 @@ mod tests {
         assert_eq!(backoff_ms_with_base(20_000, 1), 20_000);
         assert_eq!(backoff_ms_with_base(20_000, 2), 40_000);
         assert_eq!(backoff_ms_with_base(30_000, 2), 60_000);
+    }
+
+    #[test]
+    fn formats_comment_threads_with_replies() {
+        let item = CommentThreadItem {
+            snippet: Some(CommentThreadSnippet {
+                top_level_comment: Some(comment("Ada", "Great talk", 12)),
+                total_reply_count: Some(2),
+            }),
+            replies: Some(CommentThreadReplies {
+                comments: vec![comment("Grace", "Agreed", 3)],
+            }),
+        };
+
+        let formatted = format_comment_threads(&[item]);
+
+        assert!(formatted.contains("1. Ada | 12 likes | 2024-01-01"));
+        assert!(formatted.contains("Great talk"));
+        assert!(formatted.contains("  - Grace | 3 likes | 2024-01-01"));
+        assert!(formatted.contains("... 1 more replies not loaded"));
+    }
+
+    fn comment(author: &str, text: &str, like_count: u32) -> CommentItem {
+        CommentItem {
+            snippet: Some(CommentSnippet {
+                author_display_name: Some(author.to_string()),
+                text_display: Some(text.to_string()),
+                published_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single(),
+                like_count: Some(like_count),
+            }),
+        }
     }
 }

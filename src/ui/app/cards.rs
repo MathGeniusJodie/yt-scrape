@@ -1,3 +1,4 @@
+use super::comments::show_comments_dialog;
 use super::summary_generator::{show_summary_dialog, show_transcript_dialog};
 use super::{apply_watch_later_action, resolve_playback_path, AppContext, AppState};
 use crate::cache::Storage;
@@ -95,6 +96,9 @@ pub(super) fn create_context_menu(
     let transcript_button = builder
         .object::<Button>("transcript_button")
         .expect("transcript_button in context_menu.ui");
+    let comments_button = builder
+        .object::<Button>("comments_button")
+        .expect("comments_button in context_menu.ui");
     let unsub_button = builder
         .object::<Button>("unsub_button")
         .expect("unsub_button in context_menu.ui");
@@ -160,6 +164,18 @@ pub(super) fn create_context_menu(
             let ui_context = ui_context.clone();
             move |video_id| {
                 show_transcript_dialog(&state_rc, &ui_context, &video_id);
+            }
+        },
+    );
+    on_menu_action(
+        &comments_button,
+        selected_video.clone(),
+        ui_context.context_menu.clone(),
+        {
+            let state_rc = state_rc.clone();
+            let ui_context = ui_context.clone();
+            move |video_id| {
+                show_comments_dialog(&state_rc, &ui_context, &video_id);
             }
         },
     );

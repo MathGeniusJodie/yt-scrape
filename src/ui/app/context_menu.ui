@@ -63,6 +63,17 @@
       </packing>
     </child>
     <child>
+      <object class="GtkButton" id="comments_button">
+        <property name="label">Comments</property>
+        <property name="name">menu-comments</property>
+      </object>
+      <packing>
+        <property name="expand">False</property>
+        <property name="fill">False</property>
+        <property name="padding">4</property>
+      </packing>
+    </child>
+    <child>
       <object class="GtkButton" id="unsub_button">
         <property name="label">Unsub from Channel</property>
         <property name="name">menu-unsub</property>
