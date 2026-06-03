@@ -5,6 +5,8 @@ use std::path::Path;
 use std::process::Stdio;
 use thiserror::Error;
 
+const MIYOO_VIDEO_FILTER: &str = "scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2:black,fps=20";
+
 /// Errors that can occur while downloading a video with `yt-dlp`.
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -109,30 +111,48 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
 /// # Arguments
 ///
 /// * `input_path` - Path to the source video file.
+/// * `subtitle_path` - Optional subtitle sidecar to burn into the output video.
 /// * `output_path` - Destination path for the converted mp4.
 ///
 /// # Errors
 ///
 /// Returns an error when `ffmpeg` fails or returns a non-zero exit status.
-pub async fn convert_to_miyoo(input_path: &Path, output_path: &Path) -> Result<(), DownloadError> {
+pub async fn convert_to_miyoo(
+    input_path: &Path,
+    subtitle_path: Option<&Path>,
+    output_path: &Path,
+) -> Result<(), DownloadError> {
+    let video_filter = miyoo_video_filter(subtitle_path);
     let output = super::nice_command("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(input_path)
         .arg("-vf")
-        .arg("scale=750:560:force_original_aspect_ratio=decrease,pad=750:560:(ow-iw)/2:(oh-ih)/2:black,fps=24")
-        .arg("-c:v").arg("libx264")
-        .arg("-preset").arg("veryfast")
-        .arg("-crf").arg("30")
-        .arg("-maxrate").arg("800k")
-        .arg("-bufsize").arg("1600k")
-        .arg("-profile:v").arg("main")
-        .arg("-level").arg("3.1")
-        .arg("-pix_fmt").arg("yuv420p")
-        .arg("-c:a").arg("aac")
-        .arg("-b:a").arg("96k")
-        .arg("-ac").arg("2")
-        .arg("-movflags").arg("+faststart")
+        .arg(video_filter)
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("ultrafast")
+        .arg("-crf")
+        .arg("34")
+        .arg("-maxrate")
+        .arg("600k")
+        .arg("-bufsize")
+        .arg("1200k")
+        .arg("-profile:v")
+        .arg("baseline")
+        .arg("-level")
+        .arg("3.0")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("80k")
+        .arg("-ac")
+        .arg("2")
+        .arg("-movflags")
+        .arg("+faststart")
         .arg(output_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -149,4 +169,56 @@ pub async fn convert_to_miyoo(input_path: &Path, output_path: &Path) -> Result<(
     }
 
     Ok(())
+}
+
+fn miyoo_video_filter(subtitle_path: Option<&Path>) -> String {
+    match subtitle_path {
+        Some(path) => format!(
+            "subtitles={},{}",
+            escape_filter_path(path),
+            MIYOO_VIDEO_FILTER
+        ),
+        None => MIYOO_VIDEO_FILTER.to_string(),
+    }
+}
+
+fn escape_filter_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .flat_map(|character| match character {
+            '\\' | '\'' | ':' | ',' | '[' | ']' => Some('\\').into_iter().chain(Some(character)),
+            _ => None.into_iter().chain(Some(character)),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{escape_filter_path, miyoo_video_filter, MIYOO_VIDEO_FILTER};
+    use std::path::Path;
+
+    #[test]
+    fn miyoo_video_filter_omits_subtitles_without_subtitle_path() {
+        assert_eq!(miyoo_video_filter(None), MIYOO_VIDEO_FILTER);
+    }
+
+    #[test]
+    fn miyoo_video_filter_burns_subtitles_before_scaling() {
+        let subtitle_path = Path::new("/tmp/video title.en.vtt");
+
+        assert_eq!(
+            miyoo_video_filter(Some(subtitle_path)),
+            format!("subtitles=/tmp/video title.en.vtt,{MIYOO_VIDEO_FILTER}")
+        );
+    }
+
+    #[test]
+    fn escape_filter_path_escapes_ffmpeg_filter_special_characters() {
+        let path = Path::new("/tmp/vid: one, 'two' [en].vtt");
+
+        assert_eq!(
+            escape_filter_path(path),
+            "/tmp/vid\\: one\\, \\'two\\' \\[en\\].vtt"
+        );
+    }
 }

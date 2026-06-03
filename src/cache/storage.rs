@@ -12,6 +12,7 @@ const VIDEOS_CACHE_FILE: &str = "videos.json";
 const VIDEO_SIDECARS_DIR: &str = "video_sidecars";
 const VIDEO_SIDECAR_EXTENSION: &str = "json";
 const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
+const SUBTITLE_EXTENSION: &str = "vtt";
 const YOUTUBE_VIDEO_ID_LENGTH: usize = 11;
 
 type StorageResult<T> = std::result::Result<T, StorageError>;
@@ -103,6 +104,25 @@ fn cached_video_id_for_path(path: &Path) -> Option<&str> {
 
     let stem = path.file_stem().and_then(OsStr::to_str)?;
     video_id_from_stem(stem)
+}
+
+fn subtitle_path_matches_video_id(path: &Path, video_id: &str) -> bool {
+    if path.extension().and_then(OsStr::to_str) != Some(SUBTITLE_EXTENSION) {
+        return false;
+    }
+
+    let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+        return false;
+    };
+
+    stem.match_indices(video_id).any(|(index, _)| {
+        let before_match = index == 0 || stem[..index].ends_with('_');
+        let after_index = index + video_id.len();
+        let after_match = stem
+            .get(after_index..)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'));
+        before_match && after_match
+    })
 }
 
 fn video_cache_preference(path: &Path) -> usize {
@@ -267,6 +287,24 @@ impl Storage {
         entries.filter_map(Result::ok).find_map(|entry| {
             let path = entry.path();
             (cached_video_id_for_path(&path) == Some(video_id)).then_some(path)
+        })
+    }
+
+    /// Finds an existing downloaded VTT subtitle sidecar for a given video ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_id` - YouTube video identifier.
+    ///
+    /// # Returns
+    ///
+    /// Matched subtitle path, if present.
+    pub fn find_subtitle_path(&self, video_id: &str) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(&self.videos_dir).ok()?;
+
+        entries.filter_map(Result::ok).find_map(|entry| {
+            let path = entry.path();
+            subtitle_path_matches_video_id(&path, video_id).then_some(path)
         })
     }
 
@@ -582,8 +620,8 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem, Storage,
-        VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE,
+        collect_cached_video_ids_from_dir, sanitize_filename, subtitle_path_matches_video_id,
+        video_id_from_stem, Storage, VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE,
     };
     use crate::data::Video;
     use chrono::{DateTime, Utc};
@@ -673,6 +711,53 @@ mod tests {
         assert!(ids.contains("C9ww_8cg_5g"));
         assert!(ids.contains("abc123DEF45"));
         assert_eq!(ids.len(), 2);
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn subtitle_path_matches_video_id_accepts_language_suffixed_vtt() {
+        let path = Path::new("my_title_C9ww_8cg_5g.en-US.vtt");
+
+        assert!(subtitle_path_matches_video_id(path, "C9ww_8cg_5g"));
+    }
+
+    #[test]
+    fn subtitle_path_matches_video_id_accepts_bare_id_vtt() {
+        let path = Path::new("C9ww_8cg_5g.vtt");
+
+        assert!(subtitle_path_matches_video_id(path, "C9ww_8cg_5g"));
+    }
+
+    #[test]
+    fn subtitle_path_matches_video_id_rejects_partial_or_non_vtt_matches() {
+        assert!(!subtitle_path_matches_video_id(
+            Path::new("prefixC9ww_8cg_5g.en.vtt"),
+            "C9ww_8cg_5g"
+        ));
+        assert!(!subtitle_path_matches_video_id(
+            Path::new("my_title_C9ww_8cg_5gextra.en.vtt"),
+            "C9ww_8cg_5g"
+        ));
+        assert!(!subtitle_path_matches_video_id(
+            Path::new("my_title_C9ww_8cg_5g.en.srt"),
+            "C9ww_8cg_5g"
+        ));
+    }
+
+    #[test]
+    fn find_subtitle_path_returns_matching_downloaded_vtt() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+        let expected_path = storage.videos_dir.join("title_C9ww_8cg_5g.en.vtt");
+
+        touch(&storage.videos_dir.join("title_abc123DEF45.en.vtt"));
+        touch(&expected_path);
+
+        assert_eq!(
+            storage.find_subtitle_path("C9ww_8cg_5g"),
+            Some(expected_path)
+        );
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }

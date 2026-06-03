@@ -249,6 +249,7 @@ fn debit_refresh_frogpoints() -> Result<i64, FrogpointsError> {
 
 fn spawn_video_download(
     runtime: Arc<Runtime>,
+    storage: Storage,
     video_id: String,
     video_path: PathBuf,
     miyoo_path: PathBuf,
@@ -258,7 +259,10 @@ fn spawn_video_download(
         if let Err(download_error) = download_video(&video_id, &video_path).await {
             error!("Failed to download video {}: {}", video_id, download_error);
         } else {
-            if let Err(convert_error) = convert_to_miyoo(&video_path, &miyoo_path).await {
+            let subtitle_path = storage.find_subtitle_path(&video_id);
+            if let Err(convert_error) =
+                convert_to_miyoo(&video_path, subtitle_path.as_deref(), &miyoo_path).await
+            {
                 error!(
                     "Failed to convert video {} for miyoo: {}",
                     video_id, convert_error
@@ -303,7 +307,10 @@ fn retry_missing_miyoo_conversions(runtime: Arc<Runtime>, storage: Storage) {
             if output_path.exists() {
                 continue;
             }
-            if let Err(convert_error) = convert_to_miyoo(&input_path, &output_path).await {
+            let subtitle_path = storage.find_subtitle_path(&video_id);
+            if let Err(convert_error) =
+                convert_to_miyoo(&input_path, subtitle_path.as_deref(), &output_path).await
+            {
                 error!(
                     "Failed to retry Miyoo conversion for video {}: {}",
                     video_id, convert_error
@@ -382,7 +389,13 @@ fn resolve_playback_path(
             // but still play the local file.
             let upgraded_path = storage.video_path(video_id, video_title);
             let miyoo_path = storage.miyoo_video_path(video_id, video_title);
-            spawn_video_download(runtime, video_id.to_string(), upgraded_path, miyoo_path);
+            spawn_video_download(
+                runtime,
+                storage.clone(),
+                video_id.to_string(),
+                upgraded_path,
+                miyoo_path,
+            );
             Some(path)
         }
         other => other,
@@ -415,6 +428,7 @@ fn toggle_watch_later_and_download(
             let miyoo_path = state.storage.miyoo_video_path(video_id, video_title);
             Some(spawn_video_download(
                 runtime.clone(),
+                state.storage.clone(),
                 video_id.to_string(),
                 video_path,
                 miyoo_path,
