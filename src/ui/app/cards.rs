@@ -542,6 +542,17 @@ pub(super) fn download_missing_thumbnails<'a>(
 
                         match response.bytes().await {
                             Ok(bytes) => {
+                                if let Some(parent) = path.parent() {
+                                    if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                                        warn!(
+                                            "Failed creating thumbnail directory {}: {}",
+                                            parent.display(),
+                                            error
+                                        );
+                                        return;
+                                    }
+                                }
+
                                 if let Err(error) = tokio::fs::write(&path, &bytes).await {
                                     warn!(
                                         "Failed writing thumbnail to {}: {}",

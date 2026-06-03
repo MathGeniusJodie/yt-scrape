@@ -57,6 +57,7 @@ pub enum TranscriptError {
 /// Returns [`TranscriptError`] when subtitle download, discovery, or parsing fails.
 pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String, TranscriptError> {
     let url = urls::watch_url(video_id);
+    tokio::fs::create_dir_all(work_dir).await?;
     let output_template = work_dir.join(format!("{}.%(ext)s", video_id));
 
     // Run yt-dlp to download auto-generated subtitles in json3 format.

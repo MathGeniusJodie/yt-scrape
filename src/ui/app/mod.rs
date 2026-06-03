@@ -851,19 +851,25 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
 
     let watch_later = storage.load_watch_later();
-    match storage.prune_cached_videos_not_in_watch_later(&watch_later) {
+    let videos = storage.load_videos();
+    let feed_video_ids = videos
+        .iter()
+        .map(|video| video.video_id().to_string())
+        .collect::<HashSet<_>>();
+
+    match storage.cleanup_unreferenced_cache_files(&watch_later, &feed_video_ids) {
         Ok(removed_count) if removed_count > 0 => {
-            info!("Removed {} cached videos not in watch-later", removed_count);
+            info!("Removed {} unreferenced cache artifacts", removed_count);
         }
         Ok(_) => {}
         Err(cleanup_error) => {
             warn!(
-                "Failed to clean up cached videos from watch-later state: {}",
+                "Failed to clean up unreferenced cache artifacts: {}",
                 cleanup_error
             );
         }
     }
-    let videos = storage.load_videos();
+
     retry_missing_miyoo_conversions(runtime.clone(), storage.clone());
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))

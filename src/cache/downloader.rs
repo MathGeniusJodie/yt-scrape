@@ -35,6 +35,9 @@ pub enum DownloadError {
 pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), DownloadError> {
     let url = urls::watch_url(video_id);
     let output_template = output_path.with_extension("%(ext)s");
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
 
     // Phase 1: Always download video + chapter/info metadata.
     // Keep this independent from subtitle fetching so subtitle rate limits don't fail downloads.
@@ -122,6 +125,10 @@ pub async fn convert_to_miyoo(
     subtitle_path: Option<&Path>,
     output_path: &Path,
 ) -> Result<(), DownloadError> {
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
     let video_filter = miyoo_video_filter(subtitle_path);
     let output = super::nice_command("ffmpeg")
         .arg("-y")

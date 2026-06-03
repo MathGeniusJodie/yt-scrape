@@ -9,8 +9,14 @@ use thiserror::Error;
 const MAX_TITLE_LENGTH: usize = 100;
 const WATCH_LATER_FILE: &str = "watch_later.json";
 const VIDEOS_CACHE_FILE: &str = "videos.json";
+const THUMBNAILS_DIR: &str = "thumbnails";
+const VIDEOS_DIR: &str = "videos";
+const MIYOO_DIR: &str = "miyoo";
 const VIDEO_SIDECARS_DIR: &str = "video_sidecars";
+const TRANSCRIPTS_WORK_DIR: &str = "transcripts_work";
 const VIDEO_SIDECAR_EXTENSION: &str = "json";
+const THUMBNAIL_EXTENSION: &str = "jpg";
+const INFO_JSON_EXTENSION: &str = "json";
 const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
 const SUBTITLE_EXTENSION: &str = "vtt";
 const YOUTUBE_VIDEO_ID_LENGTH: usize = 11;
@@ -65,6 +71,13 @@ fn video_id_from_stem(stem: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn is_valid_video_id(video_id: &str) -> bool {
+    video_id.len() == YOUTUBE_VIDEO_ID_LENGTH
+        && video_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
 }
 
 /// Reads and deserializes a JSON file, returning `None` on any failure.
@@ -123,6 +136,48 @@ fn subtitle_path_matches_video_id(path: &Path, video_id: &str) -> bool {
             .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'));
         before_match && after_match
     })
+}
+
+fn video_id_from_subtitle_path(path: &Path) -> Option<&str> {
+    if path.extension().and_then(OsStr::to_str) != Some(SUBTITLE_EXTENSION) {
+        return None;
+    }
+
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .and_then(|stem| stem.split('.').next())
+        .and_then(video_id_from_stem)
+}
+
+fn video_id_from_info_json_path(path: &Path) -> Option<&str> {
+    if path.extension().and_then(OsStr::to_str) != Some(INFO_JSON_EXTENSION) {
+        return None;
+    }
+
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|file_name| file_name.strip_suffix(".info.json"))
+        .and_then(video_id_from_stem)
+}
+
+fn video_id_from_thumbnail_path(path: &Path) -> Option<&str> {
+    if path.extension().and_then(OsStr::to_str) != Some(THUMBNAIL_EXTENSION) {
+        return None;
+    }
+
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .filter(|video_id| is_valid_video_id(video_id))
+}
+
+fn video_id_from_sidecar_path(path: &Path) -> Option<&str> {
+    if path.extension().and_then(OsStr::to_str) != Some(VIDEO_SIDECAR_EXTENSION) {
+        return None;
+    }
+
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .filter(|video_id| is_valid_video_id(video_id))
 }
 
 fn video_cache_preference(path: &Path) -> usize {
@@ -199,21 +254,13 @@ impl Storage {
     ///
     /// Returns an error if directory creation fails.
     pub fn new_at(data_dir: PathBuf, cache_dir: PathBuf) -> StorageResult<Self> {
-        let thumbnails_dir = cache_dir.join("thumbnails");
-        let videos_dir = cache_dir.join("videos");
-        let miyoo_dir = videos_dir.join("miyoo");
+        let thumbnails_dir = cache_dir.join(THUMBNAILS_DIR);
+        let videos_dir = cache_dir.join(VIDEOS_DIR);
+        let miyoo_dir = videos_dir.join(MIYOO_DIR);
         let video_sidecars_dir = cache_dir.join(VIDEO_SIDECARS_DIR);
-        let transcripts_work_dir = cache_dir.join("transcripts_work");
+        let transcripts_work_dir = cache_dir.join(TRANSCRIPTS_WORK_DIR);
 
-        std::fs::create_dir_all(&data_dir)?;
-        std::fs::create_dir_all(&cache_dir)?;
-        std::fs::create_dir_all(&thumbnails_dir)?;
-        std::fs::create_dir_all(&videos_dir)?;
-        std::fs::create_dir_all(&miyoo_dir)?;
-        std::fs::create_dir_all(&video_sidecars_dir)?;
-        std::fs::create_dir_all(&transcripts_work_dir)?;
-
-        Ok(Self {
+        let storage = Self {
             data_dir,
             cache_dir,
             thumbnails_dir,
@@ -221,7 +268,119 @@ impl Storage {
             miyoo_dir,
             video_sidecars_dir,
             transcripts_work_dir,
-        })
+        };
+        storage.ensure_directories()?;
+        Ok(storage)
+    }
+
+    fn ensure_directories(&self) -> StorageResult<()> {
+        std::fs::create_dir_all(&self.data_dir)?;
+        std::fs::create_dir_all(&self.cache_dir)?;
+        Self::ensure_owned_cache_dir(&self.thumbnails_dir)?;
+        Self::ensure_owned_cache_dir(&self.videos_dir)?;
+        Self::ensure_owned_cache_dir(&self.miyoo_dir)?;
+        Self::ensure_owned_cache_dir(&self.video_sidecars_dir)?;
+        Self::ensure_owned_cache_dir(&self.transcripts_work_dir)?;
+        Ok(())
+    }
+
+    fn ensure_owned_cache_dir(path: &Path) -> StorageResult<()> {
+        if path.exists() && !path.is_dir() {
+            std::fs::remove_file(path)?;
+        }
+        std::fs::create_dir_all(path)?;
+        Ok(())
+    }
+
+    fn remove_path(path: &Path) -> StorageResult<usize> {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+        Ok(1)
+    }
+
+    fn prune_directory_entries<F>(&self, dir: &Path, keep_entry: F) -> StorageResult<usize>
+    where
+        F: Fn(&Path) -> bool,
+    {
+        let mut removed_count = 0usize;
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if keep_entry(&path) {
+                continue;
+            }
+            removed_count += Self::remove_path(&path)?;
+        }
+        Ok(removed_count)
+    }
+
+    /// Removes cache artifacts that cannot be referenced by current app state.
+    ///
+    /// Downloaded video artifacts are kept only for Watch Later IDs. Card metadata artifacts such
+    /// as thumbnails and sidecars are kept only for IDs present in the currently loaded feed.
+    ///
+    /// # Arguments
+    ///
+    /// * `watch_later` - Video IDs allowed to keep downloaded media, subtitles, and info JSON.
+    /// * `feed_video_ids` - Video IDs allowed to keep card display artifacts.
+    ///
+    /// # Returns
+    ///
+    /// Number of files or directories removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cache directory creation, scanning, or deletion fails.
+    pub fn cleanup_unreferenced_cache_files(
+        &self,
+        watch_later: &HashSet<String>,
+        feed_video_ids: &HashSet<String>,
+    ) -> StorageResult<usize> {
+        self.ensure_directories()?;
+
+        let mut removed_count = self.prune_directory_entries(&self.cache_dir, |path| {
+            let name = path.file_name().and_then(OsStr::to_str);
+            (path.is_file() && name == Some(VIDEOS_CACHE_FILE))
+                || path.is_dir()
+                    && matches!(
+                        name,
+                        Some(THUMBNAILS_DIR)
+                            | Some(VIDEOS_DIR)
+                            | Some(VIDEO_SIDECARS_DIR)
+                            | Some(TRANSCRIPTS_WORK_DIR)
+                    )
+        })?;
+
+        removed_count += self.prune_directory_entries(&self.thumbnails_dir, |path| {
+            path.is_file()
+                && video_id_from_thumbnail_path(path)
+                    .is_some_and(|video_id| feed_video_ids.contains(video_id))
+        })?;
+        removed_count += self.prune_directory_entries(&self.video_sidecars_dir, |path| {
+            path.is_file()
+                && video_id_from_sidecar_path(path)
+                    .is_some_and(|video_id| feed_video_ids.contains(video_id))
+        })?;
+        removed_count += self.prune_directory_entries(&self.miyoo_dir, |path| {
+            path.is_file()
+                && cached_video_id_for_path(path)
+                    .is_some_and(|video_id| watch_later.contains(video_id))
+        })?;
+        removed_count += self.prune_directory_entries(&self.videos_dir, |path| {
+            let name = path.file_name().and_then(OsStr::to_str);
+            name == Some(MIYOO_DIR)
+                || path.is_file()
+                    && (cached_video_id_for_path(path)
+                        .or_else(|| video_id_from_subtitle_path(path))
+                        .or_else(|| video_id_from_info_json_path(path)))
+                    .is_some_and(|video_id| watch_later.contains(video_id))
+        })?;
+        removed_count += self.prune_directory_entries(&self.transcripts_work_dir, |_| false)?;
+
+        self.ensure_directories()?;
+        Ok(removed_count)
     }
 
     /// Returns the transcript extraction work directory path.
@@ -412,40 +571,6 @@ impl Storage {
         Ok(removed_count)
     }
 
-    /// Removes cached video files that are no longer in watch later.
-    ///
-    /// # Arguments
-    ///
-    /// * `watch_later` - Set of video IDs that are allowed to remain in the video cache folder.
-    ///
-    /// # Returns
-    ///
-    /// Number of cached video files removed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if directory scanning or file deletion fails.
-    pub fn prune_cached_videos_not_in_watch_later(
-        &self,
-        watch_later: &HashSet<String>,
-    ) -> StorageResult<usize> {
-        let mut removed_count = 0usize;
-        for (path, id) in self.scan_video_files()? {
-            if !watch_later.contains(&id) {
-                std::fs::remove_file(path)?;
-                removed_count += 1;
-            }
-        }
-        if let Ok(miyoo_files) = Self::scan_dir_video_files(&self.miyoo_dir) {
-            for (path, id) in miyoo_files {
-                if !watch_later.contains(&id) {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        }
-        Ok(removed_count)
-    }
-
     fn video_sidecar_path(&self, video_id: &str) -> PathBuf {
         self.video_sidecars_dir
             .join(format!("{video_id}.{VIDEO_SIDECAR_EXTENSION}"))
@@ -504,6 +629,9 @@ impl Storage {
     ///
     /// Saved IDs. If file loading or parsing fails, an empty set is returned.
     pub fn load_watch_later(&self) -> HashSet<String> {
+        if let Err(error) = self.ensure_directories() {
+            warn!("Failed to recreate storage directories before loading watch-later: {error}");
+        }
         let path = self.data_dir.join(WATCH_LATER_FILE);
         try_load_json_file::<WatchLaterData>(&path, "watch-later file")
             .map(|data| data.video_ids.into_iter().collect())
@@ -520,6 +648,7 @@ impl Storage {
     ///
     /// Returns an error when serialization or file writes fail.
     pub fn save_watch_later(&self, video_ids: &HashSet<String>) -> StorageResult<()> {
+        self.ensure_directories()?;
         let path = self.data_dir.join(WATCH_LATER_FILE);
         let mut sorted_video_ids = video_ids.iter().cloned().collect::<Vec<_>>();
         sorted_video_ids.sort_unstable();
@@ -551,6 +680,9 @@ impl Storage {
     ///
     /// Cached videos, or an empty vector if cache loading/parsing fails.
     pub fn load_videos(&self) -> Vec<Video> {
+        if let Err(error) = self.ensure_directories() {
+            warn!("Failed to recreate storage directories before loading videos: {error}");
+        }
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
         let mut videos: Vec<Video> = try_load_json_file(&path, "videos cache").unwrap_or_default();
         self.hydrate_videos_from_sidecars(&mut videos);
@@ -567,6 +699,7 @@ impl Storage {
     ///
     /// Returns an error when serialization or file writes fail.
     pub fn save_videos(&self, videos: &[Video]) -> StorageResult<()> {
+        self.ensure_directories()?;
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
         let json = serde_json::to_string_pretty(videos)?;
         std::fs::write(path, json)?;
@@ -590,6 +723,7 @@ impl Storage {
         transcript: Option<&str>,
         ai_summary: Option<&str>,
     ) -> StorageResult<()> {
+        self.ensure_directories()?;
         let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
         if let Some(transcript) = transcript {
             sidecar.transcript = Some(transcript.to_string());
@@ -611,6 +745,7 @@ impl Storage {
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
     pub fn save_video_watched(&self, video_id: &str, watched: bool) -> StorageResult<()> {
+        self.ensure_directories()?;
         let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
         sidecar.watched = watched;
         self.write_video_sidecar(video_id, &sidecar)
@@ -625,6 +760,7 @@ mod tests {
     };
     use crate::data::Video;
     use chrono::{DateTime, Utc};
+    use std::collections::HashSet;
     use std::fs::File;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -782,23 +918,101 @@ mod tests {
     }
 
     #[test]
-    fn prune_cached_videos_not_in_watch_later_keeps_only_watch_later_files() {
+    fn cleanup_unreferenced_cache_files_keeps_only_state_referenced_cache_artifacts() {
         let temp_dir = create_unique_temp_dir();
         let storage = create_test_storage(&temp_dir);
 
-        touch(&storage.videos_dir.join("keep_C9ww_8cg_5g.mkv"));
-        touch(&storage.videos_dir.join("remove_abc123DEF45.mp4"));
-        touch(&storage.videos_dir.join("ignore.txt"));
+        let valid_video_id = "C9ww_8cg_5g";
+        let stale_video_id = "abc123DEF45";
+        let removed_paths = [
+            storage.cache_dir.join("stray.tmp"),
+            storage.thumbnails_dir.join("short.jpg"),
+            storage.thumbnails_dir.join(format!("{valid_video_id}.png")),
+            storage.thumbnails_dir.join(format!("{stale_video_id}.jpg")),
+            storage.videos_dir.join("notes.txt"),
+            storage.videos_dir.join("bad_video_name.mkv"),
+            storage
+                .videos_dir
+                .join(format!("stale_{stale_video_id}.mkv")),
+            storage
+                .videos_dir
+                .join(format!("stale_{stale_video_id}.en.vtt")),
+            storage
+                .videos_dir
+                .join(format!("stale_{stale_video_id}.info.json")),
+            storage.miyoo_dir.join("bad_video_name.mp4"),
+            storage
+                .miyoo_dir
+                .join(format!("stale_{stale_video_id}.mp4")),
+            storage.video_sidecars_dir.join("bad.json"),
+            storage
+                .video_sidecars_dir
+                .join(format!("{stale_video_id}.json")),
+            storage
+                .transcripts_work_dir
+                .join(format!("{valid_video_id}.en.json3")),
+        ];
+        let kept_paths = [
+            storage.cache_dir.join(VIDEOS_CACHE_FILE),
+            storage.thumbnails_dir.join(format!("{valid_video_id}.jpg")),
+            storage
+                .videos_dir
+                .join(format!("title_{valid_video_id}.mkv")),
+            storage
+                .videos_dir
+                .join(format!("title_{valid_video_id}.en.vtt")),
+            storage
+                .videos_dir
+                .join(format!("title_{valid_video_id}.info.json")),
+            storage
+                .miyoo_dir
+                .join(format!("title_{valid_video_id}.mp4")),
+            storage
+                .video_sidecars_dir
+                .join(format!("{valid_video_id}.json")),
+        ];
 
-        let watch_later = std::collections::HashSet::from(["C9ww_8cg_5g".to_string()]);
+        for path in removed_paths.iter().chain(kept_paths.iter()) {
+            touch(path);
+        }
+        std::fs::create_dir_all(storage.cache_dir.join("unknown_dir"))
+            .expect("unknown cache dir should be creatable");
+
+        let watch_later = HashSet::from([valid_video_id.to_string()]);
+        let feed_video_ids = HashSet::from([valid_video_id.to_string()]);
         let removed_count = storage
-            .prune_cached_videos_not_in_watch_later(&watch_later)
-            .expect("prune should succeed");
+            .cleanup_unreferenced_cache_files(&watch_later, &feed_video_ids)
+            .expect("cleanup should succeed");
 
-        assert_eq!(removed_count, 1);
-        assert!(storage.find_video_path("C9ww_8cg_5g").is_some());
-        assert!(storage.find_video_path("abc123DEF45").is_none());
-        assert!(storage.videos_dir.join("ignore.txt").exists());
+        assert_eq!(removed_count, removed_paths.len() + 1);
+        for path in removed_paths {
+            assert!(!path.exists(), "expected {} to be removed", path.display());
+        }
+        for path in kept_paths {
+            assert!(path.exists(), "expected {} to be kept", path.display());
+        }
+        assert!(!storage.cache_dir.join("unknown_dir").exists());
+        assert!(storage.transcripts_work_dir.exists());
+
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn save_videos_recreates_missing_cache_directories() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+        std::fs::remove_dir_all(&storage.cache_dir).expect("cache dir should be removable");
+
+        storage
+            .save_videos(&[sample_video("C9ww_8cg_5g")])
+            .expect("saving videos should recreate cache directories");
+
+        assert!(storage.cache_dir.join(VIDEOS_CACHE_FILE).exists());
+        assert!(storage.thumbnails_dir.exists());
+        assert!(storage.videos_dir.exists());
+        assert!(storage.miyoo_dir.exists());
+        assert!(storage.video_sidecars_dir.exists());
+        assert!(storage.transcripts_work_dir.exists());
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
