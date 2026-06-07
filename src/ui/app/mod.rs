@@ -348,12 +348,12 @@ fn charge_leisure_frogpoint_if_needed() {
         }
     };
 
-    if recent_svg_modification {
-        info!("Recent SVG modification detected; no leisure mpv minute charged");
+    if !mpv_window_exists() {
         return;
     }
-
-    if !mpv_window_exists() {
+    
+    if recent_svg_modification {
+        info!("Recent SVG modification detected; no leisure mpv minute charged");
         return;
     }
 
