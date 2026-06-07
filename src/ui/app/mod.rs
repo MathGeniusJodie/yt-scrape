@@ -18,8 +18,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
@@ -195,7 +198,12 @@ struct AppContext {
 const CARD_WIDTH: i32 = 320;
 const CARD_SPACING: i32 = 16;
 const FROGPOINTS_REFRESH_COST: i64 = 10;
+const FROGPOINTS_LEISURE_COST: i64 = 1;
+const FROGPOINTS_LEISURE_IDLE_SECONDS: u64 = 120;
+const FROGPOINTS_LEISURE_INTERVAL_SECONDS: u32 = 60;
 const FROGPOINTS_RELATIVE_PATH: &[&str] = &["Desktop", "RemoteVault", "frogpoints.md"];
+const SVG_TEMPLATE_RELATIVE_PATH: &[&str] = &["Desktop", "allfiles", "templates"];
+static FROGPOINTS_LEISURE_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Error)]
 enum FrogpointsError {
@@ -227,12 +235,24 @@ fn frogpoints_path() -> Result<PathBuf, FrogpointsError> {
     Ok(path)
 }
 
-fn debit_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
-    let contents = fs::read_to_string(path).map_err(FrogpointsError::Read)?;
-    let current = contents
+fn svg_template_path() -> Result<PathBuf, FrogpointsError> {
+    let mut path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(FrogpointsError::MissingHome)?;
+    path.extend(SVG_TEMPLATE_RELATIVE_PATH);
+    Ok(path)
+}
+
+fn read_frogpoints(path: &Path) -> Result<i64, FrogpointsError> {
+    fs::read_to_string(path)
+        .map_err(FrogpointsError::Read)?
         .trim()
         .parse::<i64>()
-        .map_err(FrogpointsError::InvalidNumber)?;
+        .map_err(FrogpointsError::InvalidNumber)
+}
+
+fn debit_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
+    let current = read_frogpoints(path)?;
 
     if current < cost {
         return Err(FrogpointsError::Insufficient {
@@ -246,9 +266,123 @@ fn debit_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
     Ok(remaining)
 }
 
+fn decrement_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
+    let remaining = read_frogpoints(path)? - cost;
+    fs::write(path, format!("{remaining}\n")).map_err(FrogpointsError::Write)?;
+    Ok(remaining)
+}
+
 fn debit_refresh_frogpoints() -> Result<i64, FrogpointsError> {
     let path = frogpoints_path()?;
     debit_frogpoints(&path, FROGPOINTS_REFRESH_COST)
+}
+
+fn has_recent_svg_modification(
+    template_dir: &Path,
+    idle_duration: Duration,
+) -> Result<bool, std::io::Error> {
+    let cutoff = SystemTime::now()
+        .checked_sub(idle_duration)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut pending_dirs = vec![template_dir.to_path_buf()];
+
+    while let Some(dir) = pending_dirs.pop() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending_dirs.push(entry.path());
+                continue;
+            }
+
+            let is_svg = entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+            if is_svg && entry.metadata()?.modified()? > cutoff {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn mpv_window_exists() -> bool {
+    match Command::new("xdotool")
+        .args(["search", "--class", "mpv"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(error) => {
+            warn!("Failed to query mpv windows with xdotool: {}", error);
+            false
+        }
+    }
+}
+
+fn charge_leisure_frogpoint_if_needed() {
+    let template_dir = match svg_template_path() {
+        Ok(path) => path,
+        Err(error) => {
+            warn!("Failed to locate SVG template directory: {}", error);
+            return;
+        }
+    };
+    let recent_svg_modification = match has_recent_svg_modification(
+        &template_dir,
+        Duration::from_secs(FROGPOINTS_LEISURE_IDLE_SECONDS),
+    ) {
+        Ok(recent_svg_modification) => recent_svg_modification,
+        Err(error) => {
+            warn!(
+                "Failed to inspect SVG template directory {}: {}",
+                template_dir.display(),
+                error
+            );
+            return;
+        }
+    };
+
+    if recent_svg_modification {
+        info!("Recent SVG modification detected; no leisure mpv minute charged");
+        return;
+    }
+
+    if !mpv_window_exists() {
+        return;
+    }
+
+    let path = match frogpoints_path() {
+        Ok(path) => path,
+        Err(error) => {
+            warn!("Failed to locate frogpoints file: {}", error);
+            return;
+        }
+    };
+
+    match decrement_frogpoints(&path, FROGPOINTS_LEISURE_COST) {
+        Ok(remaining) => info!("Leisure mpv minute charged; {remaining} frogpoints remaining"),
+        Err(error) => warn!("Failed to charge leisure frogpoint: {}", error),
+    }
+}
+
+fn start_frogpoints_leisure_monitor() {
+    if FROGPOINTS_LEISURE_MONITOR_STARTED
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    glib::timeout_add_seconds_local(FROGPOINTS_LEISURE_INTERVAL_SECONDS, || {
+        charge_leisure_frogpoint_if_needed();
+        glib::ControlFlow::Continue
+    });
 }
 
 fn spawn_video_download(
@@ -1054,6 +1188,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         .default_width(1200)
         .default_height(800)
         .build();
+    start_frogpoints_leisure_monitor();
 
     let css_provider = gtk::CssProvider::new();
     if let Err(css_error) = css_provider.load_from_data(include_bytes!("../style.css")) {
@@ -1392,9 +1527,9 @@ fn update_watch_later_badge(badge: &Label, count: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        debit_frogpoints, flow_column_count_for_viewport, flow_width_for_viewport,
-        usable_viewport_width, AppState, FrogpointsError, CARD_SPACING, CARD_WIDTH,
-        FROGPOINTS_REFRESH_COST,
+        debit_frogpoints, decrement_frogpoints, flow_column_count_for_viewport,
+        flow_width_for_viewport, has_recent_svg_modification, usable_viewport_width, AppState,
+        FrogpointsError, CARD_SPACING, CARD_WIDTH, FROGPOINTS_REFRESH_COST,
     };
     use crate::cache::Storage;
     use crate::data::Video;
@@ -1536,6 +1671,48 @@ mod tests {
         );
 
         std::fs::remove_file(path).expect("remove test frogpoints file");
+    }
+
+    #[test]
+    fn decrement_frogpoints_allows_negative_balances() {
+        let path = temporary_frogpoints_path("decrement");
+        std::fs::write(&path, "0").expect("write test frogpoints file");
+
+        let remaining = decrement_frogpoints(&path, 1).expect("decrement frogpoints");
+
+        assert_eq!(remaining, -1);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
+            "-1\n"
+        );
+
+        std::fs::remove_file(path).expect("remove test frogpoints file");
+    }
+
+    #[test]
+    fn has_recent_svg_modification_ignores_non_svg_files() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.root.join("not-svg.txt"), "fresh").expect("write non-svg file");
+
+        let has_recent_svg =
+            has_recent_svg_modification(&dirs.root, std::time::Duration::from_secs(120))
+                .expect("scan temp directory");
+
+        assert!(!has_recent_svg);
+    }
+
+    #[test]
+    fn has_recent_svg_modification_finds_nested_svg_files_case_insensitively() {
+        let dirs = TestDirs::new();
+        let nested_dir = dirs.root.join("nested");
+        std::fs::create_dir_all(&nested_dir).expect("create nested test directory");
+        std::fs::write(nested_dir.join("work.SVG"), "<svg />").expect("write svg file");
+
+        let has_recent_svg =
+            has_recent_svg_modification(&dirs.root, std::time::Duration::from_secs(120))
+                .expect("scan temp directory");
+
+        assert!(has_recent_svg);
     }
 
     fn test_video(video_id: &str) -> Video {
