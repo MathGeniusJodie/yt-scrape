@@ -563,7 +563,11 @@ mod tests {
         let dirs = TestDirs::new();
         let storage = Storage::new_at(dirs.data_dir(), dirs.cache_dir())
             .expect("test storage must initialize");
-        let state = AppState::new(videos, HashSet::new(), storage);
+        let feed_video_ids = videos
+            .iter()
+            .map(|video| video.video_id().to_string())
+            .collect();
+        let state = AppState::new(videos, feed_video_ids, HashSet::new(), storage);
         (state, dirs)
     }
 

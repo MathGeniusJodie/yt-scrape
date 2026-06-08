@@ -1,4 +1,6 @@
 use crate::data::{Video, WatchLaterData};
+use crate::urls;
+use chrono::{DateTime, NaiveDate, Utc};
 use log::warn;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -9,6 +11,7 @@ use thiserror::Error;
 const MAX_TITLE_LENGTH: usize = 100;
 const WATCH_LATER_FILE: &str = "watch_later.json";
 const VIDEOS_CACHE_FILE: &str = "videos.json";
+const FEED_VIDEO_IDS_CACHE_FILE: &str = "feed_video_ids.json";
 const THUMBNAILS_DIR: &str = "thumbnails";
 const VIDEOS_DIR: &str = "videos";
 const MIYOO_DIR: &str = "miyoo";
@@ -51,10 +54,73 @@ struct VideoMetadataSidecar {
     watched: bool,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct VideoIdsData {
+    video_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YtDlpInfoJson {
+    id: Option<String>,
+    title: Option<String>,
+    channel_id: Option<String>,
+    channel: Option<String>,
+    uploader: Option<String>,
+    upload_date: Option<String>,
+    timestamp: Option<i64>,
+    release_timestamp: Option<i64>,
+    thumbnail: Option<String>,
+    duration: Option<f64>,
+}
+
 impl VideoMetadataSidecar {
     fn is_empty(&self) -> bool {
         self.transcript.is_none() && self.ai_summary.is_none() && !self.watched
     }
+}
+
+impl YtDlpInfoJson {
+    fn into_video(self, video_id: &str) -> Option<Video> {
+        if self.id.as_deref().is_some_and(|id| id != video_id) {
+            return None;
+        }
+
+        let published = self
+            .release_timestamp
+            .or(self.timestamp)
+            .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+            .or_else(|| published_from_upload_date(self.upload_date.as_deref()))?;
+        let duration_seconds = self.duration.and_then(duration_to_seconds);
+
+        Some(Video::new(
+            video_id.to_string(),
+            self.channel_id.unwrap_or_default(),
+            self.channel
+                .or(self.uploader)
+                .unwrap_or_else(|| "Unknown channel".to_string()),
+            self.title.unwrap_or_else(|| "Untitled".to_string()),
+            published,
+            self.thumbnail
+                .unwrap_or_else(|| urls::thumbnail_url(video_id)),
+            duration_seconds,
+        ))
+    }
+}
+
+fn duration_to_seconds(duration: f64) -> Option<u32> {
+    if duration.is_finite() && duration >= 0.0 && duration <= f64::from(u32::MAX) {
+        Some(duration.round() as u32)
+    } else {
+        None
+    }
+}
+
+fn published_from_upload_date(upload_date: Option<&str>) -> Option<DateTime<Utc>> {
+    NaiveDate::parse_from_str(upload_date?, "%Y%m%d")
+        .ok()?
+        .and_hms_opt(0, 0, 0)?
+        .and_local_timezone(Utc)
+        .single()
 }
 
 fn video_id_from_stem(stem: &str) -> Option<&str> {
@@ -340,9 +406,18 @@ impl Storage {
     ) -> StorageResult<usize> {
         self.ensure_directories()?;
 
+        let retained_card_video_ids = feed_video_ids
+            .union(watch_later)
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+
         let mut removed_count = self.prune_directory_entries(&self.cache_dir, |path| {
             let name = path.file_name().and_then(OsStr::to_str);
-            (path.is_file() && name == Some(VIDEOS_CACHE_FILE))
+            (path.is_file()
+                && matches!(
+                    name,
+                    Some(VIDEOS_CACHE_FILE) | Some(FEED_VIDEO_IDS_CACHE_FILE)
+                ))
                 || path.is_dir()
                     && matches!(
                         name,
@@ -356,12 +431,12 @@ impl Storage {
         removed_count += self.prune_directory_entries(&self.thumbnails_dir, |path| {
             path.is_file()
                 && video_id_from_thumbnail_path(path)
-                    .is_some_and(|video_id| feed_video_ids.contains(video_id))
+                    .is_some_and(|video_id| retained_card_video_ids.contains(video_id))
         })?;
         removed_count += self.prune_directory_entries(&self.video_sidecars_dir, |path| {
             path.is_file()
                 && video_id_from_sidecar_path(path)
-                    .is_some_and(|video_id| feed_video_ids.contains(video_id))
+                    .is_some_and(|video_id| retained_card_video_ids.contains(video_id))
         })?;
         removed_count += self.prune_directory_entries(&self.miyoo_dir, |path| {
             path.is_file()
@@ -704,6 +779,83 @@ impl Storage {
         let json = serde_json::to_string_pretty(videos)?;
         std::fs::write(path, json)?;
         Ok(())
+    }
+
+    /// Loads cached IDs for the current feed.
+    ///
+    /// # Returns
+    ///
+    /// Saved feed IDs, or `None` if no feed-ID cache exists or the cache cannot be read.
+    pub fn load_feed_video_ids(&self) -> Option<Vec<String>> {
+        if let Err(error) = self.ensure_directories() {
+            warn!("Failed to recreate storage directories before loading feed IDs: {error}");
+        }
+        let path = self.cache_dir.join(FEED_VIDEO_IDS_CACHE_FILE);
+        try_load_json_file::<VideoIdsData>(&path, "feed video IDs cache").map(|data| data.video_ids)
+    }
+
+    /// Persists IDs that belong to the current feed.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_ids` - Current feed video IDs, in display order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization or file writes fail.
+    pub fn save_feed_video_ids(&self, video_ids: &[String]) -> StorageResult<()> {
+        self.ensure_directories()?;
+        let path = self.cache_dir.join(FEED_VIDEO_IDS_CACHE_FILE);
+        let data = VideoIdsData {
+            video_ids: video_ids.to_vec(),
+        };
+        let json = serde_json::to_string_pretty(&data)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Rebuilds missing Watch Later video records from cached `yt-dlp` info sidecars.
+    ///
+    /// # Arguments
+    ///
+    /// * `watch_later` - Saved Watch Later IDs to repair.
+    /// * `known_video_ids` - Video IDs already present in `videos.json`.
+    ///
+    /// # Returns
+    ///
+    /// Videos reconstructed from local `.info.json` files.
+    pub fn load_missing_watch_later_videos_from_info_json(
+        &self,
+        watch_later: &HashSet<String>,
+        known_video_ids: &HashSet<String>,
+    ) -> Vec<Video> {
+        let entries = match std::fs::read_dir(&self.videos_dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                warn!(
+                    "Failed to scan watch-later info JSON directory {}: {}",
+                    self.videos_dir.display(),
+                    error
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut repaired_videos = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let video_id = video_id_from_info_json_path(&path)?;
+                if known_video_ids.contains(video_id) || !watch_later.contains(video_id) {
+                    return None;
+                }
+                let info = try_load_json_file::<YtDlpInfoJson>(&path, "yt-dlp info JSON")?;
+                let video = info.into_video(video_id)?;
+                Some(video)
+            })
+            .collect::<Vec<_>>();
+        repaired_videos.sort_by_key(|video| std::cmp::Reverse(video.published()));
+        repaired_videos
     }
 
     /// Persists transcript and/or AI summary in a per-video sidecar file.
@@ -1070,6 +1222,80 @@ mod tests {
         assert_eq!(sidecar.transcript.as_deref(), Some("Transcript body"));
         assert_eq!(sidecar.ai_summary.as_deref(), Some("Summary body"));
 
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn feed_video_ids_round_trip_in_display_order() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+        let ids = vec!["b".to_string(), "a".to_string(), "c".to_string()];
+
+        storage
+            .save_feed_video_ids(&ids)
+            .expect("feed IDs should save");
+
+        assert_eq!(storage.load_feed_video_ids(), Some(ids));
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn missing_watch_later_videos_are_rebuilt_from_info_json() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+        let video_id = "C9ww_8cg_5g";
+        std::fs::write(
+            storage
+                .videos_dir
+                .join(format!("Local Title_{video_id}.info.json")),
+            r#"{
+                "id": "C9ww_8cg_5g",
+                "title": "Local Title",
+                "channel_id": "UC123",
+                "channel": "Local Channel",
+                "upload_date": "20240501",
+                "thumbnail": "https://example.com/local.jpg",
+                "duration": 91.4
+            }"#,
+        )
+        .expect("info JSON should be writable");
+
+        let repaired = storage.load_missing_watch_later_videos_from_info_json(
+            &HashSet::from([video_id.to_string()]),
+            &HashSet::new(),
+        );
+
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0].video_id(), video_id);
+        assert_eq!(repaired[0].title(), "Local Title");
+        assert_eq!(repaired[0].channel_id(), "UC123");
+        assert_eq!(repaired[0].channel_name(), "Local Channel");
+        assert_eq!(repaired[0].duration_seconds(), Some(91));
+        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
+    }
+
+    #[test]
+    fn missing_watch_later_repair_skips_known_or_unlisted_ids() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(&temp_dir);
+        let video_id = "C9ww_8cg_5g";
+        std::fs::write(
+            storage
+                .videos_dir
+                .join(format!("Known_{video_id}.info.json")),
+            r#"{"id":"C9ww_8cg_5g","title":"Known","upload_date":"20240501"}"#,
+        )
+        .expect("info JSON should be writable");
+
+        assert!(storage
+            .load_missing_watch_later_videos_from_info_json(
+                &HashSet::from([video_id.to_string()]),
+                &HashSet::from([video_id.to_string()]),
+            )
+            .is_empty());
+        assert!(storage
+            .load_missing_watch_later_videos_from_info_json(&HashSet::new(), &HashSet::new())
+            .is_empty());
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 

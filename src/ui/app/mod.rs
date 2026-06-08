@@ -55,12 +55,16 @@ pub(super) enum CacheVideoError {
 }
 
 impl AppState {
-    fn new(videos: Vec<Video>, watch_later: HashSet<String>, storage: Storage) -> Self {
+    fn new(
+        videos: Vec<Video>,
+        feed_video_ids: Vec<String>,
+        watch_later: HashSet<String>,
+        storage: Storage,
+    ) -> Self {
         let videos = videos
             .into_iter()
             .map(|video| (video.video_id().to_string(), video))
             .collect::<IndexMap<_, _>>();
-        let feed_video_ids = videos.keys().cloned().collect();
         Self {
             videos,
             feed_video_ids,
@@ -76,6 +80,34 @@ impl AppState {
             .map(|video| (video.video_id().to_string(), video))
             .collect();
         self.feed_video_ids = self.videos.keys().cloned().collect();
+    }
+
+    fn set_refreshed_feed_videos(&mut self, videos: Vec<Video>) {
+        let incoming_video_id_set = videos
+            .iter()
+            .map(|video| video.video_id().to_string())
+            .collect::<HashSet<_>>();
+        let incoming_video_ids = videos
+            .iter()
+            .map(|video| video.video_id().to_string())
+            .collect::<Vec<_>>();
+        let preserved_watch_later_videos = self
+            .videos
+            .iter()
+            .filter(|(video_id, _)| {
+                self.watch_later.contains(video_id.as_str())
+                    && !incoming_video_id_set.contains(*video_id)
+            })
+            .map(|(_, video)| video.clone())
+            .collect::<Vec<_>>();
+
+        self.set_videos(videos);
+        self.videos.extend(
+            preserved_watch_later_videos
+                .into_iter()
+                .map(|video| (video.video_id().to_string(), video)),
+        );
+        self.feed_video_ids = incoming_video_ids.into_iter().collect();
     }
 
     fn set_search_results(&mut self, videos: Vec<Video>) {
@@ -351,7 +383,7 @@ fn charge_leisure_frogpoint_if_needed() {
     if !mpv_window_exists() {
         return;
     }
-    
+
     if recent_svg_modification {
         info!("Recent SVG modification detected; no leisure mpv minute charged");
         return;
@@ -509,6 +541,23 @@ fn persist_videos(runtime: Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
             }
             Err(join_error) => {
                 error!("Video cache persistence task failed: {}", join_error);
+            }
+        }
+    });
+}
+
+fn persist_feed_video_ids(runtime: Arc<Runtime>, storage: Storage, video_ids: Vec<String>) {
+    runtime.spawn(async move {
+        match tokio::task::spawn_blocking(move || storage.save_feed_video_ids(&video_ids)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(save_error)) => {
+                error!("Failed to persist refreshed feed video IDs: {}", save_error);
+            }
+            Err(join_error) => {
+                error!(
+                    "Failed to join refreshed feed ID persistence task: {}",
+                    join_error
+                );
             }
         }
     });
@@ -936,14 +985,25 @@ fn spawn_refreshed_videos_apply(
         if let Ok(mut videos) = videos_rx.recv().await {
             let mut state = state_rc.borrow_mut();
             state.storage.hydrate_videos_from_sidecars(&mut videos);
-            let videos_for_persistence = videos.clone();
+            let feed_video_ids_for_persistence = videos
+                .iter()
+                .map(|video| video.video_id().to_string())
+                .collect::<Vec<_>>();
             let storage_for_persistence = state.storage.clone();
+            let feed_id_storage_for_persistence = state.storage.clone();
             let runtime_for_persistence = ui_context.runtime.clone();
-            state.set_videos(videos);
+            let feed_id_runtime_for_persistence = ui_context.runtime.clone();
+            state.set_refreshed_feed_videos(videos);
+            let videos_for_persistence = state.videos.values().cloned().collect::<Vec<_>>();
             persist_videos(
                 runtime_for_persistence,
                 storage_for_persistence,
                 videos_for_persistence,
+            );
+            persist_feed_video_ids(
+                feed_id_runtime_for_persistence,
+                feed_id_storage_for_persistence,
+                feed_video_ids_for_persistence,
             );
 
             let thumbnail_completion = download_missing_thumbnails(
@@ -1148,13 +1208,42 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
 
     let watch_later = storage.load_watch_later();
-    let videos = storage.load_videos();
-    let feed_video_ids = videos
+    let mut videos = storage.load_videos();
+    let loaded_feed_video_ids = storage.load_feed_video_ids();
+    let should_seed_feed_video_ids = loaded_feed_video_ids.is_none();
+    let mut feed_video_ids = loaded_feed_video_ids.unwrap_or_else(|| {
+        videos
+            .iter()
+            .map(|video| video.video_id().to_string())
+            .collect()
+    });
+    let known_video_ids = videos
         .iter()
         .map(|video| video.video_id().to_string())
         .collect::<HashSet<_>>();
+    let repaired_watch_later_videos =
+        storage.load_missing_watch_later_videos_from_info_json(&watch_later, &known_video_ids);
+    if !repaired_watch_later_videos.is_empty() {
+        info!(
+            "Repaired {} missing watch-later video metadata records",
+            repaired_watch_later_videos.len()
+        );
+        videos.extend(repaired_watch_later_videos);
+        if let Err(save_error) = storage.save_videos(&videos) {
+            warn!(
+                "Failed to persist repaired watch-later video metadata: {}",
+                save_error
+            );
+        }
+    }
+    if should_seed_feed_video_ids {
+        if let Err(save_error) = storage.save_feed_video_ids(&feed_video_ids) {
+            warn!("Failed to persist initial feed video IDs: {}", save_error);
+        }
+    }
+    let feed_video_id_set = feed_video_ids.iter().cloned().collect::<HashSet<_>>();
 
-    match storage.cleanup_unreferenced_cache_files(&watch_later, &feed_video_ids) {
+    match storage.cleanup_unreferenced_cache_files(&watch_later, &feed_video_id_set) {
         Ok(removed_count) if removed_count > 0 => {
             info!("Removed {} unreferenced cache artifacts", removed_count);
         }
@@ -1179,7 +1268,13 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         }
     };
 
-    let state = Rc::new(RefCell::new(AppState::new(videos, watch_later, storage)));
+    feed_video_ids.retain(|video_id| known_video_ids.contains(video_id));
+    let state = Rc::new(RefCell::new(AppState::new(
+        videos,
+        feed_video_ids,
+        watch_later,
+        storage,
+    )));
     let selected_video: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     let window = ApplicationWindow::builder()
@@ -1736,13 +1831,21 @@ mod tests {
         )
     }
 
+    fn test_state(videos: Vec<Video>, watch_later: HashSet<String>, dirs: &TestDirs) -> AppState {
+        let feed_video_ids = videos
+            .iter()
+            .map(|video| video.video_id().to_string())
+            .collect();
+        AppState::new(videos, feed_video_ids, watch_later, test_storage(dirs))
+    }
+
     #[test]
     fn app_state_new_keeps_insertion_order() {
         let dirs = TestDirs::new();
-        let state = AppState::new(
+        let state = test_state(
             vec![test_video("a"), test_video("b"), test_video("c")],
             HashSet::new(),
-            test_storage(&dirs),
+            &dirs,
         );
         let ids = state.videos.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(ids, vec!["a", "b", "c"]);
@@ -1751,7 +1854,7 @@ mod tests {
     #[test]
     fn app_state_set_videos_deduplicates_by_video_id() {
         let dirs = TestDirs::new();
-        let mut state = AppState::new(Vec::new(), HashSet::new(), test_storage(&dirs));
+        let mut state = test_state(Vec::new(), HashSet::new(), &dirs);
         state.set_videos(vec![test_video("dup"), test_video("x"), test_video("dup")]);
         let ids = state.videos.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(ids, vec!["dup", "x"]);
@@ -1762,10 +1865,10 @@ mod tests {
     #[test]
     fn app_state_search_results_do_not_change_feed_ids() {
         let dirs = TestDirs::new();
-        let mut state = AppState::new(
+        let mut state = test_state(
             vec![test_video("feed-a"), test_video("feed-b")],
             HashSet::new(),
-            test_storage(&dirs),
+            &dirs,
         );
 
         state.set_search_results(vec![test_video("search-a"), test_video("feed-a")]);
@@ -1773,5 +1876,22 @@ mod tests {
         assert_eq!(state.feed_video_ids(), vec!["feed-a", "feed-b"]);
         assert_eq!(state.search_video_ids(), vec!["search-a", "feed-a"]);
         assert!(state.video_by_id("search-a").is_some());
+    }
+
+    #[test]
+    fn refreshed_feed_preserves_watch_later_metadata_without_changing_feed_ids() {
+        let dirs = TestDirs::new();
+        let mut state = test_state(
+            vec![test_video("old-watch-later"), test_video("old-feed")],
+            HashSet::from(["old-watch-later".to_string()]),
+            &dirs,
+        );
+
+        state.set_refreshed_feed_videos(vec![test_video("new-feed")]);
+
+        assert_eq!(state.feed_video_ids(), vec!["new-feed"]);
+        assert!(state.video_by_id("new-feed").is_some());
+        assert!(state.video_by_id("old-watch-later").is_some());
+        assert!(state.video_by_id("old-feed").is_none());
     }
 }
