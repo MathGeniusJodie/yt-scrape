@@ -1,8 +1,8 @@
 mod cache;
 mod data;
 mod feed;
-mod gemini;
 mod player;
+mod summary;
 mod ui;
 mod urls;
 

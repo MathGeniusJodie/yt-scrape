@@ -4,20 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
+const GEMINI_FLASH_MODEL: &str = "gemini-3.5-flash";
+const GEMINI_THINKING_LEVEL: &str = "minimal";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_MODELS: [&str; 4] = [
-    "openrouter/free",
-    "moonshotai/kimi-k2",
-    "deepseek/deepseek-r1-0528",
-    "tngtech/deepseek-r1t2-chimera",
-];
+const OPENROUTER_MODELS: [&str; 1] = ["@preset/cheap"];
+const OPENROUTER_REASONING_EFFORT: &str = "none";
 const SUMMARY_PROMPT: &str = concat!(
-    "Summarize this YouTube video with all the relevant information so I don't have to watch ",
-    "it. Don't use nested unordered lists. Don't use underlines. Use headings and bullet ",
-    "points where appropriate. Use fancy typography if appropriate, and use italics for ",
-    "emphasis or important points. Include memorable quotes in blockquotes. Use * for ",
-    "Markdown lists, not -. Include timestamps for sections."
+    "Summarize this YouTube video with all the relevant information so I don't have to watch. ",
+    "Make sure to include the nuggets of useful knowledge/wisdom and any funny quotes.",
 );
 
 #[derive(Serialize)]
@@ -106,7 +100,14 @@ struct OpenRouterRequest {
     model: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
+    reasoning: OpenRouterReasoning,
     messages: Vec<OpenRouterMessage>,
+}
+
+#[derive(Serialize)]
+struct OpenRouterReasoning {
+    effort: &'static str,
+    exclude: bool,
 }
 
 #[derive(Serialize)]
@@ -266,7 +267,8 @@ fn configured_openrouter_models() -> Vec<String> {
 /// Generates an AI summary for a video and streams partial results through a channel.
 ///
 /// The function first attempts Gemini streaming. If Gemini is unavailable or fails,
-/// it falls back to OpenRouter using a fetched transcript.
+/// it falls back to OpenRouter using a fetched transcript. If both providers fail,
+/// it emits the transcript text when captions are available.
 ///
 /// # Arguments
 ///
@@ -304,25 +306,54 @@ pub async fn summarize_video_streaming(
     };
 
     if let Err(gemini_error) = gemini_result {
-        if let Err(openrouter_error) = call_openrouter_with_transcript(
+        let transcript = match fetch_transcript(video_id, transcripts_work_dir).await {
+            Ok(transcript) if !transcript.trim().is_empty() => transcript,
+            Ok(_) => {
+                let _ = tx
+                    .send(StreamingMessage::Error(format!(
+                        "Gemini failed: {}. Transcript fallback failed: {}",
+                        gemini_error,
+                        ProviderCallError::EmptyTranscript
+                    )))
+                    .await;
+                return;
+            }
+            Err(transcript_error) => {
+                let _ = tx
+                    .send(StreamingMessage::Error(format!(
+                        "Gemini failed: {}. Transcript fallback failed: {}",
+                        gemini_error,
+                        ProviderCallError::Transcript(transcript_error.to_string())
+                    )))
+                    .await;
+                return;
+            }
+        };
+
+        if call_openrouter_with_transcript(
             &client,
-            video_id,
             video_url,
             video_title,
             channel_name,
             SUMMARY_PROMPT,
-            transcripts_work_dir,
+            &transcript,
             tx.clone(),
         )
         .await
+        .is_ok()
         {
-            let _ = tx
-                .send(StreamingMessage::Error(format!(
-                    "Gemini failed: {}. OpenRouter fallback failed: {}",
-                    gemini_error, openrouter_error
-                )))
-                .await;
+            return;
         }
+
+        if tx
+            .send(StreamingMessage::Chunk(transcript.trim().to_string()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let _ = tx.send(StreamingMessage::Done).await;
     }
 }
 
@@ -356,7 +387,7 @@ async fn call_gemini_streaming(
         }],
         generation_config: GenerationConfig {
             thinking_config: ThinkingConfig {
-                thinking_level: "LOW".to_string(),
+                thinking_level: GEMINI_THINKING_LEVEL.to_string(),
             },
         },
         tools: vec![Tool {
@@ -394,22 +425,17 @@ async fn call_gemini_streaming(
 #[allow(clippy::too_many_arguments)]
 async fn call_openrouter_with_transcript(
     client: &reqwest::Client,
-    video_id: &str,
     video_url: &str,
     video_title: &str,
     channel_name: &str,
     prompt: &str,
-    transcripts_work_dir: &Path,
+    transcript: &str,
     tx: Sender<StreamingMessage>,
 ) -> Result<(), ProviderCallError> {
     let api_key =
         std::env::var("OPENROUTER_API_KEY").map_err(|_| ProviderCallError::MissingEnvVar {
             variable: "OPENROUTER_API_KEY",
         })?;
-
-    let transcript = fetch_transcript(video_id, transcripts_work_dir)
-        .await
-        .map_err(|error| ProviderCallError::Transcript(error.to_string()))?;
 
     if transcript.trim().is_empty() {
         return Err(ProviderCallError::EmptyTranscript);
@@ -423,6 +449,10 @@ async fn call_openrouter_with_transcript(
     let request = OpenRouterRequest {
         model: openrouter_models[0].clone(),
         models: openrouter_models.iter().skip(1).cloned().collect(),
+        reasoning: OpenRouterReasoning {
+            effort: OPENROUTER_REASONING_EFFORT,
+            exclude: true,
+        },
         messages: vec![OpenRouterMessage {
             role: "user".to_string(),
             content: format!(
@@ -460,6 +490,44 @@ async fn call_openrouter_with_transcript(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gemini_request_sets_minimal_thinking_level() {
+        let request = super::GeminiRequest {
+            contents: Vec::new(),
+            generation_config: super::GenerationConfig {
+                thinking_config: super::ThinkingConfig {
+                    thinking_level: super::GEMINI_THINKING_LEVEL.to_string(),
+                },
+            },
+            tools: Vec::new(),
+        };
+
+        let payload = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            serde_json::json!("minimal")
+        );
+    }
+
+    #[test]
+    fn openrouter_request_disables_reasoning() {
+        let request = super::OpenRouterRequest {
+            model: "@preset/cheap".to_string(),
+            models: Vec::new(),
+            reasoning: super::OpenRouterReasoning {
+                effort: super::OPENROUTER_REASONING_EFFORT,
+                exclude: true,
+            },
+            messages: Vec::new(),
+        };
+
+        let payload = serde_json::to_value(request).unwrap();
+
+        assert_eq!(payload["reasoning"]["effort"], serde_json::json!("none"));
+        assert_eq!(payload["reasoning"]["exclude"], serde_json::json!(true));
+    }
+
     #[test]
     fn extract_openrouter_content_reads_string_payload() {
         let payload = serde_json::json!({

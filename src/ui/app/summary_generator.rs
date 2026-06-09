@@ -2,7 +2,7 @@ use super::cards::refresh_video_summary_badges;
 use super::{AppContext, AppState, CacheVideoError};
 use crate::cache::fetch_transcript;
 use crate::data::Video;
-use crate::gemini::{summarize_video_streaming, StreamingMessage};
+use crate::summary::{summarize_video_streaming, StreamingMessage};
 use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
 use glib::clone;
 use gtk::prelude::*;
@@ -506,7 +506,7 @@ mod tests {
     };
     use crate::cache::Storage;
     use crate::data::Video;
-    use crate::gemini::StreamingMessage;
+    use crate::summary::StreamingMessage;
     use crate::ui::app::AppState;
 
     use chrono::Utc;
