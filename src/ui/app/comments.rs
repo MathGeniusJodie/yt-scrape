@@ -13,7 +13,7 @@ use std::rc::Rc;
 ///
 /// * `state_rc` - Shared application state used to read the video title.
 /// * `ui_context` - UI and runtime handles used to create the dialog and fetch comments.
-/// * `video_id` - YouTube video ID whose comments should be displayed.
+/// * `video_id` - `YouTube` video ID whose comments should be displayed.
 pub(super) fn show_comments_dialog(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
@@ -22,7 +22,7 @@ pub(super) fn show_comments_dialog(
     let video_title = {
         let state = state_rc.borrow();
         let Some(video) = state.video_by_id(video_id) else {
-            error!("Cannot open comments dialog for missing video {}", video_id);
+            error!("Cannot open comments dialog for missing video {video_id}");
             return;
         };
         video.title().to_string()
@@ -30,7 +30,7 @@ pub(super) fn show_comments_dialog(
 
     let (_dialog, buffer) = create_text_dialog(
         &ui_context.window,
-        &format!("Comments: {}", video_title),
+        &format!("Comments: {video_title}"),
         "Loading comments...",
         |_| {},
     );
@@ -50,7 +50,7 @@ pub(super) fn show_comments_dialog(
         if let Ok(result) = rx.recv().await {
             match result {
                 Ok(comments) => buffer.set_text(&comments),
-                Err(comment_error) => buffer.set_text(&format!("Error: {}", comment_error)),
+                Err(comment_error) => buffer.set_text(&format!("Error: {comment_error}")),
             }
         }
     });

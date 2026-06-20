@@ -13,6 +13,7 @@ use glib::clone;
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GtkBox, Button, DrawingArea, EventBox, FlowBox, Label, Orientation, Popover,
+    Spinner,
 };
 use log::{error, warn};
 use std::cell::RefCell;
@@ -45,7 +46,7 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
             let local_path = state.storage.find_video_path(video_id);
             let local_path = resolve_playback_path(
                 &state.storage,
-                ui_context.runtime.clone(),
+                &ui_context.runtime,
                 video_id,
                 &video_title,
                 local_path,
@@ -56,27 +57,31 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
 
     if let Some((video_title, local_path)) = playback {
         if let Err(play_error) = play_video(video_id, &video_title, local_path.as_deref()) {
-            error!("Failed to play video {}: {}", video_id, play_error);
+            error!("Failed to play video {video_id}: {play_error}");
             return;
         }
         if let Err(e) = state_rc.borrow_mut().set_video_watched(video_id, true) {
-            error!("Failed to mark video {} as watched: {}", video_id, e);
+            error!("Failed to mark video {video_id} as watched: {e}");
         } else {
             refresh_video_watched_badge(ui_context, video_id, true);
         }
     } else {
-        error!("Cannot play missing video {}", video_id);
+        error!("Cannot play missing video {video_id}");
     }
 }
 
-pub(super) fn create_context_menu(
+fn load_context_menu_widgets(
     popover: &Popover,
-    state_rc: Rc<RefCell<AppState>>,
-    ui_context: &AppContext,
+) -> (
+    GtkBox,
+    Button,
+    Button,
+    Button,
+    Button,
+    Button,
+    Button,
+    Button,
 ) {
-    let popover = popover.clone();
-    let selected_video = ui_context.selected_video.clone();
-
     let builder = gtk::Builder::from_string(include_str!("context_menu.ui"));
     let menu_box = builder
         .object::<GtkBox>("menu_box")
@@ -106,6 +111,37 @@ pub(super) fn create_context_menu(
     popover.add(&menu_box);
     menu_box.show_all();
 
+    (
+        menu_box,
+        play_button,
+        watch_later_button,
+        copy_url_button,
+        summary_button,
+        transcript_button,
+        comments_button,
+        unsub_button,
+    )
+}
+
+pub(super) fn create_context_menu(
+    popover: &Popover,
+    state_rc: Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+) {
+    let popover = popover.clone();
+    let selected_video = ui_context.selected_video.clone();
+
+    let (
+        _menu_box,
+        play_button,
+        watch_later_button,
+        copy_url_button,
+        summary_button,
+        transcript_button,
+        comments_button,
+        unsub_button,
+    ) = load_context_menu_widgets(&popover);
+
     let ui_context = ui_context.clone();
 
     // Connect handlers once - they read from selected_video
@@ -129,7 +165,7 @@ pub(super) fn create_context_menu(
             let state_rc = state_rc.clone();
             let ui_context = ui_context.clone();
             move |video_id| {
-                apply_watch_later_action(&state_rc, &ui_context, video_id);
+                apply_watch_later_action(&state_rc, &ui_context, &video_id);
             }
         },
     );
@@ -185,16 +221,16 @@ pub(super) fn create_context_menu(
         selected_video,
         ui_context.context_menu.clone(),
         {
-            let state_rc = state_rc.clone();
-            let ui_context = ui_context.clone();
+            let state_rc = state_rc;
+            let ui_context = ui_context;
             move |video_id| {
-                super::unsubscribe_channel(&state_rc, &ui_context, video_id);
+                super::unsubscribe_channel(&state_rc, &ui_context, &video_id);
             }
         },
     );
 }
 
-fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
+const fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     match tab {
         Tab::Feed => &ui_context.feed_flow,
         Tab::Search => &ui_context.search_flow,
@@ -202,7 +238,7 @@ fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     }
 }
 
-fn card_map_for_tab(
+const fn card_map_for_tab(
     ui_context: &AppContext,
     tab: Tab,
 ) -> &Rc<RefCell<HashMap<String, VideoCardWidgets>>> {
@@ -259,14 +295,14 @@ fn connect_card_handlers(
 
     card_widgets.watch_later_toggle().connect_clicked(
         clone!(@strong state_rc, @strong ui_context, @strong video_id => move |_| {
-            apply_watch_later_action(&state_rc, &ui_context, video_id.clone());
+            apply_watch_later_action(&state_rc, &ui_context, &video_id);
         }),
     );
 
     card_widgets.watched_button().connect_clicked(
         clone!(@strong state_rc, @strong ui_context, @strong video_id => move |_| {
             if let Err(e) = state_rc.borrow_mut().set_video_watched(&video_id, false) {
-                error!("Failed to unmark video {} as watched: {}", video_id, e);
+                error!("Failed to unmark video {video_id} as watched: {e}");
             } else {
                 refresh_video_watched_badge(&ui_context, &video_id, false);
             }
@@ -284,16 +320,13 @@ fn build_video_card(
         let state = state_rc.borrow();
         let video = state.video_by_id(video_id)?;
         let thumbnail_path = state.storage.thumbnail_path(video.video_id());
-        let is_watch_later = state.watch_later.contains(video.video_id());
-        let is_downloaded = downloaded_video_ids.contains(video.video_id());
-        create_video_card(
-            video,
-            &thumbnail_path,
-            is_watch_later,
-            is_downloaded,
-            video.has_ai_summary(),
-            video.is_watched(),
-        )
+        let flags = CardFlags {
+            is_watch_later: state.watch_later.contains(video.video_id()),
+            is_downloaded: downloaded_video_ids.contains(video.video_id()),
+            has_ai_summary: video.has_ai_summary(),
+            is_watched: video.is_watched(),
+        };
+        create_video_card(video, &thumbnail_path, &flags)
     };
     connect_card_handlers(state_rc, ui_context, video_id, &card_widgets);
     Some(card_widgets)
@@ -301,7 +334,10 @@ fn build_video_card(
 
 fn add_card_to_flow(flow_box: &FlowBox, card_widgets: &VideoCardWidgets, position: Option<usize>) {
     match position {
-        Some(position) => flow_box.insert(card_widgets.root(), position as i32),
+        Some(position) => flow_box.insert(
+            card_widgets.root(),
+            i32::try_from(position).unwrap_or(i32::MAX),
+        ),
         None => flow_box.add(card_widgets.root()),
     }
 
@@ -483,7 +519,7 @@ pub(super) fn download_missing_thumbnails<'a>(
     videos: impl IntoIterator<Item = &'a Video>,
     storage: &Storage,
     client: reqwest::Client,
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: &Arc<tokio::runtime::Runtime>,
 ) -> Option<async_channel::Receiver<Vec<String>>> {
     const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
 
@@ -526,7 +562,7 @@ pub(super) fn download_missing_thumbnails<'a>(
                         let response = match client.get(&url).send().await {
                             Ok(response) => response,
                             Err(error) => {
-                                warn!("Thumbnail request failed for {}: {}", url, error);
+                                warn!("Thumbnail request failed for {url}: {error}");
                                 return;
                             }
                         };
@@ -534,7 +570,7 @@ pub(super) fn download_missing_thumbnails<'a>(
                         let response = match response.error_for_status() {
                             Ok(response) => response,
                             Err(error) => {
-                                warn!("Thumbnail response failed for {}: {}", url, error);
+                                warn!("Thumbnail response failed for {url}: {error}");
                                 return;
                             }
                         };
@@ -561,7 +597,7 @@ pub(super) fn download_missing_thumbnails<'a>(
                                 }
                             }
                             Err(error) => {
-                                warn!("Failed reading thumbnail bytes for {}: {}", url, error);
+                                warn!("Failed reading thumbnail bytes for {url}: {error}");
                             }
                         }
                     }
@@ -598,17 +634,17 @@ pub(super) struct VideoCardWidgets {
 
 impl VideoCardWidgets {
     /// Returns the card root widget.
-    pub fn root(&self) -> &EventBox {
+    pub const fn root(&self) -> &EventBox {
         &self.root
     }
 
     /// Returns the Watch Later toggle button.
-    pub fn watch_later_toggle(&self) -> &gtk::Button {
+    pub const fn watch_later_toggle(&self) -> &gtk::Button {
         &self.watch_later_toggle
     }
 
     /// Returns the AI summary button.
-    pub fn summary_button(&self) -> &gtk::Button {
+    pub const fn summary_button(&self) -> &gtk::Button {
         &self.summary_button
     }
 
@@ -618,7 +654,7 @@ impl VideoCardWidgets {
     }
 
     /// Returns the watched button.
-    pub fn watched_button(&self) -> &gtk::Button {
+    pub const fn watched_button(&self) -> &gtk::Button {
         &self.watched_button
     }
 
@@ -671,40 +707,20 @@ fn load_thumbnail(thumbnail_path: &Path) -> Option<Pixbuf> {
 /// # Returns
 ///
 /// Widget handles for the created card.
-fn create_video_card(
-    video: &Video,
-    thumbnail_path: &Path,
+#[allow(clippy::struct_excessive_bools)]
+struct CardFlags {
     is_watch_later: bool,
     is_downloaded: bool,
     has_ai_summary: bool,
     is_watched: bool,
-) -> VideoCardWidgets {
-    let event_box = EventBox::new();
-    event_box.set_above_child(false);
-    event_box.set_hexpand(false);
-    event_box.set_halign(Align::Start);
+}
 
-    let card = gtk::Box::new(Orientation::Vertical, 0);
-    card.set_widget_name("video-card");
-    card.set_size_request(CARD_WIDTH, -1);
-    card.set_hexpand(false);
-    card.set_halign(Align::Start);
-
-    // Thumbnail - 16:9 aspect ratio, fills card width using DrawingArea
-    let thumbnail = DrawingArea::new();
-    thumbnail.set_size_request(-1, THUMBNAIL_HEIGHT); // Let width be determined by card
-    thumbnail.set_widget_name("thumbnail");
-    thumbnail.set_hexpand(true); // Expand to fill card width
-    thumbnail.set_vexpand(false);
-
-    // Load the cropped 16:9 pixbuf
-    let pixbuf: Rc<RefCell<Option<Pixbuf>>> = Rc::new(RefCell::new(load_thumbnail(thumbnail_path)));
-
-    let pixbuf_for_draw = pixbuf.clone();
+fn connect_thumbnail_draw(thumbnail: &DrawingArea, pixbuf: &Rc<RefCell<Option<Pixbuf>>>) {
+    let pixbuf = pixbuf.clone();
     thumbnail.connect_draw(move |widget, cr| {
-        let width = widget.allocated_width() as f64;
-        let height = widget.allocated_height() as f64;
-        let radius = 8.0; // Corner radius matching the card
+        let width = f64::from(widget.allocated_width());
+        let height = f64::from(widget.allocated_height());
+        let radius = 8.0;
 
         // Create clipping path with rounded top corners
         cr.new_path();
@@ -727,13 +743,10 @@ fn create_video_card(
         cr.close_path();
         cr.clip();
 
-        if let Some(ref pb) = *pixbuf_for_draw.borrow() {
-            // Scale uniformly to cover the area (both image and area are 16:9)
-            let scale = (width / pb.width() as f64).max(height / pb.height() as f64);
-            let scaled_w = pb.width() as f64 * scale;
-            let scaled_h = pb.height() as f64 * scale;
-
-            // Center the scaled image
+        if let Some(pb) = pixbuf.borrow().as_ref() {
+            let scale = width / f64::from(pb.width());
+            let scaled_w = f64::from(pb.width()) * scale;
+            let scaled_h = f64::from(pb.height()) * scale;
             let x_offset = (width - scaled_w) / 2.0;
             let y_offset = (height - scaled_h) / 2.0;
 
@@ -742,7 +755,6 @@ fn create_video_card(
             cr.set_source_pixbuf(pb, 0.0, 0.0);
             cr.paint().ok();
         } else {
-            // Draw placeholder background
             cr.set_source_rgb(0.2, 0.2, 0.2);
             cr.rectangle(0.0, 0.0, width, height);
             cr.fill().ok();
@@ -750,19 +762,100 @@ fn create_video_card(
 
         glib::Propagation::Stop
     });
+}
 
+fn build_status_row(flags: &CardFlags) -> (GtkBox, Button, Button, Spinner, GtkBox, Button) {
+    let status_box = gtk::Box::new(Orientation::Horizontal, 4);
+    status_box.set_halign(Align::Fill);
+
+    let watch_later_toggle = gtk::Button::new();
+    set_watch_later_toggle_state(&watch_later_toggle, flags.is_watch_later);
+    status_box.pack_start(&watch_later_toggle, false, false, 0);
+
+    let watched_button = gtk::Button::new();
+    watched_button.set_widget_name("watched-button");
+    watched_button.set_tooltip_text(Some("Watched — click to unmark"));
+    watched_button.set_relief(gtk::ReliefStyle::None);
+    watched_button.set_can_focus(false);
+    let watched_icon =
+        gtk::Image::from_icon_name(Some("object-select-symbolic"), gtk::IconSize::Menu);
+    watched_icon.show();
+    watched_button.add(&watched_icon);
+    status_box.pack_start(&watched_button, false, false, 0);
+    watched_button.set_no_show_all(true);
+    watched_button.set_visible(flags.is_watched);
+
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    status_box.pack_start(&spacer, true, true, 0);
+
+    let download_spinner = gtk::Spinner::new();
+    download_spinner.set_tooltip_text(Some("Downloading…"));
+    download_spinner.show();
+    status_box.pack_end(&download_spinner, false, false, 0);
+    download_spinner.set_no_show_all(true);
+    download_spinner.set_visible(false);
+
+    let downloaded_badge = gtk::Box::new(Orientation::Horizontal, 0);
+    downloaded_badge.set_widget_name("status-downloaded");
+    downloaded_badge.set_tooltip_text(Some("Downloaded"));
+    let downloaded_icon =
+        gtk::Image::from_icon_name(Some("media-floppy-symbolic"), gtk::IconSize::Menu);
+    downloaded_icon.show();
+    downloaded_badge.pack_start(&downloaded_icon, false, false, 0);
+    status_box.pack_end(&downloaded_badge, false, false, 0);
+    downloaded_badge.set_no_show_all(true);
+    downloaded_badge.set_visible(flags.is_downloaded);
+
+    let summary_button = gtk::Button::with_label("AI");
+    summary_button.set_widget_name("status-ai-summary-button");
+    summary_button.set_relief(gtk::ReliefStyle::None);
+    summary_button.set_can_focus(false);
+    summary_button.set_tooltip_text(Some("Show cached AI summary"));
+    status_box.pack_end(&summary_button, false, false, 0);
+    summary_button.set_no_show_all(true);
+    summary_button.set_visible(flags.has_ai_summary);
+
+    (
+        status_box,
+        watch_later_toggle,
+        watched_button,
+        download_spinner,
+        downloaded_badge,
+        summary_button,
+    )
+}
+
+fn create_video_card(video: &Video, thumbnail_path: &Path, flags: &CardFlags) -> VideoCardWidgets {
+    let event_box = EventBox::new();
+    event_box.set_above_child(false);
+    event_box.set_hexpand(false);
+    event_box.set_halign(Align::Start);
+
+    let card = gtk::Box::new(Orientation::Vertical, 0);
+    card.set_widget_name("video-card");
+    card.set_size_request(CARD_WIDTH, -1);
+    card.set_hexpand(false);
+    card.set_halign(Align::Start);
+
+    let thumbnail = DrawingArea::new();
+    thumbnail.set_size_request(-1, THUMBNAIL_HEIGHT);
+    thumbnail.set_widget_name("thumbnail");
+    thumbnail.set_hexpand(true);
+    thumbnail.set_vexpand(false);
+
+    let pixbuf: Rc<RefCell<Option<Pixbuf>>> = Rc::new(RefCell::new(load_thumbnail(thumbnail_path)));
+    connect_thumbnail_draw(&thumbnail, &pixbuf);
     card.pack_start(&thumbnail, false, false, 0);
 
-    // Content box for text below thumbnail (with padding)
     let content_box = gtk::Box::new(Orientation::Vertical, 4);
     content_box.set_margin_start(8);
     content_box.set_margin_end(8);
     content_box.set_margin_top(8);
     content_box.set_margin_bottom(8);
     content_box.set_hexpand(false);
-    content_box.set_size_request(CARD_WIDTH - 16, -1); // card width minus 8px start/end margins
+    content_box.set_size_request(CARD_WIDTH - 16, -1);
 
-    // Title: wrap naturally and clamp to two lines using Pango layout.
     let title_label = Label::new(Some(video.title()));
     title_label.set_widget_name("video-title");
     title_label.set_line_wrap(true);
@@ -771,13 +864,10 @@ fn create_video_card(
     title_label.set_ellipsize(pango::EllipsizeMode::End);
     title_label.set_xalign(0.0);
     title_label.set_yalign(0.0);
-    // Keep card widths stable by constraining the label's natural width.
-    // This is a layout hint only; wrapping/ellipsizing still comes from Pango.
     title_label.set_width_chars(36);
     title_label.set_max_width_chars(36);
     content_box.pack_start(&title_label, false, false, 0);
 
-    // Channel name and time
     let meta_box = gtk::Box::new(Orientation::Horizontal, 8);
     meta_box.set_widget_name("video-meta");
 
@@ -799,65 +889,19 @@ fn create_video_card(
 
     content_box.pack_start(&meta_box, false, false, 0);
 
-    // Status row with toggle and indicators
-    let status_box = gtk::Box::new(Orientation::Horizontal, 4);
-    status_box.set_halign(Align::Fill);
-
-    // Watch later toggle button
-    let watch_later_toggle = gtk::Button::new();
-    set_watch_later_toggle_state(&watch_later_toggle, is_watch_later);
-    status_box.pack_start(&watch_later_toggle, false, false, 0);
-
-    let watched_button = gtk::Button::new();
-    watched_button.set_widget_name("watched-button");
-    watched_button.set_tooltip_text(Some("Watched — click to unmark"));
-    watched_button.set_relief(gtk::ReliefStyle::None);
-    watched_button.set_can_focus(false);
-    let watched_icon =
-        gtk::Image::from_icon_name(Some("object-select-symbolic"), gtk::IconSize::Menu);
-    watched_icon.show();
-    watched_button.add(&watched_icon);
-    status_box.pack_start(&watched_button, false, false, 0);
-    watched_button.set_no_show_all(true);
-    watched_button.set_visible(is_watched);
-
-    // Spacer
-    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    status_box.pack_start(&spacer, true, true, 0);
-
-    let download_spinner = gtk::Spinner::new();
-    download_spinner.set_tooltip_text(Some("Downloading…"));
-    download_spinner.show();
-    status_box.pack_end(&download_spinner, false, false, 0);
-    download_spinner.set_no_show_all(true);
-    download_spinner.set_visible(false);
-
-    let downloaded_badge = gtk::Box::new(Orientation::Horizontal, 0);
-    downloaded_badge.set_widget_name("status-downloaded");
-    downloaded_badge.set_tooltip_text(Some("Downloaded"));
-    let downloaded_icon =
-        gtk::Image::from_icon_name(Some("media-floppy-symbolic"), gtk::IconSize::Menu);
-    downloaded_icon.show();
-    downloaded_badge.pack_start(&downloaded_icon, false, false, 0);
-    status_box.pack_end(&downloaded_badge, false, false, 0);
-    downloaded_badge.set_no_show_all(true);
-    downloaded_badge.set_visible(is_downloaded);
-
-    let summary_button = gtk::Button::with_label("AI");
-    summary_button.set_widget_name("status-ai-summary-button");
-    summary_button.set_relief(gtk::ReliefStyle::None);
-    summary_button.set_can_focus(false);
-    summary_button.set_tooltip_text(Some("Show cached AI summary"));
-    status_box.pack_end(&summary_button, false, false, 0);
-    summary_button.set_no_show_all(true);
-    summary_button.set_visible(has_ai_summary);
-
+    let (
+        status_box,
+        watch_later_toggle,
+        watched_button,
+        download_spinner,
+        downloaded_badge,
+        summary_button,
+    ) = build_status_row(flags);
     content_box.pack_start(&status_box, false, false, 0);
 
     card.pack_start(&content_box, false, false, 0);
-
     event_box.add(&card);
+
     VideoCardWidgets {
         root: event_box,
         watch_later_toggle,
@@ -897,16 +941,16 @@ fn crop_to_16_9(pixbuf: &Pixbuf) -> Pixbuf {
 
     // Target 16:9 aspect ratio
     let target_ratio = 16.0 / 9.0;
-    let current_ratio = width as f64 / height as f64;
+    let current_ratio = f64::from(width) / f64::from(height);
 
     let (crop_x, crop_y, crop_width, crop_height) = if current_ratio > target_ratio {
         // Image is wider than 16:9, crop sides
-        let new_width = (height as f64 * target_ratio) as i32;
+        let new_width = (f64::from(height) * target_ratio) as i32;
         let x_offset = (width - new_width) / 2;
         (x_offset, 0, new_width, height)
     } else {
         // Image is taller than 16:9, crop top/bottom
-        let new_height = (width as f64 / target_ratio) as i32;
+        let new_height = (f64::from(width) / target_ratio) as i32;
         let y_offset = (height - new_height) / 2;
         (0, y_offset, width, new_height)
     };
@@ -924,8 +968,8 @@ fn format_video_duration(total_seconds: u32) -> String {
     let seconds = total_seconds % 60;
 
     if hours > 0 {
-        format!("{}:{:02}:{:02}", hours, minutes, seconds)
+        format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
-        format!("{}:{:02}", minutes, seconds)
+        format!("{minutes}:{seconds:02}")
     }
 }

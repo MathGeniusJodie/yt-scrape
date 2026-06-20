@@ -257,7 +257,7 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
         match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Prefetch) {
             Ok(task) => task,
             Err(StartSummaryGenerationError::MissingVideo) => {
-                error!("Cannot prefetch summary for missing video {}", video_id);
+                error!("Cannot prefetch summary for missing video {video_id}");
                 return;
             }
             Err(
@@ -273,13 +273,13 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
         match generation_task.collect().await {
             Err(generation_error) => {
                 summary_generator.clear_in_progress(&video_id);
-                error!("Failed to prefetch summary for {}: {}", video_id, generation_error);
+                error!("Failed to prefetch summary for {video_id}: {generation_error}");
             }
             Ok(summary) => {
                 if let Err(cache_error) =
                     summary_generator.persist_and_refresh(&state_rc, &ui_context, &video_id, summary)
                 {
-                    error!("Failed to cache prefetched summary for {}: {}", video_id, cache_error);
+                    error!("Failed to cache prefetched summary for {video_id}: {cache_error}");
                 }
             }
         }
@@ -292,11 +292,11 @@ fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
 }
 
 fn start_summary_generation_for_dialog(
-    state_rc: Rc<RefCell<AppState>>,
-    ui_context: AppContext,
-    video_id: String,
-    buffer: gtk::TextBuffer,
-    regenerate_button: Button,
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: &str,
+    buffer: &gtk::TextBuffer,
+    regenerate_button: &Button,
     loading_text: &str,
 ) {
     buffer.set_text(loading_text);
@@ -304,16 +304,16 @@ fn start_summary_generation_for_dialog(
 
     let summary_generator = ui_context.summary_generator.clone();
     let generation_task =
-        match summary_generator.start(&state_rc, &video_id, SummaryGenerationMode::Interactive) {
+        match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Interactive) {
             Ok(task) => task,
             Err(StartSummaryGenerationError::MissingVideo) => {
                 buffer.set_text("Error: Video is no longer available.");
                 regenerate_button.set_sensitive(true);
-                error!("Cannot generate summary for missing video {}", video_id);
+                error!("Cannot generate summary for missing video {video_id}");
                 return;
             }
             Err(start_error) => {
-                buffer.set_text(&format!("Error: {}", start_error));
+                buffer.set_text(&format!("Error: {start_error}"));
                 regenerate_button.set_sensitive(true);
                 return;
             }
@@ -337,14 +337,14 @@ fn start_summary_generation_for_dialog(
         match generation_result {
             Err(generation_error) => {
                 summary_generator.clear_in_progress(&video_id);
-                buffer.set_text(&format!("Error: {}", generation_error));
+                buffer.set_text(&format!("Error: {generation_error}"));
             }
             Ok(summary) => {
                 if let Err(cache_error) =
                     summary_generator.persist_and_refresh(&state_rc, &ui_context, &video_id, summary)
                 {
-                    buffer.set_text(&format!("Error: {}", cache_error));
-                    error!("Failed to cache interactive summary for {}: {}", video_id, cache_error);
+                    buffer.set_text(&format!("Error: {cache_error}"));
+                    error!("Failed to cache interactive summary for {video_id}: {cache_error}");
                 }
             }
         }
@@ -359,7 +359,7 @@ pub(super) fn show_summary_dialog(
     let (video_title, cached_summary) = {
         let state = state_rc.borrow();
         let Some(video) = state.video_by_id(video_id) else {
-            error!("Cannot open summary dialog for missing video {}", video_id);
+            error!("Cannot open summary dialog for missing video {video_id}");
             return;
         };
         (
@@ -375,7 +375,7 @@ pub(super) fn show_summary_dialog(
     let regenerate_button_for_layout = regenerate_button.clone();
     let (_dialog, buffer) = create_text_dialog(
         &ui_context.window,
-        &format!("Summary: {}", video_title),
+        &format!("Summary: {video_title}"),
         "",
         move |content_area| {
             let controls_row = GtkBox::new(Orientation::Horizontal, 8);
@@ -397,23 +397,23 @@ pub(super) fn show_summary_dialog(
         buffer.set_text(&summary);
     } else {
         start_summary_generation_for_dialog(
-            state_rc.clone(),
-            ui_context.clone(),
-            video_id.clone(),
-            buffer.clone(),
-            regenerate_button.clone(),
+            state_rc,
+            ui_context,
+            &video_id,
+            &buffer,
+            &regenerate_button,
             "Loading summary...",
         );
     }
 
     regenerate_button.connect_clicked(clone!(@strong state_rc, @strong ui_context, @strong video_id, @strong buffer, @strong regenerate_button => move |_| {
         start_summary_generation_for_dialog(
-            state_rc.clone(),
-            ui_context.clone(),
-            video_id.clone(),
-            buffer.clone(),
-            regenerate_button.clone(),
-            "Regenerating summary...",
+            &state_rc,
+            &ui_context,
+            &video_id,
+            &buffer,
+            &regenerate_button,
+            "Regenerating summary..."
         );
     }));
 }
@@ -426,10 +426,7 @@ pub(super) fn show_transcript_dialog(
     let (video_title, cached_transcript) = {
         let state = state_rc.borrow();
         let Some(video) = state.video_by_id(video_id) else {
-            error!(
-                "Cannot open transcript dialog for missing video {}",
-                video_id
-            );
+            error!("Cannot open transcript dialog for missing video {video_id}");
             return;
         };
         (
@@ -441,7 +438,7 @@ pub(super) fn show_transcript_dialog(
     if let Some(transcript) = cached_transcript {
         show_text_dialog(
             &ui_context.window,
-            &format!("Transcript: {}", video_title),
+            &format!("Transcript: {video_title}"),
             &transcript,
         );
         return;
@@ -449,7 +446,7 @@ pub(super) fn show_transcript_dialog(
 
     let (_dialog, buffer) = create_text_dialog(
         &ui_context.window,
-        &format!("Transcript: {}", video_title),
+        &format!("Transcript: {video_title}"),
         "Loading transcript...",
         |_| {},
     );
@@ -484,14 +481,11 @@ pub(super) fn show_transcript_dialog(
                     buffer.set_text(&transcript);
                     let mut state = state_rc.borrow_mut();
                     if let Err(cache_error) = state.cache_video_transcript(&video_id, transcript) {
-                        error!(
-                            "Failed to cache transcript for {}: {}",
-                            video_id, cache_error
-                        );
+                        error!("Failed to cache transcript for {video_id}: {cache_error}");
                     }
                 }
                 Err(transcript_error) => {
-                    buffer.set_text(&format!("Error: {}", transcript_error));
+                    buffer.set_text(&format!("Error: {transcript_error}"));
                 }
             }
         }
@@ -552,7 +546,7 @@ mod tests {
             video_id.to_string(),
             "channel-id".to_string(),
             "Channel".to_string(),
-            "Video Title".to_string(),
+            "Video Title",
             Utc::now(),
             "https://example.com/thumb.jpg".to_string(),
             None,

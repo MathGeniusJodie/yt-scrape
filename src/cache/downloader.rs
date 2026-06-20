@@ -25,7 +25,7 @@ pub enum DownloadError {
 ///
 /// # Arguments
 ///
-/// * `video_id` - YouTube video identifier.
+/// * `video_id` - `YouTube` video identifier.
 /// * `output_path` - Destination path stem for the downloaded media file.
 ///
 /// # Errors
@@ -42,6 +42,8 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
     // Phase 1: Always download video + chapter/info metadata.
     // Keep this independent from subtitle fetching so subtitle rate limits don't fail downloads.
     let output = super::nice_command("yt-dlp")
+        .arg("--cookies-from-browser")
+        .arg("chromium")
         .arg("-f")
         .arg("bestvideo[height<=720]+bestaudio/best[height<=720]")
         .arg("--add-metadata")
@@ -78,6 +80,8 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
     let subs_output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
         let mut command = super::nice_command("yt-dlp");
         command
+            .arg("--cookies-from-browser")
+            .arg("chromium")
             .arg("--write-subs")
             .arg("--write-auto-subs")
             .arg("--sub-langs")
@@ -179,22 +183,24 @@ pub async fn convert_to_miyoo(
 }
 
 fn miyoo_video_filter(subtitle_path: Option<&Path>) -> String {
-    match subtitle_path {
-        Some(path) => format!(
-            "subtitles={},{}",
-            escape_filter_path(path),
-            MIYOO_VIDEO_FILTER
-        ),
-        None => MIYOO_VIDEO_FILTER.to_string(),
-    }
+    subtitle_path.map_or_else(
+        || MIYOO_VIDEO_FILTER.to_string(),
+        |path| {
+            format!(
+                "subtitles={},{}",
+                escape_filter_path(path),
+                MIYOO_VIDEO_FILTER
+            )
+        },
+    )
 }
 
 fn escape_filter_path(path: &Path) -> String {
     path.to_string_lossy()
         .chars()
         .flat_map(|character| match character {
-            '\\' | '\'' | ':' | ',' | '[' | ']' => Some('\\').into_iter().chain(Some(character)),
-            _ => None.into_iter().chain(Some(character)),
+            '\\' | '\'' | ':' | ',' | '[' | ']' => std::iter::once('\\').chain(Some(character)),
+            _ => std::iter::once(character).chain(None),
         })
         .collect()
 }

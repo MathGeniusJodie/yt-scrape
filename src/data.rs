@@ -4,13 +4,12 @@ use quick_xml::escape::unescape;
 use serde::{Deserialize, Serialize};
 
 fn decode_html_entities(input: &str) -> String {
-    unescape(input)
-        .map(|decoded| decoded.into_owned())
-        .unwrap_or_else(|_| input.to_string())
+    unescape(input).map_or_else(|_| input.to_string(), std::borrow::Cow::into_owned)
 }
 
-/// A single video entry from a YouTube RSS feed
+/// A single video entry from a `YouTube` RSS feed
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
 pub struct Video {
     video_id: String,
     channel_id: String,
@@ -37,7 +36,7 @@ impl Video {
         video_id: String,
         channel_id: String,
         channel_name: String,
-        title: String,
+        title: &str,
         published: DateTime<Utc>,
         thumbnail_url: String,
         duration_seconds: Option<u32>,
@@ -46,7 +45,7 @@ impl Video {
             video_id,
             channel_id,
             channel_name,
-            title: decode_html_entities(&title),
+            title: decode_html_entities(title),
             published,
             thumbnail_url,
             duration_seconds,
@@ -56,12 +55,12 @@ impl Video {
         }
     }
 
-    /// Returns the YouTube video ID.
+    /// Returns the `YouTube` video ID.
     pub fn video_id(&self) -> &str {
         &self.video_id
     }
 
-    /// Returns the YouTube channel ID.
+    /// Returns the `YouTube` channel ID.
     pub fn channel_id(&self) -> &str {
         &self.channel_id
     }
@@ -77,7 +76,7 @@ impl Video {
     }
 
     /// Returns the publication timestamp in UTC.
-    pub fn published(&self) -> DateTime<Utc> {
+    pub const fn published(&self) -> DateTime<Utc> {
         self.published
     }
 
@@ -87,7 +86,7 @@ impl Video {
     }
 
     /// Returns video duration in seconds when known.
-    pub fn duration_seconds(&self) -> Option<u32> {
+    pub const fn duration_seconds(&self) -> Option<u32> {
         self.duration_seconds
     }
 
@@ -111,7 +110,7 @@ impl Video {
         self.ai_summary = ai_summary;
     }
 
-    /// Returns the YouTube watch URL
+    /// Returns the `YouTube` watch URL
     pub fn watch_url(&self) -> String {
         urls::watch_url(&self.video_id)
     }
@@ -124,12 +123,12 @@ impl Video {
     }
 
     /// Returns `true` when the video has been marked as watched.
-    pub fn is_watched(&self) -> bool {
+    pub const fn is_watched(&self) -> bool {
         self.watched
     }
 
     /// Sets the watched state.
-    pub fn set_watched(&mut self, watched: bool) {
+    pub const fn set_watched(&mut self, watched: bool) {
         self.watched = watched;
     }
 }
@@ -140,7 +139,7 @@ pub enum Tab {
     /// Main feed showing all fetched videos.
     #[default]
     Feed,
-    /// Videos returned by the most recent YouTube search.
+    /// Videos returned by the most recent `YouTube` search.
     Search,
     /// User-curated watch-later list.
     WatchLater,
@@ -163,7 +162,7 @@ mod tests {
             "video-id".to_string(),
             "channel-id".to_string(),
             "channel-name".to_string(),
-            "Tom &amp; Jerry &quot;Best Of&quot; &#x27;24".to_string(),
+            "Tom &amp; Jerry &quot;Best Of&quot; &#x27;24",
             Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid fixed test timestamp"),

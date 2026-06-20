@@ -35,7 +35,7 @@ fn spawn_mpv_with_stderr_logging(command: &mut Command) -> Result<(), PlayerErro
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                log::debug!("mpv: {}", line);
+                log::debug!("mpv: {line}");
             }
         });
     }
@@ -45,11 +45,11 @@ fn spawn_mpv_with_stderr_logging(command: &mut Command) -> Result<(), PlayerErro
 /// Plays a video using `mpv` as a detached process.
 ///
 /// Playback prefers a local file when available. If no local file exists, playback
-/// falls back to streaming directly from YouTube.
+/// falls back to streaming directly from `YouTube`.
 ///
 /// # Arguments
 ///
-/// * `video_id` - YouTube video identifier.
+/// * `video_id` - `YouTube` video identifier.
 /// * `title` - Title used for mpv window metadata.
 /// * `local_path` - Optional path to a local downloaded video.
 ///
@@ -73,10 +73,7 @@ pub fn play_video(
                 );
                 command.arg(format!("--chapters-file={}", chapters_file.display()));
             } else {
-                log::debug!(
-                    "No chapters metadata available for local video {}",
-                    video_id
-                );
+                log::debug!("No chapters metadata available for local video {video_id}");
             }
             command.arg(path);
             spawn_mpv_with_stderr_logging(&mut command)?;

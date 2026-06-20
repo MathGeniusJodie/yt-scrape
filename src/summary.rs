@@ -267,12 +267,12 @@ fn configured_openrouter_models() -> Vec<String> {
 /// Generates an AI summary for a video and streams partial results through a channel.
 ///
 /// The function first attempts Gemini streaming. If Gemini is unavailable or fails,
-/// it falls back to OpenRouter using a fetched transcript. If both providers fail,
+/// it falls back to `OpenRouter` using a fetched transcript. If both providers fail,
 /// it emits the transcript text when captions are available.
 ///
 /// # Arguments
 ///
-/// * `video_id` - YouTube video identifier.
+/// * `video_id` - `YouTube` video identifier.
 /// * `video_url` - Full watch URL used by providers.
 /// * `video_title` - Human-readable video title for prompt context.
 /// * `channel_name` - Channel display name for prompt context.
@@ -365,10 +365,8 @@ async fn call_gemini_streaming(
     prompt: &str,
     tx: Sender<StreamingMessage>,
 ) -> Result<(), ProviderCallError> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-        model
-    );
+    let url =
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
 
     let request = GeminiRequest {
         contents: vec![Content {
@@ -464,7 +462,7 @@ async fn call_openrouter_with_transcript(
     let response = client
         .post(OPENROUTER_URL)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await?;

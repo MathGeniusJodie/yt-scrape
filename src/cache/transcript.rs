@@ -45,7 +45,7 @@ pub enum TranscriptError {
 ///
 /// # Arguments
 ///
-/// * `video_id` - YouTube video identifier.
+/// * `video_id` - `YouTube` video identifier.
 /// * `work_dir` - Temporary directory where subtitle artifacts are written.
 ///
 /// # Returns
@@ -58,12 +58,14 @@ pub enum TranscriptError {
 pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String, TranscriptError> {
     let url = urls::watch_url(video_id);
     tokio::fs::create_dir_all(work_dir).await?;
-    let output_template = work_dir.join(format!("{}.%(ext)s", video_id));
+    let output_template = work_dir.join(format!("{video_id}.%(ext)s"));
 
     // Run yt-dlp to download auto-generated subtitles in json3 format.
     let output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
         let mut command = super::nice_command("yt-dlp");
         command
+            .arg("--cookies-from-browser")
+            .arg("chromium")
             .arg("--write-auto-sub")
             .arg("--sub-format")
             .arg("json3")
@@ -111,8 +113,7 @@ fn find_subtitle_path(
                 && path
                     .file_name()
                     .and_then(OsStr::to_str)
-                    .map(|name| name.starts_with(&expected_prefix))
-                    .unwrap_or(false)
+                    .is_some_and(|name| name.starts_with(&expected_prefix))
         })
         .ok_or_else(|| TranscriptError::SubtitleFileNotFound {
             video_id: video_id.to_string(),

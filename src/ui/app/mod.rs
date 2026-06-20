@@ -83,15 +83,12 @@ impl AppState {
     }
 
     fn set_refreshed_feed_videos(&mut self, videos: Vec<Video>) {
-        let incoming_video_id_set = videos
+        let incoming_video_id_set: HashSet<String> = videos
             .iter()
             .map(|video| video.video_id().to_string())
-            .collect::<HashSet<_>>();
-        let incoming_video_ids = videos
-            .iter()
-            .map(|video| video.video_id().to_string())
-            .collect::<Vec<_>>();
-        let preserved_watch_later_videos = self
+            .collect();
+        #[allow(clippy::needless_collect)]
+        let preserved_watch_later_videos: Vec<_> = self
             .videos
             .iter()
             .filter(|(video_id, _)| {
@@ -99,7 +96,12 @@ impl AppState {
                     && !incoming_video_id_set.contains(*video_id)
             })
             .map(|(_, video)| video.clone())
-            .collect::<Vec<_>>();
+            .collect();
+
+        let feed_video_ids: Vec<String> = videos
+            .iter()
+            .map(|video| video.video_id().to_string())
+            .collect();
 
         self.set_videos(videos);
         self.videos.extend(
@@ -107,7 +109,7 @@ impl AppState {
                 .into_iter()
                 .map(|video| (video.video_id().to_string(), video)),
         );
-        self.feed_video_ids = incoming_video_ids.into_iter().collect();
+        self.feed_video_ids = feed_video_ids;
     }
 
     fn set_search_results(&mut self, videos: Vec<Video>) {
@@ -227,6 +229,8 @@ struct AppContext {
     subs_file: PathBuf,
 }
 
+/// Temporarily disables Miyoo video conversion. Set to `true` to re-enable.
+const MIYOO_GENERATION_ENABLED: bool = false;
 const CARD_WIDTH: i32 = 320;
 const CARD_SPACING: i32 = 16;
 const FROGPOINTS_REFRESH_COST: i64 = 10;
@@ -256,7 +260,7 @@ fn is_legacy_download(path: &Path) -> bool {
 }
 
 fn needs_download_upgrade(local_path: Option<&Path>) -> bool {
-    local_path.map(is_legacy_download).unwrap_or(true)
+    local_path.is_none_or(is_legacy_download)
 }
 
 fn frogpoints_path() -> Result<PathBuf, FrogpointsError> {
@@ -351,7 +355,7 @@ fn mpv_window_exists() -> bool {
     {
         Ok(status) => status.success(),
         Err(error) => {
-            warn!("Failed to query mpv windows with xdotool: {}", error);
+            warn!("Failed to query mpv windows with xdotool: {error}");
             false
         }
     }
@@ -361,7 +365,7 @@ fn charge_leisure_frogpoint_if_needed() {
     let template_dir = match svg_template_path() {
         Ok(path) => path,
         Err(error) => {
-            warn!("Failed to locate SVG template directory: {}", error);
+            warn!("Failed to locate SVG template directory: {error}");
             return;
         }
     };
@@ -392,14 +396,14 @@ fn charge_leisure_frogpoint_if_needed() {
     let path = match frogpoints_path() {
         Ok(path) => path,
         Err(error) => {
-            warn!("Failed to locate frogpoints file: {}", error);
+            warn!("Failed to locate frogpoints file: {error}");
             return;
         }
     };
 
     match decrement_frogpoints(&path, FROGPOINTS_LEISURE_COST) {
         Ok(remaining) => info!("Leisure mpv minute charged; {remaining} frogpoints remaining"),
-        Err(error) => warn!("Failed to charge leisure frogpoint: {}", error),
+        Err(error) => warn!("Failed to charge leisure frogpoint: {error}"),
     }
 }
 
@@ -418,7 +422,7 @@ fn start_frogpoints_leisure_monitor() {
 }
 
 fn spawn_video_download(
-    runtime: Arc<Runtime>,
+    runtime: &Arc<Runtime>,
     storage: Storage,
     video_id: String,
     video_path: PathBuf,
@@ -427,16 +431,15 @@ fn spawn_video_download(
     let (tx, rx) = async_channel::bounded(1);
     runtime.spawn(async move {
         if let Err(download_error) = download_video(&video_id, &video_path).await {
-            error!("Failed to download video {}: {}", video_id, download_error);
+            error!("Failed to download video {video_id}: {download_error}");
         } else {
-            let subtitle_path = storage.find_subtitle_path(&video_id);
-            if let Err(convert_error) =
-                convert_to_miyoo(&video_path, subtitle_path.as_deref(), &miyoo_path).await
-            {
-                error!(
-                    "Failed to convert video {} for miyoo: {}",
-                    video_id, convert_error
-                );
+            if MIYOO_GENERATION_ENABLED {
+                let subtitle_path = storage.find_subtitle_path(&video_id);
+                if let Err(convert_error) =
+                    convert_to_miyoo(&video_path, subtitle_path.as_deref(), &miyoo_path).await
+                {
+                    error!("Failed to convert video {video_id} for miyoo: {convert_error}");
+                }
             }
             let _ = tx.send(video_id.clone()).await;
         }
@@ -444,7 +447,10 @@ fn spawn_video_download(
     rx
 }
 
-fn retry_missing_miyoo_conversions(runtime: Arc<Runtime>, storage: Storage) {
+fn retry_missing_miyoo_conversions(runtime: &Arc<Runtime>, storage: Storage) {
+    if !MIYOO_GENERATION_ENABLED {
+        return;
+    }
     runtime.spawn(async move {
         let storage_for_scan = storage.clone();
         let missing_conversions =
@@ -453,14 +459,11 @@ fn retry_missing_miyoo_conversions(runtime: Arc<Runtime>, storage: Storage) {
             {
                 Ok(Ok(missing_conversions)) => missing_conversions,
                 Ok(Err(scan_error)) => {
-                    warn!(
-                        "Failed to scan for missing Miyoo conversions: {}",
-                        scan_error
-                    );
+                    warn!("Failed to scan for missing Miyoo conversions: {scan_error}");
                     return;
                 }
                 Err(join_error) => {
-                    error!("Miyoo conversion scan task failed: {}", join_error);
+                    error!("Miyoo conversion scan task failed: {join_error}");
                     return;
                 }
             };
@@ -481,30 +484,27 @@ fn retry_missing_miyoo_conversions(runtime: Arc<Runtime>, storage: Storage) {
             if let Err(convert_error) =
                 convert_to_miyoo(&input_path, subtitle_path.as_deref(), &output_path).await
             {
-                error!(
-                    "Failed to retry Miyoo conversion for video {}: {}",
-                    video_id, convert_error
-                );
+                error!("Failed to retry Miyoo conversion for video {video_id}: {convert_error}");
             }
         }
     });
 }
 
-fn persist_watch_later(runtime: Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
+fn persist_watch_later(runtime: &Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
     runtime.spawn(async move {
         match tokio::task::spawn_blocking(move || storage.save_watch_later(&watch_later)).await {
             Ok(Ok(())) => {}
             Ok(Err(save_error)) => {
-                error!("Failed to persist watch-later list: {}", save_error);
+                error!("Failed to persist watch-later list: {save_error}");
             }
             Err(join_error) => {
-                error!("Watch-later persistence task failed: {}", join_error);
+                error!("Watch-later persistence task failed: {join_error}");
             }
         }
     });
 }
 
-fn persist_unsubscribe(runtime: Arc<Runtime>, subs_file: PathBuf, channel_id: String) {
+fn persist_unsubscribe(runtime: &Arc<Runtime>, subs_file: PathBuf, channel_id: String) {
     runtime.spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             let content = std::fs::read_to_string(&subs_file)?;
@@ -526,38 +526,35 @@ fn persist_unsubscribe(runtime: Arc<Runtime>, subs_file: PathBuf, channel_id: St
 
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(io_error)) => error!("Failed to remove channel from subs file: {}", io_error),
-            Err(join_error) => error!("Unsubscribe task panicked: {}", join_error),
+            Ok(Err(io_error)) => error!("Failed to remove channel from subs file: {io_error}"),
+            Err(join_error) => error!("Unsubscribe task panicked: {join_error}"),
         }
     });
 }
 
-fn persist_videos(runtime: Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
+fn persist_videos(runtime: &Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
     runtime.spawn(async move {
         match tokio::task::spawn_blocking(move || storage.save_videos(&videos)).await {
             Ok(Ok(())) => {}
             Ok(Err(save_error)) => {
-                error!("Failed to persist refreshed videos cache: {}", save_error);
+                error!("Failed to persist refreshed videos cache: {save_error}");
             }
             Err(join_error) => {
-                error!("Video cache persistence task failed: {}", join_error);
+                error!("Video cache persistence task failed: {join_error}");
             }
         }
     });
 }
 
-fn persist_feed_video_ids(runtime: Arc<Runtime>, storage: Storage, video_ids: Vec<String>) {
+fn persist_feed_video_ids(runtime: &Arc<Runtime>, storage: Storage, video_ids: Vec<String>) {
     runtime.spawn(async move {
         match tokio::task::spawn_blocking(move || storage.save_feed_video_ids(&video_ids)).await {
             Ok(Ok(())) => {}
             Ok(Err(save_error)) => {
-                error!("Failed to persist refreshed feed video IDs: {}", save_error);
+                error!("Failed to persist refreshed feed video IDs: {save_error}");
             }
             Err(join_error) => {
-                error!(
-                    "Failed to join refreshed feed ID persistence task: {}",
-                    join_error
-                );
+                error!("Failed to join refreshed feed ID persistence task: {join_error}");
             }
         }
     });
@@ -565,7 +562,7 @@ fn persist_feed_video_ids(runtime: Arc<Runtime>, storage: Storage, video_ids: Ve
 
 fn resolve_playback_path(
     storage: &Storage,
-    runtime: Arc<Runtime>,
+    runtime: &Arc<Runtime>,
     video_id: &str,
     video_title: &str,
     local_path: Option<PathBuf>,
@@ -593,12 +590,14 @@ fn flow_column_count_for_viewport(viewport_width: i32) -> u32 {
     if viewport_width < CARD_WIDTH {
         1
     } else {
-        ((viewport_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING)).max(1) as u32
+        ((viewport_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING))
+            .max(1)
+            .cast_unsigned()
     }
 }
 
-fn flow_width_for_columns(column_count: u32) -> i32 {
-    let column_count = column_count as i32;
+const fn flow_width_for_columns(column_count: u32) -> i32 {
+    let column_count = column_count.cast_signed();
     column_count * CARD_WIDTH + (column_count - 1) * CARD_SPACING
 }
 
@@ -632,7 +631,7 @@ fn configure_scrolled_window_layout(scroll: &ScrolledWindow) {
     scroll.set_min_content_width(CARD_WIDTH);
 }
 
-fn usable_viewport_width(viewport_width: i32, fallback_width: i32) -> Option<i32> {
+const fn usable_viewport_width(viewport_width: i32, fallback_width: i32) -> Option<i32> {
     if viewport_width > 1 {
         Some(viewport_width)
     } else if fallback_width > 1 {
@@ -772,7 +771,7 @@ fn toggle_watch_later_and_download(
             let video_path = state.storage.video_path(video_id, video_title);
             let miyoo_path = state.storage.miyoo_video_path(video_id, video_title);
             Some(spawn_video_download(
-                runtime.clone(),
+                runtime,
                 state.storage.clone(),
                 video_id.to_string(),
                 video_path,
@@ -784,10 +783,7 @@ fn toggle_watch_later_and_download(
 
         if !added {
             if let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
-                error!(
-                    "Failed to remove cached video {}: {}",
-                    video_id, remove_error
-                );
+                error!("Failed to remove cached video {video_id}: {remove_error}");
             }
         }
 
@@ -799,35 +795,35 @@ fn toggle_watch_later_and_download(
         )
     };
 
-    persist_watch_later(runtime.clone(), storage, watch_later_snapshot);
+    persist_watch_later(runtime, storage, watch_later_snapshot);
     (added, download_rx)
 }
 
 fn apply_watch_later_action(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
-    video_id: String,
+    video_id: &str,
 ) {
     let video_title = {
         let state = state_rc.borrow();
         state
-            .video_by_id(&video_id)
+            .video_by_id(video_id)
             .map(|video| video.title().to_string())
     };
     let Some(video_title) = video_title else {
-        error!("Cannot toggle watch-later for missing video {}", video_id);
+        error!("Cannot toggle watch-later for missing video {video_id}");
         return;
     };
 
     let (added, download_rx) =
-        toggle_watch_later_and_download(state_rc, &ui_context.runtime, &video_id, &video_title);
-    update_watch_later_toggles(ui_context, &video_id, added);
+        toggle_watch_later_and_download(state_rc, &ui_context.runtime, video_id, &video_title);
+    update_watch_later_toggles(ui_context, video_id, added);
     update_watch_later_badge(&ui_context.badge, state_rc.borrow().watch_later.len());
-    sync_watch_later_card(state_rc, ui_context, &video_id);
+    sync_watch_later_card(state_rc, ui_context, video_id);
     if added {
-        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, &video_id);
+        maybe_prefetch_summary_for_watch_later(state_rc, ui_context, video_id);
         if let Some(rx) = download_rx {
-            refresh_video_downloading_badge(ui_context, &video_id);
+            refresh_video_downloading_badge(ui_context, video_id);
             let ui_ctx = ui_context.clone();
             glib::MainContext::default().spawn_local(async move {
                 if let Ok(completed_video_id) = rx.recv().await {
@@ -849,19 +845,15 @@ fn apply_watch_later_action(
 /// * `state_rc` - Shared application state.
 /// * `ui_context` - UI handle used to parent the dialog and update card lists.
 /// * `video_id` - ID of a video belonging to the channel to unsubscribe from.
-fn unsubscribe_channel(
-    state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &AppContext,
-    video_id: String,
-) {
+fn unsubscribe_channel(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
     let channel_info = {
         let state = state_rc.borrow();
         state
-            .video_by_id(&video_id)
+            .video_by_id(video_id)
             .map(|v| (v.channel_id().to_string(), v.channel_name().to_string()))
     };
     let Some((channel_id, channel_name)) = channel_info else {
-        error!("Cannot unsubscribe: missing video {}", video_id);
+        error!("Cannot unsubscribe: missing video {video_id}");
         return;
     };
 
@@ -870,7 +862,7 @@ fn unsubscribe_channel(
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
         gtk::MessageType::Question,
         gtk::ButtonsType::YesNo,
-        &format!("Unsubscribe from {}?", channel_name),
+        &format!("Unsubscribe from {channel_name}?"),
     );
     dialog.set_secondary_text(Some(
         "All videos from this channel will be removed from your feed.",
@@ -884,7 +876,7 @@ fn unsubscribe_channel(
 
     // Only persist the change — videos disappear from the feed on next refresh.
     persist_unsubscribe(
-        ui_context.runtime.clone(),
+        &ui_context.runtime,
         ui_context.subs_file.clone(),
         channel_id,
     );
@@ -919,7 +911,7 @@ fn spawn_refresh_progress_updates(
                     status_label.set_text(&format!(
                         "Fetching feeds ({completed_channels}/{total_channels}{failed})..."
                     ));
-                    info!("Fetched {} videos for channel {}", count, channel);
+                    info!("Fetched {count} videos for channel {channel}");
                 }
                 FetchProgress::RetryScheduled {
                     channel_id,
@@ -929,27 +921,24 @@ fn spawn_refresh_progress_updates(
                     reason,
                 } => {
                     status_label.set_text(&format!(
-                        "Retrying {} ({}/{}) in {}s...",
-                        channel_id, next_attempt, max_attempts, delay_secs
+                        "Retrying {channel_id} ({next_attempt}/{max_attempts}) in {delay_secs}s..."
                     ));
                     warn!(
-                        "Retrying channel {} ({}/{}) in {}s: {}",
-                        channel_id, next_attempt, max_attempts, delay_secs, reason
+                        "Retrying channel {channel_id} ({next_attempt}/{max_attempts}) in {delay_secs}s: {reason}"
                     );
                 }
                 FetchProgress::Error { channel_id, error } => {
                     completed_channels += 1;
                     failed_channels += 1;
                     status_label.set_text(&format!(
-                        "Failed {} of {} channels (last: {})",
-                        failed_channels, total_channels, channel_id
+                        "Failed {failed_channels} of {total_channels} channels (last: {channel_id})"
                     ));
-                    error!("Error fetching {}: {}", channel_id, error);
+                    error!("Error fetching {channel_id}: {error}");
                 }
                 FetchProgress::Fatal { error } => {
                     spinner.stop();
-                    status_label.set_text(&format!("Refresh failed: {}", error));
-                    error!("Fatal refresh error: {}", error);
+                    status_label.set_text(&format!("Refresh failed: {error}"));
+                    error!("Fatal refresh error: {error}");
                     break;
                 }
                 FetchProgress::AllComplete {
@@ -960,11 +949,10 @@ fn spawn_refresh_progress_updates(
                     spinner.stop();
                     if final_failed > 0 {
                         status_label.set_text(&format!(
-                            "{} videos loaded ({} channels ok, {} failed)",
-                            total_videos, successful_channels, final_failed
+                            "{total_videos} videos loaded ({successful_channels} channels ok, {final_failed} failed)"
                         ));
                     } else {
-                        status_label.set_text(&format!("{} videos loaded", total_videos));
+                        status_label.set_text(&format!("{total_videos} videos loaded"));
                     }
                     break;
                 }
@@ -996,12 +984,12 @@ fn spawn_refreshed_videos_apply(
             state.set_refreshed_feed_videos(videos);
             let videos_for_persistence = state.videos.values().cloned().collect::<Vec<_>>();
             persist_videos(
-                runtime_for_persistence,
+                &runtime_for_persistence,
                 storage_for_persistence,
                 videos_for_persistence,
             );
             persist_feed_video_ids(
-                feed_id_runtime_for_persistence,
+                &feed_id_runtime_for_persistence,
                 feed_id_storage_for_persistence,
                 feed_video_ids_for_persistence,
             );
@@ -1010,7 +998,7 @@ fn spawn_refreshed_videos_apply(
                 state.videos.values(),
                 &state.storage,
                 ui_context.http_client.clone(),
-                ui_context.runtime.clone(),
+                &ui_context.runtime,
             );
             drop(state);
 
@@ -1053,7 +1041,7 @@ fn start_youtube_search(
     spinner: Spinner,
     status_label: Label,
     search_button: Button,
-    query: String,
+    query: &str,
 ) {
     let query = query.trim().to_string();
     if query.is_empty() {
@@ -1086,7 +1074,7 @@ fn start_youtube_search(
                         videos.iter(),
                         &state.storage,
                         ui_context.http_client.clone(),
-                        ui_context.runtime.clone(),
+                        &ui_context.runtime,
                     );
                     state.set_search_results(videos);
                     completion
@@ -1113,11 +1101,11 @@ fn start_youtube_search(
             }
             Ok(Err(error)) => {
                 status_label.set_text(&format!("Search failed: {error}"));
-                error!("YouTube search failed: {}", error);
+                error!("YouTube search failed: {error}");
             }
             Err(error) => {
                 status_label.set_text("Search failed");
-                error!("YouTube search result channel closed: {}", error);
+                error!("YouTube search result channel closed: {error}");
             }
         }
 
@@ -1132,7 +1120,7 @@ fn start_feed_refresh(
     spinner: Spinner,
     status_label: Label,
     refresh_button: Button,
-    subs_file: PathBuf,
+    subs_file: &Path,
 ) {
     refresh_button.set_sensitive(false);
     spinner.start();
@@ -1150,11 +1138,11 @@ fn start_feed_refresh(
         }
     }
 
-    let channel_ids = match load_channel_ids(&subs_file) {
+    let channel_ids = match load_channel_ids(subs_file) {
         Ok(ids) => ids,
         Err(error) => {
             spinner.stop();
-            status_label.set_text(&format!("Error: {}", error));
+            status_label.set_text(&format!("Error: {error}"));
             refresh_button.set_sensitive(true);
             return;
         }
@@ -1190,11 +1178,12 @@ fn start_feed_refresh(
 ///
 /// * `app` - Active GTK application instance.
 /// * `subs_file` - Path to the channel subscription file.
+#[allow(clippy::too_many_lines)]
 pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let runtime = match Runtime::new() {
         Ok(runtime) => Arc::new(runtime),
         Err(runtime_error) => {
-            error!("Failed to create tokio runtime: {}", runtime_error);
+            error!("Failed to create tokio runtime: {runtime_error}");
             return;
         }
     };
@@ -1202,7 +1191,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let storage = match Storage::new() {
         Ok(storage) => storage,
         Err(storage_error) => {
-            error!("Failed to initialize storage: {}", storage_error);
+            error!("Failed to initialize storage: {storage_error}");
             return;
         }
     };
@@ -1230,40 +1219,34 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         );
         videos.extend(repaired_watch_later_videos);
         if let Err(save_error) = storage.save_videos(&videos) {
-            warn!(
-                "Failed to persist repaired watch-later video metadata: {}",
-                save_error
-            );
+            warn!("Failed to persist repaired watch-later video metadata: {save_error}");
         }
     }
     if should_seed_feed_video_ids {
         if let Err(save_error) = storage.save_feed_video_ids(&feed_video_ids) {
-            warn!("Failed to persist initial feed video IDs: {}", save_error);
+            warn!("Failed to persist initial feed video IDs: {save_error}");
         }
     }
     let feed_video_id_set = feed_video_ids.iter().cloned().collect::<HashSet<_>>();
 
     match storage.cleanup_unreferenced_cache_files(&watch_later, &feed_video_id_set) {
         Ok(removed_count) if removed_count > 0 => {
-            info!("Removed {} unreferenced cache artifacts", removed_count);
+            info!("Removed {removed_count} unreferenced cache artifacts");
         }
         Ok(_) => {}
         Err(cleanup_error) => {
-            warn!(
-                "Failed to clean up unreferenced cache artifacts: {}",
-                cleanup_error
-            );
+            warn!("Failed to clean up unreferenced cache artifacts: {cleanup_error}");
         }
     }
 
-    retry_missing_miyoo_conversions(runtime.clone(), storage.clone());
+    retry_missing_miyoo_conversions(&runtime, storage.clone());
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
     {
         Ok(client) => client,
         Err(client_error) => {
-            error!("Failed to initialize HTTP client: {}", client_error);
+            error!("Failed to initialize HTTP client: {client_error}");
             return;
         }
     };
@@ -1287,7 +1270,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     let css_provider = gtk::CssProvider::new();
     if let Err(css_error) = css_provider.load_from_data(include_bytes!("../style.css")) {
-        warn!("Failed to load CSS: {}", css_error);
+        warn!("Failed to load CSS: {css_error}");
     }
     if let Some(screen) = gdk::Screen::default() {
         gtk::StyleContext::add_provider_for_screen(
@@ -1368,22 +1351,22 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     let ui_context = AppContext {
         summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
-        runtime: runtime.clone(),
-        http_client: http_client.clone(),
+        runtime,
+        http_client,
         window: window.clone(),
         context_menu: context_menu.clone(),
         stack: stack.clone(),
         feed_scroll: feed_scroll.clone(),
-        feed_flow: feed_flow.clone(),
+        feed_flow,
         search_scroll: search_scroll.clone(),
-        search_flow: search_flow.clone(),
+        search_flow,
         watch_later_scroll: watch_later_scroll.clone(),
-        watch_later_flow: watch_later_flow.clone(),
-        selected_video: selected_video.clone(),
-        badge: badge.clone(),
-        feed_cards: feed_cards.clone(),
-        search_cards: search_cards.clone(),
-        watch_later_cards: watch_later_cards.clone(),
+        watch_later_flow,
+        selected_video,
+        badge,
+        feed_cards,
+        search_cards,
+        watch_later_cards,
         subs_file: subs_file.clone(),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
@@ -1425,7 +1408,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let stack = stack.clone();
         let search_tab = search_tab.clone();
         let watch_later_tab = watch_later_tab.clone();
-        let feed_scroll = feed_scroll.clone();
+        let feed_scroll = feed_scroll;
         let ui_context = ui_context.clone();
         feed_tab.connect_toggled(move |button| {
             if !button.is_active() {
@@ -1447,7 +1430,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let stack = stack.clone();
         let feed_tab = feed_tab.clone();
         let search_tab = search_tab.clone();
-        let watch_later_scroll = watch_later_scroll.clone();
+        let watch_later_scroll = watch_later_scroll;
         let ui_context = ui_context.clone();
         watch_later_tab.connect_toggled(move |button| {
             if !button.is_active() {
@@ -1471,11 +1454,11 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         });
     }
     {
-        let stack = stack.clone();
-        let feed_tab = feed_tab.clone();
-        let watch_later_tab = watch_later_tab.clone();
+        let stack = stack;
+        let feed_tab = feed_tab;
+        let watch_later_tab = watch_later_tab;
         let search_entry = search_entry.clone();
-        let search_scroll = search_scroll.clone();
+        let search_scroll = search_scroll;
         let ui_context = ui_context.clone();
         search_tab.connect_toggled(move |button| {
             if !button.is_active() {
@@ -1539,7 +1522,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 spinner.clone(),
                 status_label.clone(),
                 search_button.clone(),
-                entry.text().to_string(),
+                &entry.text(),
             );
         });
     }
@@ -1548,7 +1531,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let ui_context = ui_context.clone();
         let spinner = spinner.clone();
         let status_label = status_label.clone();
-        let search_entry = search_entry.clone();
+        let search_entry = search_entry;
         search_button.connect_clicked(move |button| {
             start_youtube_search(
                 state.clone(),
@@ -1556,17 +1539,16 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 spinner.clone(),
                 status_label.clone(),
                 button.clone(),
-                search_entry.text().to_string(),
+                &search_entry.text(),
             );
         });
     }
 
     {
         let state = state.clone();
-        let status_label = status_label.clone();
-        let spinner = spinner.clone();
+        let status_label = status_label;
+        let spinner = spinner;
         let ui_context = ui_context.clone();
-        let subs_file = subs_file.clone();
         let refresh_button_for_handler = refresh_button.clone();
         refresh_button.connect_clicked(move |_| {
             start_feed_refresh(
@@ -1575,7 +1557,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
                 spinner.clone(),
                 status_label.clone(),
                 refresh_button_for_handler.clone(),
-                subs_file.clone(),
+                &subs_file,
             );
         });
     }
@@ -1586,11 +1568,11 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             state_ref.videos.values(),
             &state_ref.storage,
             ui_context.http_client.clone(),
-            ui_context.runtime.clone(),
+            &ui_context.runtime,
         )
     };
     if let Some(startup_thumbnail_completion) = startup_thumbnail_completion {
-        let state_for_startup = state.clone();
+        let state_for_startup = state;
         let ui_context_for_startup = ui_context.clone();
         glib::MainContext::default().spawn_local(async move {
             if let Ok(video_ids) = startup_thumbnail_completion.recv().await {
@@ -1824,7 +1806,7 @@ mod tests {
             video_id.to_string(),
             "channel-id".to_string(),
             channel_name.to_string(),
-            title.to_string(),
+            title,
             published,
             "https://example.com/thumb.jpg".to_string(),
             None,

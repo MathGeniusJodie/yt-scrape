@@ -40,6 +40,7 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !b
 }
@@ -74,7 +75,7 @@ struct YtDlpInfoJson {
 }
 
 impl VideoMetadataSidecar {
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.transcript.is_none() && self.ai_summary.is_none() && !self.watched
     }
 }
@@ -98,7 +99,7 @@ impl YtDlpInfoJson {
             self.channel
                 .or(self.uploader)
                 .unwrap_or_else(|| "Unknown channel".to_string()),
-            self.title.unwrap_or_else(|| "Untitled".to_string()),
+            self.title.as_deref().unwrap_or("Untitled"),
             published,
             self.thumbnail
                 .unwrap_or_else(|| urls::thumbnail_url(video_id)),
@@ -108,6 +109,7 @@ impl YtDlpInfoJson {
 }
 
 fn duration_to_seconds(duration: f64) -> Option<u32> {
+    #[allow(clippy::cast_sign_loss)]
     if duration.is_finite() && duration >= 0.0 && duration <= f64::from(u32::MAX) {
         Some(duration.round() as u32)
     } else {
@@ -164,9 +166,8 @@ fn try_load_json_file<T: DeserializeOwned>(path: &Path, context: &str) -> Option
 }
 
 fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
-    let entries = match std::fs::read_dir(videos_dir) {
-        Ok(entries) => entries,
-        Err(_) => return HashSet::new(),
+    let Ok(entries) = std::fs::read_dir(videos_dir) else {
+        return HashSet::new();
     };
 
     entries
@@ -275,6 +276,7 @@ fn sanitize_filename(input: &str) -> String {
 
 /// Manages filesystem-backed persistence for video metadata and cached assets.
 #[derive(Clone)]
+#[allow(clippy::struct_field_names)]
 pub struct Storage {
     data_dir: PathBuf,
     cache_dir: PathBuf,
@@ -367,6 +369,7 @@ impl Storage {
         Ok(1)
     }
 
+    #[allow(clippy::unused_self)]
     fn prune_directory_entries<F>(&self, dir: &Path, keep_entry: F) -> StorageResult<usize>
     where
         F: Fn(&Path) -> bool,
@@ -413,18 +416,13 @@ impl Storage {
 
         let mut removed_count = self.prune_directory_entries(&self.cache_dir, |path| {
             let name = path.file_name().and_then(OsStr::to_str);
-            (path.is_file()
-                && matches!(
-                    name,
-                    Some(VIDEOS_CACHE_FILE) | Some(FEED_VIDEO_IDS_CACHE_FILE)
-                ))
+            (path.is_file() && matches!(name, Some(VIDEOS_CACHE_FILE | FEED_VIDEO_IDS_CACHE_FILE)))
                 || path.is_dir()
                     && matches!(
                         name,
-                        Some(THUMBNAILS_DIR)
-                            | Some(VIDEOS_DIR)
-                            | Some(VIDEO_SIDECARS_DIR)
-                            | Some(TRANSCRIPTS_WORK_DIR)
+                        Some(
+                            THUMBNAILS_DIR | VIDEOS_DIR | VIDEO_SIDECARS_DIR | TRANSCRIPTS_WORK_DIR
+                        )
                     )
         })?;
 
@@ -467,7 +465,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     ///
     /// # Returns
     ///
@@ -480,7 +478,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     /// * `title` - Raw video title used for filename generation.
     ///
     /// # Returns
@@ -496,7 +494,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     /// * `title` - Raw video title used for filename generation.
     pub fn miyoo_video_path(&self, video_id: &str, title: &str) -> PathBuf {
         let sanitized_title = sanitize_filename(title);
@@ -510,7 +508,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     ///
     /// # Returns
     ///
@@ -528,7 +526,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     ///
     /// # Returns
     ///
@@ -619,7 +617,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier to remove from local video cache.
+    /// * `video_id` - `YouTube` video identifier to remove from local video cache.
     ///
     /// # Returns
     ///
@@ -862,7 +860,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     /// * `transcript` - Optional transcript text to write.
     /// * `ai_summary` - Optional summary text to write.
     ///
@@ -890,7 +888,7 @@ impl Storage {
     ///
     /// # Arguments
     ///
-    /// * `video_id` - YouTube video identifier.
+    /// * `video_id` - `YouTube` video identifier.
     /// * `watched` - Whether the video has been watched.
     ///
     /// # Errors
@@ -948,7 +946,7 @@ mod tests {
             video_id.to_string(),
             "UC123".to_string(),
             "Channel".to_string(),
-            format!("Title {video_id}"),
+            &format!("Title {video_id}"),
             published.with_timezone(&Utc),
             "https://example.com/thumb.jpg".to_string(),
             Some(120),

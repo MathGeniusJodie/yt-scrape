@@ -6,6 +6,7 @@ use futures::stream::{self, StreamExt};
 use log::warn;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::time::{sleep, Duration, Instant};
@@ -41,24 +42,24 @@ pub enum FeedError {
     },
 }
 
-/// Errors that can occur while fetching YouTube search results.
+/// Errors that can occur while fetching `YouTube` search results.
 #[derive(Debug, Error)]
 pub enum SearchError {
     /// Required API key was not present in the process environment.
     #[error("GOOGLE_API_KEY is not set. Set it before searching YouTube.")]
     MissingApiKey,
-    /// YouTube search or metadata request failed.
+    /// `YouTube` search or metadata request failed.
     #[error("YouTube search request failed: {0}")]
     Request(#[from] reqwest::Error),
 }
 
-/// Errors that can occur while fetching YouTube comments.
+/// Errors that can occur while fetching `YouTube` comments.
 #[derive(Debug, Error)]
 pub enum CommentError {
     /// Required API key was not present in the process environment.
     #[error("GOOGLE_API_KEY is not set. Set it before loading comments.")]
     MissingApiKey,
-    /// YouTube comments request failed.
+    /// `YouTube` comments request failed.
     #[error("YouTube comments request failed: {0}")]
     Request(#[from] reqwest::Error),
 }
@@ -325,22 +326,21 @@ pub async fn fetch_all_feeds(
     let mut pending_channels = Vec::new();
 
     for channel_id in channel_ids {
-        match uploads_playlist_id_for_channel(&channel_id) {
-            Some(uploads_playlist_id) => pending_channels.push(PendingChannel {
+        if let Some(uploads_playlist_id) = uploads_playlist_id_for_channel(&channel_id) {
+            pending_channels.push(PendingChannel {
                 channel_id,
                 uploads_playlist_id,
                 attempt: 1,
                 not_before: Instant::now(),
-            }),
-            None => {
-                failed_channels += 1;
-                let _ = tx
-                    .send(FetchProgress::Error {
-                        channel_id,
-                        error: "Invalid channel ID. Expected an ID starting with 'UC'.".to_string(),
-                    })
-                    .await;
-            }
+            });
+        } else {
+            failed_channels += 1;
+            let _ = tx
+                .send(FetchProgress::Error {
+                    channel_id,
+                    error: "Invalid channel ID. Expected an ID starting with 'UC'.".to_string(),
+                })
+                .await;
         }
     }
 
@@ -383,21 +383,21 @@ pub async fn fetch_all_feeds(
     Ok(all_videos)
 }
 
-/// Search YouTube for videos matching a query.
+/// Search `YouTube` for videos matching a query.
 ///
 /// # Arguments
 ///
-/// * `client` - HTTP client used for YouTube Data API requests.
-/// * `query` - Search text to send to YouTube.
+/// * `client` - HTTP client used for `YouTube` Data API requests.
+/// * `query` - Search text to send to `YouTube`.
 ///
 /// # Returns
 ///
-/// Video metadata in the order returned by YouTube search.
+/// Video metadata in the order returned by `YouTube` search.
 ///
 /// # Errors
 ///
 /// Returns [`SearchError::MissingApiKey`] if `GOOGLE_API_KEY` is unset.
-/// Returns [`SearchError::Request`] if the YouTube search or duration request fails.
+/// Returns [`SearchError::Request`] if the `YouTube` search or duration request fails.
 pub async fn fetch_youtube_search(
     client: &reqwest::Client,
     query: &str,
@@ -424,12 +424,12 @@ pub async fn fetch_youtube_search(
     Ok(videos_from_search_items(payload, &durations_by_video_id))
 }
 
-/// Fetches and formats public comments for a YouTube video.
+/// Fetches and formats public comments for a `YouTube` video.
 ///
 /// # Arguments
 ///
-/// * `client` - HTTP client used for YouTube Data API requests.
-/// * `video_id` - YouTube video ID whose public comment threads should be loaded.
+/// * `client` - HTTP client used for `YouTube` Data API requests.
+/// * `video_id` - `YouTube` video ID whose public comment threads should be loaded.
 ///
 /// # Returns
 ///
@@ -438,7 +438,7 @@ pub async fn fetch_youtube_search(
 /// # Errors
 ///
 /// Returns [`CommentError::MissingApiKey`] if `GOOGLE_API_KEY` is unset.
-/// Returns [`CommentError::Request`] if YouTube rejects or fails the comments request.
+/// Returns [`CommentError::Request`] if `YouTube` rejects or fails the comments request.
 pub async fn fetch_youtube_comments(
     client: &reqwest::Client,
     video_id: &str,
@@ -606,10 +606,7 @@ async fn fetch_channel_once(
     let durations_by_video_id = match fetch_video_durations(client, api_key, &video_ids).await {
         Ok(durations) => durations,
         Err(error) => {
-            warn!(
-                "Failed fetching durations for channel {}: {}",
-                channel_id, error
-            );
+            warn!("Failed fetching durations for channel {channel_id}: {error}");
             HashMap::new()
         }
     };
@@ -676,10 +673,11 @@ fn format_comment_threads(items: &[CommentThreadItem]) -> String {
         let loaded_reply_count = replies.len() as u32;
         let total_reply_count = snippet.total_reply_count.unwrap_or(loaded_reply_count);
         if total_reply_count > loaded_reply_count {
-            output.push_str(&format!(
-                "  ... {} more replies not loaded by YouTube in this response\n",
+            let _ = writeln!(
+                output,
+                "  ... {} more replies not loaded by YouTube in this response",
                 total_reply_count - loaded_reply_count
-            ));
+            );
         }
     }
 
@@ -708,10 +706,11 @@ fn push_formatted_comment(output: &mut String, index: usize, comment: &CommentIt
         format!("{index}.")
     };
 
-    output.push_str(&format!(
-        "{indent}{prefix} {author} | {like_count} likes{published}\n"
-    ));
-    output.push_str(&format!("{indent}{}\n", text.replace('\n', "\n  ")));
+    let _ = writeln!(
+        output,
+        "{indent}{prefix} {author} | {like_count} likes{published}"
+    );
+    let _ = writeln!(output, "{indent}{}", text.replace('\n', "\n  "));
 }
 
 fn videos_from_playlist_items(
@@ -745,7 +744,7 @@ fn videos_from_playlist_items(
                 video_id,
                 channel_id,
                 channel_name,
-                title,
+                &title,
                 published,
                 thumbnail_url,
                 duration_seconds,
@@ -797,7 +796,7 @@ fn videos_from_search_items(
                 video_id,
                 channel_id,
                 channel_name,
-                title,
+                &title,
                 published,
                 thumbnail_url,
                 duration_seconds,
@@ -859,7 +858,7 @@ fn parse_iso8601_duration_seconds(input: &str) -> Option<u32> {
 fn uploads_playlist_id_for_channel(channel_id: &str) -> Option<String> {
     channel_id
         .strip_prefix("UC")
-        .map(|suffix| format!("UU{}", suffix))
+        .map(|suffix| format!("UU{suffix}"))
 }
 
 fn should_retry(error: &reqwest::Error) -> bool {
@@ -868,14 +867,11 @@ fn should_retry(error: &reqwest::Error) -> bool {
     }
 
     // 404 is handled by uploads-playlist resolution in the caller and is not transient here.
-    match error.status() {
-        Some(status) => {
-            status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || status.is_server_error()
-        }
-        None => false,
-    }
+    error.status().is_some_and(|status| {
+        status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status.is_server_error()
+    })
 }
 
 fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {

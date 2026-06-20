@@ -12,12 +12,12 @@ const MIN_SUBTITLE_REQUEST_GAP: Duration = Duration::from_millis(300);
 const BASE_429_BACKOFF: Duration = Duration::from_millis(1_000);
 
 /// A pacing mechanism that serializes subtitle requests and enforces a minimum
-/// gap between them to avoid triggering YouTube rate limits.
+/// gap between them to avoid triggering `YouTube` rate limits.
 ///
 /// Use [`SubtitleRateLimiter::global`] for production code or
 /// [`SubtitleRateLimiter::new`] with a custom gap for testing.
 #[derive(Debug)]
-pub(crate) struct SubtitleRateLimiter {
+pub struct SubtitleRateLimiter {
     last_request_at: Mutex<Instant>,
     min_gap: Duration,
 }
@@ -49,7 +49,7 @@ impl SubtitleRateLimiter {
         let mut last = self.last_request_at.lock().await;
         let elapsed = last.elapsed();
         if elapsed < self.min_gap {
-            let wait = self.min_gap - elapsed;
+            let wait = self.min_gap.checked_sub(elapsed).unwrap();
             debug!("Subtitle slot throttled; waiting {wait:?} before next request.");
             sleep(wait).await;
         }
@@ -71,7 +71,7 @@ impl SubtitleRateLimiter {
 /// # Errors
 ///
 /// Returns `std::io::Error` when spawning or awaiting the command fails.
-pub(crate) async fn run_yt_dlp_subtitle_command(
+pub async fn run_yt_dlp_subtitle_command(
     limiter: &SubtitleRateLimiter,
     video_id: &str,
     mut build_command: impl FnMut() -> Command,

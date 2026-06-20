@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -55,9 +56,9 @@ fn parse_time_token(raw: &str) -> Option<f64> {
             return None;
         }
         let c: u64 = c_str.parse().ok()?;
-        Some((a * 3600 + b * 60 + c) as f64)
+        Some(f64::from((a * 3600 + b * 60 + c) as u32))
     } else {
-        Some((a * 60 + b) as f64)
+        Some(f64::from((a * 60 + b) as u32))
     }
 }
 
@@ -88,7 +89,12 @@ fn parse_description_chapters(description: &str) -> Vec<Chapter> {
 }
 
 fn build_ffmetadata(info: &InfoJson) -> Option<String> {
-    let chapters: Vec<Chapter> = if !info.chapters.is_empty() {
+    let chapters: Vec<Chapter> = if info.chapters.is_empty() {
+        info.description
+            .as_deref()
+            .map(parse_description_chapters)
+            .unwrap_or_default()
+    } else {
         info.chapters
             .iter()
             .filter_map(|c| {
@@ -96,8 +102,7 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
                 let title = c
                     .title
                     .as_deref()
-                    .map(escape_ffmetadata)
-                    .unwrap_or_else(|| "Chapter".to_string());
+                    .map_or_else(|| "Chapter".to_string(), escape_ffmetadata);
                 Some(Chapter {
                     start,
                     end: c.end_time,
@@ -105,11 +110,6 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
                 })
             })
             .collect()
-    } else {
-        info.description
-            .as_deref()
-            .map(parse_description_chapters)
-            .unwrap_or_default()
     };
 
     if chapters.is_empty() {
@@ -136,12 +136,13 @@ fn build_ffmetadata(info: &InfoJson) -> Option<String> {
         };
 
         ffmeta.push_str("[CHAPTER]\nTIMEBASE=1/1000\n");
-        ffmeta.push_str(&format!(
+        let _ = write!(
+            ffmeta,
             "START={}\nEND={}\ntitle={}\n",
             secs_to_ms(chapter.start),
             secs_to_ms(end),
             chapter.title,
-        ));
+        );
         wrote_chapter = true;
     }
 
