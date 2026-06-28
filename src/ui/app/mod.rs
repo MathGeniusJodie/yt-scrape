@@ -239,6 +239,7 @@ const FROGPOINTS_LEISURE_IDLE_SECONDS: u64 = 120;
 const FROGPOINTS_LEISURE_INTERVAL_SECONDS: u32 = 60;
 const FROGPOINTS_RELATIVE_PATH: &[&str] = &["Desktop", "RemoteVault", "frogpoints.md"];
 const SVG_TEMPLATE_RELATIVE_PATH: &[&str] = &["Desktop", "allfiles", "templates"];
+const INKSCAPE_CACHE_RELATIVE_PATH: &[&str] = &[".cache", "inkscape"];
 static FROGPOINTS_LEISURE_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Error)]
@@ -264,19 +265,23 @@ fn needs_download_upgrade(local_path: Option<&Path>) -> bool {
 }
 
 fn frogpoints_path() -> Result<PathBuf, FrogpointsError> {
+    home_relative_path(FROGPOINTS_RELATIVE_PATH)
+}
+
+fn home_relative_path(relative: &[&str]) -> Result<PathBuf, FrogpointsError> {
     let mut path = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or(FrogpointsError::MissingHome)?;
-    path.extend(FROGPOINTS_RELATIVE_PATH);
+    path.extend(relative);
     Ok(path)
 }
 
-fn svg_template_path() -> Result<PathBuf, FrogpointsError> {
-    let mut path = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(FrogpointsError::MissingHome)?;
-    path.extend(SVG_TEMPLATE_RELATIVE_PATH);
-    Ok(path)
+/// Directories scanned for recent SVG edits that mark active (non-leisure) work.
+fn svg_watch_dirs() -> Result<[PathBuf; 2], FrogpointsError> {
+    Ok([
+        home_relative_path(SVG_TEMPLATE_RELATIVE_PATH)?,
+        home_relative_path(INKSCAPE_CACHE_RELATIVE_PATH)?,
+    ])
 }
 
 fn read_frogpoints(path: &Path) -> Result<i64, FrogpointsError> {
@@ -362,27 +367,29 @@ fn mpv_window_exists() -> bool {
 }
 
 fn charge_leisure_frogpoint_if_needed() {
-    let template_dir = match svg_template_path() {
-        Ok(path) => path,
+    let watch_dirs = match svg_watch_dirs() {
+        Ok(dirs) => dirs,
         Err(error) => {
-            warn!("Failed to locate SVG template directory: {error}");
+            warn!("Failed to locate SVG watch directories: {error}");
             return;
         }
     };
-    let recent_svg_modification = match has_recent_svg_modification(
-        &template_dir,
-        Duration::from_secs(FROGPOINTS_LEISURE_IDLE_SECONDS),
-    ) {
-        Ok(recent_svg_modification) => recent_svg_modification,
-        Err(error) => {
-            warn!(
-                "Failed to inspect SVG template directory {}: {}",
-                template_dir.display(),
-                error
-            );
-            return;
+    let idle_duration = Duration::from_secs(FROGPOINTS_LEISURE_IDLE_SECONDS);
+    let recent_svg_modification = watch_dirs.iter().any(|dir| {
+        match has_recent_svg_modification(dir, idle_duration) {
+            Ok(recent) => recent,
+            // A missing directory simply means no recent edits there.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                warn!(
+                    "Failed to inspect SVG directory {}: {}",
+                    dir.display(),
+                    error
+                );
+                false
+            }
         }
-    };
+    });
 
     if !mpv_window_exists() {
         return;
