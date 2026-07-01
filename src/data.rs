@@ -145,6 +145,17 @@ pub enum Tab {
     WatchLater,
 }
 
+impl Tab {
+    /// Returns the GTK stack child name backing this tab.
+    pub const fn stack_child_name(self) -> &'static str {
+        match self {
+            Self::Feed => "feed",
+            Self::Search => "search",
+            Self::WatchLater => "watch-later",
+        }
+    }
+}
+
 /// Persisted watch-later state
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct WatchLaterData {

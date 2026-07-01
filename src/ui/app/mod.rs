@@ -2,7 +2,7 @@ mod cards;
 mod comments;
 mod summary_generator;
 
-use crate::cache::{convert_to_miyoo, download_video, Storage, StorageError};
+use crate::cache::{download_video, Storage, StorageError};
 use crate::data::{Tab, Video};
 use crate::feed::{fetch_all_feeds, fetch_youtube_search, load_channel_ids, FetchProgress};
 use cards::VideoCardWidgets;
@@ -229,9 +229,7 @@ struct AppContext {
     subs_file: PathBuf,
 }
 
-/// Temporarily disables Miyoo video conversion. Set to `true` to re-enable.
-const MIYOO_GENERATION_ENABLED: bool = false;
-const CARD_WIDTH: i32 = 320;
+use cards::CARD_WIDTH;
 const CARD_SPACING: i32 = 16;
 const FROGPOINTS_REFRESH_COST: i64 = 10;
 const FROGPOINTS_LEISURE_COST: i64 = 1;
@@ -430,140 +428,69 @@ fn start_frogpoints_leisure_monitor() {
 
 fn spawn_video_download(
     runtime: &Arc<Runtime>,
-    storage: Storage,
     video_id: String,
     video_path: PathBuf,
-    miyoo_path: PathBuf,
 ) -> async_channel::Receiver<String> {
     let (tx, rx) = async_channel::bounded(1);
     runtime.spawn(async move {
         if let Err(download_error) = download_video(&video_id, &video_path).await {
             error!("Failed to download video {video_id}: {download_error}");
         } else {
-            if MIYOO_GENERATION_ENABLED {
-                let subtitle_path = storage.find_subtitle_path(&video_id);
-                if let Err(convert_error) =
-                    convert_to_miyoo(&video_path, subtitle_path.as_deref(), &miyoo_path).await
-                {
-                    error!("Failed to convert video {video_id} for miyoo: {convert_error}");
-                }
-            }
             let _ = tx.send(video_id.clone()).await;
         }
     });
     rx
 }
 
-fn retry_missing_miyoo_conversions(runtime: &Arc<Runtime>, storage: Storage) {
-    if !MIYOO_GENERATION_ENABLED {
-        return;
-    }
+/// Runs a blocking persistence task on the runtime, logging failures under `description`.
+fn persist_in_background<E, F>(runtime: &Arc<Runtime>, description: &'static str, task: F)
+where
+    E: std::fmt::Display + Send + 'static,
+    F: FnOnce() -> Result<(), E> + Send + 'static,
+{
     runtime.spawn(async move {
-        let storage_for_scan = storage.clone();
-        let missing_conversions =
-            match tokio::task::spawn_blocking(move || storage_for_scan.missing_miyoo_conversions())
-                .await
-            {
-                Ok(Ok(missing_conversions)) => missing_conversions,
-                Ok(Err(scan_error)) => {
-                    warn!("Failed to scan for missing Miyoo conversions: {scan_error}");
-                    return;
-                }
-                Err(join_error) => {
-                    error!("Miyoo conversion scan task failed: {join_error}");
-                    return;
-                }
-            };
-
-        if missing_conversions.is_empty() {
-            return;
-        }
-
-        info!(
-            "Retrying {} missing Miyoo video conversions",
-            missing_conversions.len()
-        );
-        for (input_path, output_path, video_id) in missing_conversions {
-            if output_path.exists() {
-                continue;
-            }
-            let subtitle_path = storage.find_subtitle_path(&video_id);
-            if let Err(convert_error) =
-                convert_to_miyoo(&input_path, subtitle_path.as_deref(), &output_path).await
-            {
-                error!("Failed to retry Miyoo conversion for video {video_id}: {convert_error}");
-            }
+        match tokio::task::spawn_blocking(task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(save_error)) => error!("Failed to persist {description}: {save_error}"),
+            Err(join_error) => error!("{description} persistence task failed: {join_error}"),
         }
     });
 }
 
 fn persist_watch_later(runtime: &Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
-    runtime.spawn(async move {
-        match tokio::task::spawn_blocking(move || storage.save_watch_later(&watch_later)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(save_error)) => {
-                error!("Failed to persist watch-later list: {save_error}");
-            }
-            Err(join_error) => {
-                error!("Watch-later persistence task failed: {join_error}");
-            }
-        }
+    persist_in_background(runtime, "watch-later list", move || {
+        storage.save_watch_later(&watch_later)
     });
 }
 
 fn persist_unsubscribe(runtime: &Arc<Runtime>, subs_file: PathBuf, channel_id: String) {
-    runtime.spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
-            let content = std::fs::read_to_string(&subs_file)?;
-            let mut output = content
-                .lines()
-                .filter(|line| {
-                    let trimmed = line.trim();
-                    // Keep comments, blank lines, and lines not matching this channel
-                    trimmed.starts_with('#') || trimmed.is_empty() || trimmed != channel_id
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if content.ends_with('\n') {
-                output.push('\n');
-            }
-            std::fs::write(&subs_file, output)
-        })
-        .await;
-
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(io_error)) => error!("Failed to remove channel from subs file: {io_error}"),
-            Err(join_error) => error!("Unsubscribe task panicked: {join_error}"),
+    persist_in_background(runtime, "subscription removal", move || {
+        let content = std::fs::read_to_string(&subs_file)?;
+        let mut output = content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                // Keep comments, blank lines, and lines not matching this channel
+                trimmed.starts_with('#') || trimmed.is_empty() || trimmed != channel_id
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if content.ends_with('\n') {
+            output.push('\n');
         }
+        std::fs::write(&subs_file, output)
     });
 }
 
 fn persist_videos(runtime: &Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
-    runtime.spawn(async move {
-        match tokio::task::spawn_blocking(move || storage.save_videos(&videos)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(save_error)) => {
-                error!("Failed to persist refreshed videos cache: {save_error}");
-            }
-            Err(join_error) => {
-                error!("Video cache persistence task failed: {join_error}");
-            }
-        }
+    persist_in_background(runtime, "refreshed videos cache", move || {
+        storage.save_videos(&videos)
     });
 }
 
 fn persist_feed_video_ids(runtime: &Arc<Runtime>, storage: Storage, video_ids: Vec<String>) {
-    runtime.spawn(async move {
-        match tokio::task::spawn_blocking(move || storage.save_feed_video_ids(&video_ids)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(save_error)) => {
-                error!("Failed to persist refreshed feed video IDs: {save_error}");
-            }
-            Err(join_error) => {
-                error!("Failed to join refreshed feed ID persistence task: {join_error}");
-            }
-        }
+    persist_in_background(runtime, "refreshed feed video IDs", move || {
+        storage.save_feed_video_ids(&video_ids)
     });
 }
 
@@ -579,14 +506,7 @@ fn resolve_playback_path(
             // Legacy downloads lack embedded chapter/caption metadata. Upgrade in background
             // but still play the local file.
             let upgraded_path = storage.video_path(video_id, video_title);
-            let miyoo_path = storage.miyoo_video_path(video_id, video_title);
-            spawn_video_download(
-                runtime,
-                storage.clone(),
-                video_id.to_string(),
-                upgraded_path,
-                miyoo_path,
-            );
+            spawn_video_download(runtime, video_id.to_string(), upgraded_path);
             Some(path)
         }
         other => other,
@@ -648,6 +568,57 @@ const fn usable_viewport_width(viewport_width: i32, fallback_width: i32) -> Opti
     }
 }
 
+const fn scroll_for_tab(ui_context: &AppContext, tab: Tab) -> &ScrolledWindow {
+    match tab {
+        Tab::Feed => &ui_context.feed_scroll,
+        Tab::Search => &ui_context.search_scroll,
+        Tab::WatchLater => &ui_context.watch_later_scroll,
+    }
+}
+
+/// Keeps a tab's flow width in sync with its scroll viewport allocation.
+fn connect_flow_resize(ui_context: &AppContext, tab: Tab) {
+    let handler_context = ui_context.clone();
+    scroll_for_tab(ui_context, tab).connect_size_allocate(move |_, allocation| {
+        let viewport_width =
+            usable_viewport_width(allocation.width(), handler_context.stack.allocated_width());
+        if let Some(viewport_width) = viewport_width {
+            update_flow_width(cards::flow_for_tab(&handler_context, tab), viewport_width);
+        }
+    });
+}
+
+/// Wires a header tab toggle to switch the stack page and deactivate sibling toggles.
+fn connect_tab_toggle(
+    ui_context: &AppContext,
+    tab: Tab,
+    button: &gtk::ToggleButton,
+    sibling_buttons: [gtk::ToggleButton; 2],
+    on_activate: impl Fn() + 'static,
+) {
+    let ui_context = ui_context.clone();
+    button.connect_toggled(move |button| {
+        if !button.is_active() {
+            return;
+        }
+        ui_context
+            .stack
+            .set_visible_child_name(tab.stack_child_name());
+        for sibling in &sibling_buttons {
+            sibling.set_active(false);
+        }
+        let scroll = scroll_for_tab(&ui_context, tab).clone();
+        update_flow_width_from_scroll(
+            &ui_context,
+            tab,
+            &scroll,
+            ui_context.stack.allocated_width(),
+        );
+        queue_settled_single_flow_width_update(&ui_context, tab, &scroll, &ui_context.stack);
+        on_activate();
+    });
+}
+
 fn update_flow_width_from_scroll(
     ui_context: &AppContext,
     tab: Tab,
@@ -655,11 +626,7 @@ fn update_flow_width_from_scroll(
     fallback_width: i32,
 ) {
     if let Some(viewport_width) = usable_viewport_width(scroll.allocated_width(), fallback_width) {
-        match tab {
-            Tab::Feed => update_flow_width(&ui_context.feed_flow, viewport_width),
-            Tab::Search => update_flow_width(&ui_context.search_flow, viewport_width),
-            Tab::WatchLater => update_flow_width(&ui_context.watch_later_flow, viewport_width),
-        }
+        update_flow_width(cards::flow_for_tab(ui_context, tab), viewport_width);
     }
 }
 
@@ -671,11 +638,12 @@ fn top_level_viewport_width(ui_context: &AppContext) -> Option<i32> {
 }
 
 fn update_visible_flow_width_for_viewport(ui_context: &AppContext, viewport_width: i32) {
-    match ui_context.stack.visible_child_name().as_deref() {
-        Some("feed") => update_flow_width(&ui_context.feed_flow, viewport_width),
-        Some("search") => update_flow_width(&ui_context.search_flow, viewport_width),
-        Some("watch-later") => update_flow_width(&ui_context.watch_later_flow, viewport_width),
-        Some(_) | None => {}
+    let visible_child_name = ui_context.stack.visible_child_name();
+    let visible_tab = [Tab::Feed, Tab::Search, Tab::WatchLater]
+        .into_iter()
+        .find(|tab| visible_child_name.as_deref() == Some(tab.stack_child_name()));
+    if let Some(tab) = visible_tab {
+        update_flow_width(cards::flow_for_tab(ui_context, tab), viewport_width);
     }
 }
 
@@ -776,13 +744,10 @@ fn toggle_watch_later_and_download(
         let local_path = state.storage.find_video_path(video_id);
         let download_rx = if added && needs_download_upgrade(local_path.as_deref()) {
             let video_path = state.storage.video_path(video_id, video_title);
-            let miyoo_path = state.storage.miyoo_video_path(video_id, video_title);
             Some(spawn_video_download(
                 runtime,
-                state.storage.clone(),
                 video_id.to_string(),
                 video_path,
-                miyoo_path,
             ))
         } else {
             None
@@ -971,6 +936,26 @@ fn spawn_refresh_progress_updates(
     });
 }
 
+/// Refreshes card thumbnails on the main loop once background downloads complete.
+fn spawn_thumbnail_refreshes(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    completion_rx: Option<async_channel::Receiver<Vec<String>>>,
+) {
+    let Some(completion_rx) = completion_rx else {
+        return;
+    };
+    let state_rc = state_rc.clone();
+    let ui_context = ui_context.clone();
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(video_ids) = completion_rx.recv().await {
+            for video_id in &video_ids {
+                cards::refresh_video_thumbnail(&state_rc, &ui_context, video_id);
+            }
+        }
+    });
+}
+
 fn spawn_refreshed_videos_apply(
     videos_rx: async_channel::Receiver<Vec<Video>>,
     state_rc: Rc<RefCell<AppState>>,
@@ -980,26 +965,14 @@ fn spawn_refreshed_videos_apply(
         if let Ok(mut videos) = videos_rx.recv().await {
             let mut state = state_rc.borrow_mut();
             state.storage.hydrate_videos_from_sidecars(&mut videos);
-            let feed_video_ids_for_persistence = videos
+            let feed_video_ids = videos
                 .iter()
                 .map(|video| video.video_id().to_string())
                 .collect::<Vec<_>>();
-            let storage_for_persistence = state.storage.clone();
-            let feed_id_storage_for_persistence = state.storage.clone();
-            let runtime_for_persistence = ui_context.runtime.clone();
-            let feed_id_runtime_for_persistence = ui_context.runtime.clone();
             state.set_refreshed_feed_videos(videos);
-            let videos_for_persistence = state.videos.values().cloned().collect::<Vec<_>>();
-            persist_videos(
-                &runtime_for_persistence,
-                storage_for_persistence,
-                videos_for_persistence,
-            );
-            persist_feed_video_ids(
-                &feed_id_runtime_for_persistence,
-                feed_id_storage_for_persistence,
-                feed_video_ids_for_persistence,
-            );
+            let all_videos = state.videos.values().cloned().collect::<Vec<_>>();
+            persist_videos(&ui_context.runtime, state.storage.clone(), all_videos);
+            persist_feed_video_ids(&ui_context.runtime, state.storage.clone(), feed_video_ids);
 
             let thumbnail_completion = download_missing_thumbnails(
                 state.videos.values(),
@@ -1010,18 +983,7 @@ fn spawn_refreshed_videos_apply(
             drop(state);
 
             refresh_video_lists(&state_rc, &ui_context);
-
-            if let Some(thumbnail_completion) = thumbnail_completion {
-                let state2 = state_rc.clone();
-                let ui2 = ui_context.clone();
-                glib::MainContext::default().spawn_local(async move {
-                    if let Ok(video_ids) = thumbnail_completion.recv().await {
-                        for video_id in &video_ids {
-                            cards::refresh_video_thumbnail(&state2, &ui2, video_id);
-                        }
-                    }
-                });
-            }
+            spawn_thumbnail_refreshes(&state_rc, &ui_context, thumbnail_completion);
         }
     });
 }
@@ -1089,22 +1051,7 @@ fn start_youtube_search(
 
                 refresh_search_results(&state_rc, &ui_context);
                 status_label.set_text(&format!("{result_count} search results"));
-
-                if let Some(thumbnail_completion) = thumbnail_completion {
-                    let state_for_thumbnails = state_rc.clone();
-                    let ui_context_for_thumbnails = ui_context.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        if let Ok(video_ids) = thumbnail_completion.recv().await {
-                            for video_id in &video_ids {
-                                cards::refresh_video_thumbnail(
-                                    &state_for_thumbnails,
-                                    &ui_context_for_thumbnails,
-                                    video_id,
-                                );
-                            }
-                        }
-                    });
-                }
+                spawn_thumbnail_refreshes(&state_rc, &ui_context, thumbnail_completion);
             }
             Ok(Err(error)) => {
                 status_label.set_text(&format!("Search failed: {error}"));
@@ -1246,7 +1193,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         }
     }
 
-    retry_missing_miyoo_conversions(&runtime, storage.clone());
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -1378,116 +1324,35 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
-    // Resize card rows when scroll viewport changes.
-    {
-        let ui_context = ui_context.clone();
-        feed_scroll.connect_size_allocate(move |_, allocation| {
-            let viewport_width =
-                usable_viewport_width(allocation.width(), ui_context.stack.allocated_width());
-            if let Some(viewport_width) = viewport_width {
-                update_flow_width(&ui_context.feed_flow, viewport_width);
-            }
-        });
-    }
-    {
-        let ui_context = ui_context.clone();
-        watch_later_scroll.connect_size_allocate(move |_, allocation| {
-            let viewport_width =
-                usable_viewport_width(allocation.width(), ui_context.stack.allocated_width());
-            if let Some(viewport_width) = viewport_width {
-                update_flow_width(&ui_context.watch_later_flow, viewport_width);
-            }
-        });
-    }
-    {
-        let ui_context = ui_context.clone();
-        search_scroll.connect_size_allocate(move |_, allocation| {
-            let viewport_width =
-                usable_viewport_width(allocation.width(), ui_context.stack.allocated_width());
-            if let Some(viewport_width) = viewport_width {
-                update_flow_width(&ui_context.search_flow, viewport_width);
-            }
-        });
+    // Resize card rows when scroll viewports change.
+    for tab in [Tab::Feed, Tab::Search, Tab::WatchLater] {
+        connect_flow_resize(&ui_context, tab);
     }
 
     // Tab toggle buttons switch the stack page and update sibling active state.
+    connect_tab_toggle(
+        &ui_context,
+        Tab::Feed,
+        &feed_tab,
+        [search_tab.clone(), watch_later_tab.clone()],
+        || {},
+    );
+    connect_tab_toggle(
+        &ui_context,
+        Tab::WatchLater,
+        &watch_later_tab,
+        [feed_tab.clone(), search_tab.clone()],
+        || {},
+    );
     {
-        let stack = stack.clone();
-        let search_tab = search_tab.clone();
-        let watch_later_tab = watch_later_tab.clone();
-        let feed_scroll = feed_scroll;
-        let ui_context = ui_context.clone();
-        feed_tab.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            stack.set_visible_child_name("feed");
-            search_tab.set_active(false);
-            watch_later_tab.set_active(false);
-            update_flow_width_from_scroll(
-                &ui_context,
-                Tab::Feed,
-                &feed_scroll,
-                stack.allocated_width(),
-            );
-            queue_settled_single_flow_width_update(&ui_context, Tab::Feed, &feed_scroll, &stack);
-        });
-    }
-    {
-        let stack = stack.clone();
-        let feed_tab = feed_tab.clone();
-        let search_tab = search_tab.clone();
-        let watch_later_scroll = watch_later_scroll;
-        let ui_context = ui_context.clone();
-        watch_later_tab.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            stack.set_visible_child_name("watch-later");
-            feed_tab.set_active(false);
-            search_tab.set_active(false);
-            update_flow_width_from_scroll(
-                &ui_context,
-                Tab::WatchLater,
-                &watch_later_scroll,
-                stack.allocated_width(),
-            );
-            queue_settled_single_flow_width_update(
-                &ui_context,
-                Tab::WatchLater,
-                &watch_later_scroll,
-                &stack,
-            );
-        });
-    }
-    {
-        let stack = stack;
-        let feed_tab = feed_tab;
-        let watch_later_tab = watch_later_tab;
         let search_entry = search_entry.clone();
-        let search_scroll = search_scroll;
-        let ui_context = ui_context.clone();
-        search_tab.connect_toggled(move |button| {
-            if !button.is_active() {
-                return;
-            }
-            stack.set_visible_child_name("search");
-            feed_tab.set_active(false);
-            watch_later_tab.set_active(false);
-            update_flow_width_from_scroll(
-                &ui_context,
-                Tab::Search,
-                &search_scroll,
-                stack.allocated_width(),
-            );
-            queue_settled_single_flow_width_update(
-                &ui_context,
-                Tab::Search,
-                &search_scroll,
-                &stack,
-            );
-            search_entry.grab_focus();
-        });
+        connect_tab_toggle(
+            &ui_context,
+            Tab::Search,
+            &search_tab,
+            [feed_tab, watch_later_tab],
+            move || search_entry.grab_focus(),
+        );
     }
 
     {
@@ -1578,21 +1443,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
             &ui_context.runtime,
         )
     };
-    if let Some(startup_thumbnail_completion) = startup_thumbnail_completion {
-        let state_for_startup = state;
-        let ui_context_for_startup = ui_context.clone();
-        glib::MainContext::default().spawn_local(async move {
-            if let Ok(video_ids) = startup_thumbnail_completion.recv().await {
-                for video_id in &video_ids {
-                    cards::refresh_video_thumbnail(
-                        &state_for_startup,
-                        &ui_context_for_startup,
-                        video_id,
-                    );
-                }
-            }
-        });
-    }
+    spawn_thumbnail_refreshes(&state, &ui_context, startup_thumbnail_completion);
 
     window.show_all();
     queue_settled_flow_width_updates(&ui_context);

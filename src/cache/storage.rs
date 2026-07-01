@@ -3,7 +3,7 @@ use crate::urls;
 use chrono::{DateTime, NaiveDate, Utc};
 use log::warn;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -14,7 +14,6 @@ const VIDEOS_CACHE_FILE: &str = "videos.json";
 const FEED_VIDEO_IDS_CACHE_FILE: &str = "feed_video_ids.json";
 const THUMBNAILS_DIR: &str = "thumbnails";
 const VIDEOS_DIR: &str = "videos";
-const MIYOO_DIR: &str = "miyoo";
 const VIDEO_SIDECARS_DIR: &str = "video_sidecars";
 const TRANSCRIPTS_WORK_DIR: &str = "transcripts_work";
 const VIDEO_SIDECAR_EXTENSION: &str = "json";
@@ -186,25 +185,6 @@ fn cached_video_id_for_path(path: &Path) -> Option<&str> {
     video_id_from_stem(stem)
 }
 
-fn subtitle_path_matches_video_id(path: &Path, video_id: &str) -> bool {
-    if path.extension().and_then(OsStr::to_str) != Some(SUBTITLE_EXTENSION) {
-        return false;
-    }
-
-    let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
-        return false;
-    };
-
-    stem.match_indices(video_id).any(|(index, _)| {
-        let before_match = index == 0 || stem[..index].ends_with('_');
-        let after_index = index + video_id.len();
-        let after_match = stem
-            .get(after_index..)
-            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'));
-        before_match && after_match
-    })
-}
-
 fn video_id_from_subtitle_path(path: &Path) -> Option<&str> {
     if path.extension().and_then(OsStr::to_str) != Some(SUBTITLE_EXTENSION) {
         return None;
@@ -247,15 +227,6 @@ fn video_id_from_sidecar_path(path: &Path) -> Option<&str> {
         .filter(|video_id| is_valid_video_id(video_id))
 }
 
-fn video_cache_preference(path: &Path) -> usize {
-    match path.extension().and_then(OsStr::to_str) {
-        Some("mkv") => 0,
-        Some("mp4") => 1,
-        Some("webm") => 2,
-        Some(_) | None => usize::MAX,
-    }
-}
-
 /// Sanitizes free-form title text into a stable filename-safe component.
 fn sanitize_filename(input: &str) -> String {
     // Map invalid characters first so the trim operates on the final character set.
@@ -282,7 +253,6 @@ pub struct Storage {
     cache_dir: PathBuf,
     thumbnails_dir: PathBuf,
     videos_dir: PathBuf,
-    miyoo_dir: PathBuf,
     video_sidecars_dir: PathBuf,
     transcripts_work_dir: PathBuf,
 }
@@ -324,7 +294,6 @@ impl Storage {
     pub fn new_at(data_dir: PathBuf, cache_dir: PathBuf) -> StorageResult<Self> {
         let thumbnails_dir = cache_dir.join(THUMBNAILS_DIR);
         let videos_dir = cache_dir.join(VIDEOS_DIR);
-        let miyoo_dir = videos_dir.join(MIYOO_DIR);
         let video_sidecars_dir = cache_dir.join(VIDEO_SIDECARS_DIR);
         let transcripts_work_dir = cache_dir.join(TRANSCRIPTS_WORK_DIR);
 
@@ -333,7 +302,6 @@ impl Storage {
             cache_dir,
             thumbnails_dir,
             videos_dir,
-            miyoo_dir,
             video_sidecars_dir,
             transcripts_work_dir,
         };
@@ -346,7 +314,6 @@ impl Storage {
         std::fs::create_dir_all(&self.cache_dir)?;
         Self::ensure_owned_cache_dir(&self.thumbnails_dir)?;
         Self::ensure_owned_cache_dir(&self.videos_dir)?;
-        Self::ensure_owned_cache_dir(&self.miyoo_dir)?;
         Self::ensure_owned_cache_dir(&self.video_sidecars_dir)?;
         Self::ensure_owned_cache_dir(&self.transcripts_work_dir)?;
         Ok(())
@@ -436,19 +403,12 @@ impl Storage {
                 && video_id_from_sidecar_path(path)
                     .is_some_and(|video_id| retained_card_video_ids.contains(video_id))
         })?;
-        removed_count += self.prune_directory_entries(&self.miyoo_dir, |path| {
-            path.is_file()
-                && cached_video_id_for_path(path)
-                    .is_some_and(|video_id| watch_later.contains(video_id))
-        })?;
         removed_count += self.prune_directory_entries(&self.videos_dir, |path| {
-            let name = path.file_name().and_then(OsStr::to_str);
-            name == Some(MIYOO_DIR)
-                || path.is_file()
-                    && (cached_video_id_for_path(path)
-                        .or_else(|| video_id_from_subtitle_path(path))
-                        .or_else(|| video_id_from_info_json_path(path)))
-                    .is_some_and(|video_id| watch_later.contains(video_id))
+            path.is_file()
+                && (cached_video_id_for_path(path)
+                    .or_else(|| video_id_from_subtitle_path(path))
+                    .or_else(|| video_id_from_info_json_path(path)))
+                .is_some_and(|video_id| watch_later.contains(video_id))
         })?;
         removed_count += self.prune_directory_entries(&self.transcripts_work_dir, |_| false)?;
 
@@ -490,18 +450,6 @@ impl Storage {
             .join(format!("{sanitized_title}_{video_id}.mkv"))
     }
 
-    /// Builds the target path for the miyoo-converted version of a video.
-    ///
-    /// # Arguments
-    ///
-    /// * `video_id` - `YouTube` video identifier.
-    /// * `title` - Raw video title used for filename generation.
-    pub fn miyoo_video_path(&self, video_id: &str, title: &str) -> PathBuf {
-        let sanitized_title = sanitize_filename(title);
-        self.miyoo_dir
-            .join(format!("{sanitized_title}_{video_id}.mp4"))
-    }
-
     /// Finds an existing local video file for a given video ID.
     ///
     /// This lookup accepts any supported extension in [`VIDEO_EXTENSIONS`], regardless of title.
@@ -522,24 +470,6 @@ impl Storage {
         })
     }
 
-    /// Finds an existing downloaded VTT subtitle sidecar for a given video ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `video_id` - `YouTube` video identifier.
-    ///
-    /// # Returns
-    ///
-    /// Matched subtitle path, if present.
-    pub fn find_subtitle_path(&self, video_id: &str) -> Option<PathBuf> {
-        let entries = std::fs::read_dir(&self.videos_dir).ok()?;
-
-        entries.filter_map(Result::ok).find_map(|entry| {
-            let path = entry.path();
-            subtitle_path_matches_video_id(&path, video_id).then_some(path)
-        })
-    }
-
     /// Scans the local videos directory and returns all discovered downloaded video IDs.
     ///
     /// # Returns
@@ -549,63 +479,14 @@ impl Storage {
         collect_cached_video_ids_from_dir(&self.videos_dir)
     }
 
-    /// Scans a directory and returns all `(path, video_id)` pairs for cached video files.
-    fn scan_dir_video_files(dir: &Path) -> StorageResult<Vec<(PathBuf, String)>> {
-        Ok(std::fs::read_dir(dir)?
+    /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
+    fn scan_video_files(&self) -> StorageResult<Vec<(PathBuf, String)>> {
+        Ok(std::fs::read_dir(&self.videos_dir)?
             .filter_map(Result::ok)
             .filter_map(|e| {
                 let path = e.path();
                 let id = cached_video_id_for_path(&path)?.to_string();
                 Some((path, id))
-            })
-            .collect())
-    }
-
-    /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
-    fn scan_video_files(&self) -> StorageResult<Vec<(PathBuf, String)>> {
-        Self::scan_dir_video_files(&self.videos_dir)
-    }
-
-    /// Finds cached videos that do not have a matching Miyoo conversion.
-    ///
-    /// # Returns
-    ///
-    /// A list of source video paths, target Miyoo paths, and video IDs that need conversion.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the video or Miyoo cache directories cannot be scanned.
-    pub fn missing_miyoo_conversions(&self) -> StorageResult<Vec<(PathBuf, PathBuf, String)>> {
-        let converted_ids = Self::scan_dir_video_files(&self.miyoo_dir)?
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect::<HashSet<_>>();
-        let mut missing_by_id = HashMap::<String, PathBuf>::new();
-
-        for (input_path, video_id) in self.scan_video_files()? {
-            if converted_ids.contains(&video_id) {
-                continue;
-            }
-
-            match missing_by_id.entry(video_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if video_cache_preference(&input_path) < video_cache_preference(entry.get()) {
-                        entry.insert(input_path);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(input_path);
-                }
-            }
-        }
-
-        Ok(missing_by_id
-            .into_iter()
-            .filter_map(|(video_id, input_path)| {
-                let mut output_file_name = input_path.file_stem()?.to_os_string();
-                output_file_name.push(".mp4");
-                let output_path = self.miyoo_dir.join(output_file_name);
-                Some((input_path, output_path, video_id))
             })
             .collect())
     }
@@ -632,13 +513,6 @@ impl Storage {
             if id == video_id {
                 std::fs::remove_file(path)?;
                 removed_count += 1;
-            }
-        }
-        if let Ok(miyoo_files) = Self::scan_dir_video_files(&self.miyoo_dir) {
-            for (path, id) in miyoo_files {
-                if id == video_id {
-                    let _ = std::fs::remove_file(path);
-                }
             }
         }
         Ok(removed_count)
@@ -905,8 +779,8 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_cached_video_ids_from_dir, sanitize_filename, subtitle_path_matches_video_id,
-        video_id_from_stem, Storage, VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE,
+        collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem, Storage,
+        VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE,
     };
     use crate::data::Video;
     use chrono::{DateTime, Utc};
@@ -1002,53 +876,6 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_path_matches_video_id_accepts_language_suffixed_vtt() {
-        let path = Path::new("my_title_C9ww_8cg_5g.en-US.vtt");
-
-        assert!(subtitle_path_matches_video_id(path, "C9ww_8cg_5g"));
-    }
-
-    #[test]
-    fn subtitle_path_matches_video_id_accepts_bare_id_vtt() {
-        let path = Path::new("C9ww_8cg_5g.vtt");
-
-        assert!(subtitle_path_matches_video_id(path, "C9ww_8cg_5g"));
-    }
-
-    #[test]
-    fn subtitle_path_matches_video_id_rejects_partial_or_non_vtt_matches() {
-        assert!(!subtitle_path_matches_video_id(
-            Path::new("prefixC9ww_8cg_5g.en.vtt"),
-            "C9ww_8cg_5g"
-        ));
-        assert!(!subtitle_path_matches_video_id(
-            Path::new("my_title_C9ww_8cg_5gextra.en.vtt"),
-            "C9ww_8cg_5g"
-        ));
-        assert!(!subtitle_path_matches_video_id(
-            Path::new("my_title_C9ww_8cg_5g.en.srt"),
-            "C9ww_8cg_5g"
-        ));
-    }
-
-    #[test]
-    fn find_subtitle_path_returns_matching_downloaded_vtt() {
-        let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
-        let expected_path = storage.videos_dir.join("title_C9ww_8cg_5g.en.vtt");
-
-        touch(&storage.videos_dir.join("title_abc123DEF45.en.vtt"));
-        touch(&expected_path);
-
-        assert_eq!(
-            storage.find_subtitle_path("C9ww_8cg_5g"),
-            Some(expected_path)
-        );
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
-    }
-
-    #[test]
     fn remove_cached_video_files_removes_all_matching_extensions() {
         let temp_dir = create_unique_temp_dir();
         let storage = create_test_storage(&temp_dir);
@@ -1090,10 +917,6 @@ mod tests {
             storage
                 .videos_dir
                 .join(format!("stale_{stale_video_id}.info.json")),
-            storage.miyoo_dir.join("bad_video_name.mp4"),
-            storage
-                .miyoo_dir
-                .join(format!("stale_{stale_video_id}.mp4")),
             storage.video_sidecars_dir.join("bad.json"),
             storage
                 .video_sidecars_dir
@@ -1114,9 +937,6 @@ mod tests {
             storage
                 .videos_dir
                 .join(format!("title_{valid_video_id}.info.json")),
-            storage
-                .miyoo_dir
-                .join(format!("title_{valid_video_id}.mp4")),
             storage
                 .video_sidecars_dir
                 .join(format!("{valid_video_id}.json")),
@@ -1160,35 +980,8 @@ mod tests {
         assert!(storage.cache_dir.join(VIDEOS_CACHE_FILE).exists());
         assert!(storage.thumbnails_dir.exists());
         assert!(storage.videos_dir.exists());
-        assert!(storage.miyoo_dir.exists());
         assert!(storage.video_sidecars_dir.exists());
         assert!(storage.transcripts_work_dir.exists());
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
-    }
-
-    #[test]
-    fn missing_miyoo_conversions_returns_only_unconverted_cached_videos() {
-        let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
-
-        let missing_source = storage.videos_dir.join("missing_C9ww_8cg_5g.mkv");
-        touch(&missing_source);
-        touch(&storage.videos_dir.join("missing_copy_C9ww_8cg_5g.mp4"));
-        touch(&storage.videos_dir.join("converted_abc123DEF45.mkv"));
-        touch(&storage.miyoo_dir.join("converted_abc123DEF45.mp4"));
-
-        let conversions = storage
-            .missing_miyoo_conversions()
-            .expect("missing Miyoo conversion scan should succeed");
-
-        assert_eq!(conversions.len(), 1);
-        assert_eq!(conversions[0].0, missing_source);
-        assert_eq!(
-            conversions[0].1,
-            storage.miyoo_dir.join("missing_C9ww_8cg_5g.mp4")
-        );
-        assert_eq!(conversions[0].2, "C9ww_8cg_5g");
 
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }

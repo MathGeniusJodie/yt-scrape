@@ -22,22 +22,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-fn on_menu_action<F>(
-    button: &Button,
-    selected_video: Rc<RefCell<Option<String>>>,
-    context_menu: Popover,
-    action: F,
-) where
-    F: Fn(String) + 'static,
-{
-    button.connect_clicked(move |_| {
-        context_menu.popdown();
-        if let Some(video_id) = selected_video.borrow().clone() {
-            action(video_id);
-        }
-    });
-}
-
 fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
     let playback = {
         let state = state_rc.borrow();
@@ -70,57 +54,12 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     }
 }
 
-fn load_context_menu_widgets(
-    popover: &Popover,
-) -> (
-    GtkBox,
-    Button,
-    Button,
-    Button,
-    Button,
-    Button,
-    Button,
-    Button,
-) {
-    let builder = gtk::Builder::from_string(include_str!("context_menu.ui"));
-    let menu_box = builder
-        .object::<GtkBox>("menu_box")
-        .expect("menu_box in context_menu.ui");
-    let play_button = builder
-        .object::<Button>("play_button")
-        .expect("play_button in context_menu.ui");
-    let watch_later_button = builder
-        .object::<Button>("watch_later_button")
-        .expect("watch_later_button in context_menu.ui");
-    let copy_url_button = builder
-        .object::<Button>("copy_url_button")
-        .expect("copy_url_button in context_menu.ui");
-    let summary_button = builder
-        .object::<Button>("summary_button")
-        .expect("summary_button in context_menu.ui");
-    let transcript_button = builder
-        .object::<Button>("transcript_button")
-        .expect("transcript_button in context_menu.ui");
-    let comments_button = builder
-        .object::<Button>("comments_button")
-        .expect("comments_button in context_menu.ui");
-    let unsub_button = builder
-        .object::<Button>("unsub_button")
-        .expect("unsub_button in context_menu.ui");
+/// Handler invoked with the selected video when a context-menu entry is clicked.
+type MenuAction = fn(&Rc<RefCell<AppState>>, &AppContext, &str);
 
-    popover.add(&menu_box);
-    menu_box.show_all();
-
-    (
-        menu_box,
-        play_button,
-        watch_later_button,
-        copy_url_button,
-        summary_button,
-        transcript_button,
-        comments_button,
-        unsub_button,
-    )
+fn copy_watch_url(_state_rc: &Rc<RefCell<AppState>>, _ui_context: &AppContext, video_id: &str) {
+    // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
+    gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD).set_text(&crate::urls::watch_url(video_id));
 }
 
 pub(super) fn create_context_menu(
@@ -128,109 +67,40 @@ pub(super) fn create_context_menu(
     state_rc: Rc<RefCell<AppState>>,
     ui_context: &AppContext,
 ) {
-    let popover = popover.clone();
-    let selected_video = ui_context.selected_video.clone();
+    const MENU_ACTIONS: [(&str, MenuAction); 7] = [
+        ("play_button", play_selected_video),
+        ("watch_later_button", apply_watch_later_action),
+        ("copy_url_button", copy_watch_url),
+        ("summary_button", show_summary_dialog),
+        ("transcript_button", show_transcript_dialog),
+        ("comments_button", show_comments_dialog),
+        ("unsub_button", super::unsubscribe_channel),
+    ];
 
-    let (
-        _menu_box,
-        play_button,
-        watch_later_button,
-        copy_url_button,
-        summary_button,
-        transcript_button,
-        comments_button,
-        unsub_button,
-    ) = load_context_menu_widgets(&popover);
+    let builder = gtk::Builder::from_string(include_str!("context_menu.ui"));
+    let menu_box = builder
+        .object::<GtkBox>("menu_box")
+        .expect("menu_box in context_menu.ui");
+    popover.add(&menu_box);
+    menu_box.show_all();
 
-    let ui_context = ui_context.clone();
-
-    // Connect handlers once - they read from selected_video
-    on_menu_action(
-        &play_button,
-        selected_video.clone(),
-        ui_context.context_menu.clone(),
-        {
-            let state_rc = state_rc.clone();
-            let ui_context = ui_context.clone();
-            move |video_id| {
-                play_selected_video(&state_rc, &ui_context, &video_id);
+    for (button_id, action) in MENU_ACTIONS {
+        let button = builder
+            .object::<Button>(button_id)
+            .expect("menu button in context_menu.ui");
+        let state_rc = state_rc.clone();
+        let ui_context = ui_context.clone();
+        button.connect_clicked(move |_| {
+            ui_context.context_menu.popdown();
+            let selected_video_id = ui_context.selected_video.borrow().clone();
+            if let Some(video_id) = selected_video_id {
+                action(&state_rc, &ui_context, &video_id);
             }
-        },
-    );
-    on_menu_action(
-        &watch_later_button,
-        selected_video.clone(),
-        ui_context.context_menu.clone(),
-        {
-            let state_rc = state_rc.clone();
-            let ui_context = ui_context.clone();
-            move |video_id| {
-                apply_watch_later_action(&state_rc, &ui_context, &video_id);
-            }
-        },
-    );
-    on_menu_action(
-        &copy_url_button,
-        selected_video.clone(),
-        ui_context.context_menu.clone(),
-        |video_id| {
-            // GTK3's clipboard abstraction handles both X11 and Wayland via GDK
-            gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD)
-                .set_text(&crate::urls::watch_url(&video_id));
-        },
-    );
-    on_menu_action(
-        &summary_button,
-        selected_video.clone(),
-        ui_context.context_menu.clone(),
-        {
-            let state_rc = state_rc.clone();
-            let ui_context = ui_context.clone();
-            move |video_id| {
-                show_summary_dialog(&state_rc, &ui_context, &video_id);
-            }
-        },
-    );
-    on_menu_action(
-        &transcript_button,
-        selected_video.clone(),
-        ui_context.context_menu.clone(),
-        {
-            let state_rc = state_rc.clone();
-            let ui_context = ui_context.clone();
-            move |video_id| {
-                show_transcript_dialog(&state_rc, &ui_context, &video_id);
-            }
-        },
-    );
-    on_menu_action(
-        &comments_button,
-        selected_video.clone(),
-        ui_context.context_menu.clone(),
-        {
-            let state_rc = state_rc.clone();
-            let ui_context = ui_context.clone();
-            move |video_id| {
-                show_comments_dialog(&state_rc, &ui_context, &video_id);
-            }
-        },
-    );
-
-    on_menu_action(
-        &unsub_button,
-        selected_video,
-        ui_context.context_menu.clone(),
-        {
-            let state_rc = state_rc;
-            let ui_context = ui_context;
-            move |video_id| {
-                super::unsubscribe_channel(&state_rc, &ui_context, &video_id);
-            }
-        },
-    );
+        });
+    }
 }
 
-const fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
+pub(super) const fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     match tab {
         Tab::Feed => &ui_context.feed_flow,
         Tab::Search => &ui_context.search_flow,
@@ -615,7 +485,7 @@ pub(super) fn download_missing_thumbnails<'a>(
 // Video card widget (formerly src/ui/video_card.rs)
 // ---------------------------------------------------------------------------
 
-const CARD_WIDTH: i32 = 320;
+pub(super) const CARD_WIDTH: i32 = 320;
 // 16:9 thumbnail height derived from card width
 const THUMBNAIL_HEIGHT: i32 = CARD_WIDTH * 9 / 16;
 
@@ -971,5 +841,108 @@ fn format_video_duration(total_seconds: u32) -> String {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{crop_to_16_9, format_video_duration, watch_later_insert_position};
+    use crate::cache::Storage;
+    use crate::data::Video;
+    use chrono::{TimeZone, Utc};
+    use gdk_pixbuf::{Colorspace, Pixbuf};
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn format_video_duration_omits_hours_when_under_an_hour() {
+        assert_eq!(format_video_duration(0), "0:00");
+        assert_eq!(format_video_duration(59), "0:59");
+        assert_eq!(format_video_duration(61), "1:01");
+        assert_eq!(format_video_duration(3599), "59:59");
+    }
+
+    #[test]
+    fn format_video_duration_includes_zero_padded_hours() {
+        assert_eq!(format_video_duration(3600), "1:00:00");
+        assert_eq!(format_video_duration(3661), "1:01:01");
+        assert_eq!(format_video_duration(7 * 3600 + 9 * 60 + 5), "7:09:05");
+    }
+
+    fn test_pixbuf(width: i32, height: i32) -> Pixbuf {
+        Pixbuf::new(Colorspace::Rgb, false, 8, width, height)
+            .expect("test pixbuf must be allocatable")
+    }
+
+    #[test]
+    fn crop_to_16_9_crops_sides_of_wide_images() {
+        let cropped = crop_to_16_9(&test_pixbuf(1000, 90));
+
+        assert_eq!(cropped.width(), 160);
+        assert_eq!(cropped.height(), 90);
+    }
+
+    #[test]
+    fn crop_to_16_9_crops_top_and_bottom_of_tall_images() {
+        let cropped = crop_to_16_9(&test_pixbuf(160, 500));
+
+        assert_eq!(cropped.width(), 160);
+        assert_eq!(cropped.height(), 90);
+    }
+
+    #[test]
+    fn crop_to_16_9_keeps_exact_16_9_images_unchanged() {
+        let cropped = crop_to_16_9(&test_pixbuf(320, 180));
+
+        assert_eq!(cropped.width(), 320);
+        assert_eq!(cropped.height(), 180);
+    }
+
+    fn test_video(video_id: &str) -> Video {
+        let published = Utc
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid fixed test timestamp");
+        Video::new(
+            video_id.to_string(),
+            "channel-id".to_string(),
+            "channel-name".to_string(),
+            &format!("title-{video_id}"),
+            published,
+            "https://example.com/thumb.jpg".to_string(),
+            None,
+        )
+    }
+
+    fn test_state(video_ids: &[&str], watch_later: &[&str]) -> super::AppState {
+        let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "yt-gtk-cards-tests-{}-{unique_id}",
+            std::process::id()
+        ));
+        let storage = Storage::new_at(root.join("data"), root.join("cache"))
+            .expect("test storage must initialize");
+        let videos: Vec<Video> = video_ids.iter().map(|id| test_video(id)).collect();
+        let feed_video_ids = video_ids.iter().map(ToString::to_string).collect();
+        let watch_later: HashSet<String> = watch_later.iter().map(ToString::to_string).collect();
+        super::AppState::new(videos, feed_video_ids, watch_later, storage)
+    }
+
+    #[test]
+    fn watch_later_insert_position_orders_by_video_map_order() {
+        let state = test_state(&["a", "b", "c", "d"], &["b", "d"]);
+
+        assert_eq!(watch_later_insert_position(&state, "b"), Some(0));
+        assert_eq!(watch_later_insert_position(&state, "d"), Some(1));
+    }
+
+    #[test]
+    fn watch_later_insert_position_is_none_for_videos_not_in_watch_later() {
+        let state = test_state(&["a", "b"], &["b"]);
+
+        assert_eq!(watch_later_insert_position(&state, "a"), None);
+        assert_eq!(watch_later_insert_position(&state, "missing"), None);
     }
 }
