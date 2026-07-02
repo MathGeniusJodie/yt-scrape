@@ -2,6 +2,7 @@ use super::{AppContext, AppState};
 use crate::feed::fetch_youtube_comments;
 use crate::ui::dialogs::create_text_dialog;
 
+use gtk::glib;
 use gtk::prelude::*;
 use log::error;
 use std::cell::RefCell;

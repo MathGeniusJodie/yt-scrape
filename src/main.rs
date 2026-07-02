@@ -6,9 +6,9 @@ mod summary;
 mod ui;
 mod urls;
 
+use adw::prelude::*;
 use anyhow::Context;
-use gtk::prelude::*;
-use gtk::Application;
+use gtk::glib;
 use log::{error, Level, LevelFilter, Metadata, Record};
 use std::io::Write;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ fn run() -> anyhow::Result<()> {
 
     let subs_file = find_subs_file().context("Failed locating youtube-subs.txt")?;
 
-    let app = Application::builder()
+    let app = adw::Application::builder()
         .application_id("com.github.yt-gtk")
         .build();
 

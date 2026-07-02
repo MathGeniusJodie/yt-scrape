@@ -4,14 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# GTK3
-gtk = "0.18"
-gdk = "0.18"
-gdk-pixbuf = "0.18"
-gio = "0.18"
-glib = "0.18"
-cairo-rs = "0.18"
-pango = "0.18"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -45,6 +37,8 @@ iso8601 = "0.6"
 # Non-blocking channel compatible with both tokio and glib main contexts
 async-channel = "2"
 indexmap = "2"
+gtk = { version = "0.11.4", package = "gtk4", features = ["v4_12"] }
+adw = { version = "0.9.1", package = "libadwaita", features = ["v1_5"] }
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause / start_paused in tests; not in `full`.

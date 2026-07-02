@@ -4,7 +4,7 @@ use crate::cache::fetch_transcript;
 use crate::data::Video;
 use crate::summary::{summarize_video_streaming, StreamingMessage};
 use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
-use glib::clone;
+use gtk::glib;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Orientation};
 use log::error;
@@ -268,7 +268,9 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
             }
         };
 
-    glib::MainContext::default().spawn_local(clone!(@strong state_rc, @strong ui_context, @strong summary_generator => async move {
+    let state_rc = state_rc.clone();
+    let ui_context = ui_context.clone();
+    glib::MainContext::default().spawn_local(async move {
         let video_id = generation_task.video_id().to_string();
         match generation_task.collect().await {
             Err(generation_error) => {
@@ -276,14 +278,17 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
                 error!("Failed to prefetch summary for {video_id}: {generation_error}");
             }
             Ok(summary) => {
-                if let Err(cache_error) =
-                    summary_generator.persist_and_refresh(&state_rc, &ui_context, &video_id, summary)
-                {
+                if let Err(cache_error) = summary_generator.persist_and_refresh(
+                    &state_rc,
+                    &ui_context,
+                    &video_id,
+                    summary,
+                ) {
                     error!("Failed to cache prefetched summary for {video_id}: {cache_error}");
                 }
             }
         }
-    }));
+    });
 }
 
 fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
@@ -319,7 +324,11 @@ fn start_summary_generation_for_dialog(
             }
         };
 
-    glib::MainContext::default().spawn_local(clone!(@strong state_rc, @strong ui_context, @strong buffer, @strong regenerate_button, @strong summary_generator => async move {
+    let state_rc = state_rc.clone();
+    let ui_context = ui_context.clone();
+    let buffer = buffer.clone();
+    let regenerate_button = regenerate_button.clone();
+    glib::MainContext::default().spawn_local(async move {
         let video_id = generation_task.video_id().to_string();
         let mut received_chunk = false;
         let generation_result = generation_task
@@ -340,15 +349,18 @@ fn start_summary_generation_for_dialog(
                 buffer.set_text(&format!("Error: {generation_error}"));
             }
             Ok(summary) => {
-                if let Err(cache_error) =
-                    summary_generator.persist_and_refresh(&state_rc, &ui_context, &video_id, summary)
-                {
+                if let Err(cache_error) = summary_generator.persist_and_refresh(
+                    &state_rc,
+                    &ui_context,
+                    &video_id,
+                    summary,
+                ) {
                     buffer.set_text(&format!("Error: {cache_error}"));
                     error!("Failed to cache interactive summary for {video_id}: {cache_error}");
                 }
             }
         }
-    }));
+    });
 }
 
 pub(super) fn show_summary_dialog(
@@ -383,11 +395,10 @@ pub(super) fn show_summary_dialog(
             controls_row.set_margin_end(8);
             controls_row.set_margin_top(8);
 
-            let spacer = GtkBox::new(Orientation::Horizontal, 0);
-            spacer.set_hexpand(true);
-            controls_row.pack_start(&spacer, true, true, 0);
-            controls_row.pack_end(&regenerate_button_for_layout, false, false, 0);
-            content_area.pack_start(&controls_row, false, false, 0);
+            regenerate_button_for_layout.set_halign(gtk::Align::End);
+            regenerate_button_for_layout.set_hexpand(true);
+            controls_row.append(&regenerate_button_for_layout);
+            content_area.append(&controls_row);
         },
     );
 
@@ -406,16 +417,20 @@ pub(super) fn show_summary_dialog(
         );
     }
 
-    regenerate_button.connect_clicked(clone!(@strong state_rc, @strong ui_context, @strong video_id, @strong buffer, @strong regenerate_button => move |_| {
-        start_summary_generation_for_dialog(
-            &state_rc,
-            &ui_context,
-            &video_id,
-            &buffer,
-            &regenerate_button,
-            "Regenerating summary..."
-        );
-    }));
+    {
+        let state_rc = state_rc.clone();
+        let ui_context = ui_context.clone();
+        regenerate_button.connect_clicked(move |button| {
+            start_summary_generation_for_dialog(
+                &state_rc,
+                &ui_context,
+                &video_id,
+                &buffer,
+                button,
+                "Regenerating summary...",
+            );
+        });
+    }
 }
 
 pub(super) fn show_transcript_dialog(

@@ -7,11 +7,9 @@ use crate::data::{Tab, Video};
 use crate::feed::{fetch_all_feeds, fetch_youtube_search, load_channel_ids, FetchProgress};
 use cards::VideoCardWidgets;
 
-use gtk::prelude::*;
-use gtk::{
-    Align, Application, ApplicationWindow, Button, FlowBox, Label, Popover, ScrolledWindow,
-    SearchEntry, Spinner, Stack,
-};
+use adw::prelude::*;
+use gtk::{gdk, glib};
+use gtk::{Button, FlowBox, Label, Popover, Spinner};
 use indexmap::IndexMap;
 use log::{error, info, warn};
 use std::cell::RefCell;
@@ -212,25 +210,20 @@ struct AppContext {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
     summary_generator: SummaryGenerator,
-    window: ApplicationWindow,
+    window: adw::ApplicationWindow,
     context_menu: Popover,
-    stack: Stack,
-    feed_scroll: ScrolledWindow,
+    stack: adw::ViewStack,
+    watch_later_page: adw::ViewStackPage,
     feed_flow: FlowBox,
-    search_scroll: ScrolledWindow,
     search_flow: FlowBox,
-    watch_later_scroll: ScrolledWindow,
     watch_later_flow: FlowBox,
     selected_video: Rc<RefCell<Option<String>>>,
-    badge: Label,
     feed_cards: CardMap,
     search_cards: CardMap,
     watch_later_cards: CardMap,
     subs_file: PathBuf,
 }
 
-use cards::CARD_WIDTH;
-const CARD_SPACING: i32 = 16;
 const FROGPOINTS_REFRESH_COST: i64 = 10;
 const FROGPOINTS_LEISURE_COST: i64 = 1;
 const FROGPOINTS_LEISURE_IDLE_SECONDS: u64 = 120;
@@ -513,221 +506,6 @@ fn resolve_playback_path(
     }
 }
 
-fn flow_column_count_for_viewport(viewport_width: i32) -> u32 {
-    if viewport_width < CARD_WIDTH {
-        1
-    } else {
-        ((viewport_width + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING))
-            .max(1)
-            .cast_unsigned()
-    }
-}
-
-const fn flow_width_for_columns(column_count: u32) -> i32 {
-    let column_count = column_count.cast_signed();
-    column_count * CARD_WIDTH + (column_count - 1) * CARD_SPACING
-}
-
-#[cfg(test)]
-fn flow_width_for_viewport(viewport_width: i32) -> i32 {
-    flow_width_for_columns(flow_column_count_for_viewport(viewport_width))
-}
-
-fn update_flow_width(flow: &FlowBox, viewport_width: i32) {
-    let column_count = flow_column_count_for_viewport(viewport_width);
-    flow.set_min_children_per_line(1);
-    flow.set_max_children_per_line(column_count);
-    flow.set_margin_start(0);
-    flow.set_margin_end(0);
-    flow.set_size_request(flow_width_for_columns(column_count), -1);
-    flow.queue_resize();
-}
-
-fn configure_flow_box_layout(flow: &FlowBox) {
-    flow.set_halign(Align::Center);
-    flow.set_hexpand(false);
-
-    if let Some(parent) = flow.parent() {
-        parent.set_halign(Align::Center);
-        parent.set_hexpand(false);
-    }
-}
-
-fn configure_scrolled_window_layout(scroll: &ScrolledWindow) {
-    scroll.set_propagate_natural_width(false);
-    scroll.set_min_content_width(CARD_WIDTH);
-}
-
-const fn usable_viewport_width(viewport_width: i32, fallback_width: i32) -> Option<i32> {
-    if viewport_width > 1 {
-        Some(viewport_width)
-    } else if fallback_width > 1 {
-        Some(fallback_width)
-    } else {
-        None
-    }
-}
-
-const fn scroll_for_tab(ui_context: &AppContext, tab: Tab) -> &ScrolledWindow {
-    match tab {
-        Tab::Feed => &ui_context.feed_scroll,
-        Tab::Search => &ui_context.search_scroll,
-        Tab::WatchLater => &ui_context.watch_later_scroll,
-    }
-}
-
-/// Keeps a tab's flow width in sync with its scroll viewport allocation.
-fn connect_flow_resize(ui_context: &AppContext, tab: Tab) {
-    let handler_context = ui_context.clone();
-    scroll_for_tab(ui_context, tab).connect_size_allocate(move |_, allocation| {
-        let viewport_width =
-            usable_viewport_width(allocation.width(), handler_context.stack.allocated_width());
-        if let Some(viewport_width) = viewport_width {
-            update_flow_width(cards::flow_for_tab(&handler_context, tab), viewport_width);
-        }
-    });
-}
-
-/// Wires a header tab toggle to switch the stack page and deactivate sibling toggles.
-fn connect_tab_toggle(
-    ui_context: &AppContext,
-    tab: Tab,
-    button: &gtk::ToggleButton,
-    sibling_buttons: [gtk::ToggleButton; 2],
-    on_activate: impl Fn() + 'static,
-) {
-    let ui_context = ui_context.clone();
-    button.connect_toggled(move |button| {
-        if !button.is_active() {
-            return;
-        }
-        ui_context
-            .stack
-            .set_visible_child_name(tab.stack_child_name());
-        for sibling in &sibling_buttons {
-            sibling.set_active(false);
-        }
-        let scroll = scroll_for_tab(&ui_context, tab).clone();
-        update_flow_width_from_scroll(
-            &ui_context,
-            tab,
-            &scroll,
-            ui_context.stack.allocated_width(),
-        );
-        queue_settled_single_flow_width_update(&ui_context, tab, &scroll, &ui_context.stack);
-        on_activate();
-    });
-}
-
-fn update_flow_width_from_scroll(
-    ui_context: &AppContext,
-    tab: Tab,
-    scroll: &ScrolledWindow,
-    fallback_width: i32,
-) {
-    if let Some(viewport_width) = usable_viewport_width(scroll.allocated_width(), fallback_width) {
-        update_flow_width(cards::flow_for_tab(ui_context, tab), viewport_width);
-    }
-}
-
-fn top_level_viewport_width(ui_context: &AppContext) -> Option<i32> {
-    usable_viewport_width(
-        ui_context.stack.allocated_width(),
-        ui_context.window.allocated_width(),
-    )
-}
-
-fn update_visible_flow_width_for_viewport(ui_context: &AppContext, viewport_width: i32) {
-    let visible_child_name = ui_context.stack.visible_child_name();
-    let visible_tab = [Tab::Feed, Tab::Search, Tab::WatchLater]
-        .into_iter()
-        .find(|tab| visible_child_name.as_deref() == Some(tab.stack_child_name()));
-    if let Some(tab) = visible_tab {
-        update_flow_width(cards::flow_for_tab(ui_context, tab), viewport_width);
-    }
-}
-
-fn update_visible_flow_width(ui_context: &AppContext) {
-    let Some(viewport_width) = top_level_viewport_width(ui_context) else {
-        return;
-    };
-
-    update_visible_flow_width_for_viewport(ui_context, viewport_width);
-}
-
-fn update_all_flow_widths(ui_context: &AppContext) {
-    let fallback_width = ui_context
-        .stack
-        .allocated_width()
-        .max(ui_context.window.allocated_width());
-    update_flow_width_from_scroll(
-        ui_context,
-        Tab::Feed,
-        &ui_context.feed_scroll,
-        fallback_width,
-    );
-    update_flow_width_from_scroll(
-        ui_context,
-        Tab::Search,
-        &ui_context.search_scroll,
-        fallback_width,
-    );
-    update_flow_width_from_scroll(
-        ui_context,
-        Tab::WatchLater,
-        &ui_context.watch_later_scroll,
-        fallback_width,
-    );
-    update_visible_flow_width(ui_context);
-}
-
-fn queue_flow_width_update(ui_context: &AppContext) {
-    let ui_context = ui_context.clone();
-    glib::idle_add_local_once(move || {
-        update_all_flow_widths(&ui_context);
-    });
-}
-
-fn queue_settled_flow_width_updates(ui_context: &AppContext) {
-    update_all_flow_widths(ui_context);
-    queue_flow_width_update(ui_context);
-
-    for delay_ms in [16, 80, 250] {
-        let ui_context = ui_context.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
-            update_all_flow_widths(&ui_context);
-        });
-    }
-}
-
-fn queue_window_size_flow_width_updates(ui_context: &AppContext) {
-    for delay_ms in [0, 16, 80, 250] {
-        let ui_context = ui_context.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
-            let (window_width, _) = ui_context.window.size();
-            if window_width > 1 {
-                update_visible_flow_width_for_viewport(&ui_context, window_width);
-            }
-        });
-    }
-}
-
-fn queue_settled_single_flow_width_update(
-    ui_context: &AppContext,
-    tab: Tab,
-    scroll: &ScrolledWindow,
-    stack: &Stack,
-) {
-    for delay_ms in [0, 16, 80] {
-        let scroll = scroll.clone();
-        let stack = stack.clone();
-        let ui_context = ui_context.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
-            update_flow_width_from_scroll(&ui_context, tab, &scroll, stack.allocated_width());
-        });
-    }
-}
-
 fn toggle_watch_later_and_download(
     state_rc: &Rc<RefCell<AppState>>,
     runtime: &Arc<Runtime>,
@@ -790,7 +568,10 @@ fn apply_watch_later_action(
     let (added, download_rx) =
         toggle_watch_later_and_download(state_rc, &ui_context.runtime, video_id, &video_title);
     update_watch_later_toggles(ui_context, video_id, added);
-    update_watch_later_badge(&ui_context.badge, state_rc.borrow().watch_later.len());
+    update_watch_later_badge(
+        &ui_context.watch_later_page,
+        state_rc.borrow().watch_later.len(),
+    );
     sync_watch_later_card(state_rc, ui_context, video_id);
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, video_id);
@@ -808,14 +589,13 @@ fn apply_watch_later_action(
 
 /// Unsubscribes from the channel of the given video after a confirmation dialog.
 ///
-/// Removes the channel ID from the subscriptions file and purges all videos from that channel
-/// from the in-memory state and UI. Also removes any affected watch-later entries and persists
-/// the updated watch-later list.
+/// Removes the channel ID from the subscriptions file. Videos from the channel disappear
+/// from the feed on the next refresh.
 ///
 /// # Arguments
 ///
 /// * `state_rc` - Shared application state.
-/// * `ui_context` - UI handle used to parent the dialog and update card lists.
+/// * `ui_context` - UI handle used to parent the dialog.
 /// * `video_id` - ID of a video belonging to the channel to unsubscribe from.
 fn unsubscribe_channel(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
     let channel_info = {
@@ -829,29 +609,22 @@ fn unsubscribe_channel(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
         return;
     };
 
-    let dialog = gtk::MessageDialog::new(
-        Some(&ui_context.window),
-        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
-        gtk::MessageType::Question,
-        gtk::ButtonsType::YesNo,
-        &format!("Unsubscribe from {channel_name}?"),
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Unsubscribe from {channel_name}?")),
+        Some("All videos from this channel will be removed from your feed."),
     );
-    dialog.set_secondary_text(Some(
-        "All videos from this channel will be removed from your feed.",
-    ));
-    let response = dialog.run();
-    dialog.close();
+    dialog.add_responses(&[("cancel", "Cancel"), ("unsubscribe", "Unsubscribe")]);
+    dialog.set_response_appearance("unsubscribe", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
 
-    if response != gtk::ResponseType::Yes {
-        return;
-    }
-
-    // Only persist the change — videos disappear from the feed on next refresh.
-    persist_unsubscribe(
-        &ui_context.runtime,
-        ui_context.subs_file.clone(),
-        channel_id,
-    );
+    let runtime = ui_context.runtime.clone();
+    let subs_file = ui_context.subs_file.clone();
+    dialog.connect_response(Some("unsubscribe"), move |_, _| {
+        // Only persist the change — videos disappear from the feed on next refresh.
+        persist_unsubscribe(&runtime, subs_file.clone(), channel_id.clone());
+    });
+    dialog.present(Some(&ui_context.window));
 }
 
 fn spawn_refresh_progress_updates(
@@ -991,17 +764,15 @@ fn spawn_refreshed_videos_apply(
 fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
     let state_ref = state_rc.borrow();
     let downloaded_video_ids = state_ref.storage.cached_video_ids();
-    update_watch_later_badge(&ui_context.badge, state_ref.watch_later.len());
+    update_watch_later_badge(&ui_context.watch_later_page, state_ref.watch_later.len());
     populate_flow_box(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
     populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
     populate_flow_box(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
-    queue_settled_flow_width_updates(ui_context);
 }
 
 fn refresh_search_results(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
     let downloaded_video_ids = state_rc.borrow().storage.cached_video_ids();
     populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
-    queue_settled_flow_width_updates(ui_context);
 }
 
 fn start_youtube_search(
@@ -1126,14 +897,14 @@ fn start_feed_refresh(
     spawn_refreshed_videos_apply(videos_rx, state, ui_context);
 }
 
-/// Builds and presents the primary GTK application window.
+/// Builds and presents the primary application window.
 ///
 /// # Arguments
 ///
-/// * `app` - Active GTK application instance.
+/// * `app` - Active application instance.
 /// * `subs_file` - Path to the channel subscription file.
 #[allow(clippy::too_many_lines)]
-pub fn build_ui(app: &Application, subs_file: PathBuf) {
+pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     let runtime = match Runtime::new() {
         Ok(runtime) => Arc::new(runtime),
         Err(runtime_error) => {
@@ -1213,7 +984,7 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     )));
     let selected_video: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
-    let window = ApplicationWindow::builder()
+    let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("yt-gtk")
         .default_width(1200)
@@ -1222,12 +993,10 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     start_frogpoints_leisure_monitor();
 
     let css_provider = gtk::CssProvider::new();
-    if let Err(css_error) = css_provider.load_from_data(include_bytes!("../style.css")) {
-        warn!("Failed to load CSS: {css_error}");
-    }
-    if let Some(screen) = gdk::Screen::default() {
-        gtk::StyleContext::add_provider_for_screen(
-            &screen,
+    css_provider.load_from_string(include_str!("../style.css"));
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
             &css_provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
@@ -1235,9 +1004,9 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     // Load static window structure from .ui file
     let builder = gtk::Builder::from_string(include_str!("window.ui"));
-    let header = builder
-        .object::<gtk::HeaderBar>("header")
-        .expect("header in window.ui");
+    let toolbar_view = builder
+        .object::<adw::ToolbarView>("toolbar_view")
+        .expect("toolbar_view in window.ui");
     let refresh_button = builder
         .object::<Button>("refresh_button")
         .expect("refresh_button in window.ui");
@@ -1247,60 +1016,34 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     let spinner = builder
         .object::<Spinner>("spinner")
         .expect("spinner in window.ui");
-    let feed_tab = builder
-        .object::<gtk::ToggleButton>("feed_tab")
-        .expect("feed_tab in window.ui");
-    let search_tab = builder
-        .object::<gtk::ToggleButton>("search_tab")
-        .expect("search_tab in window.ui");
-    let watch_later_tab = builder
-        .object::<gtk::ToggleButton>("watch_later_tab")
-        .expect("watch_later_tab in window.ui");
-    let badge = builder
-        .object::<Label>("watch_later_badge")
-        .expect("watch_later_badge in window.ui");
     let stack = builder
-        .object::<Stack>("stack")
+        .object::<adw::ViewStack>("stack")
         .expect("stack in window.ui");
-    let feed_scroll = builder
-        .object::<ScrolledWindow>("feed_scroll")
-        .expect("feed_scroll in window.ui");
+    let watch_later_page = builder
+        .object::<adw::ViewStackPage>("watch_later_page")
+        .expect("watch_later_page in window.ui");
     let feed_flow = builder
         .object::<FlowBox>("feed_flow")
         .expect("feed_flow in window.ui");
     let search_entry = builder
-        .object::<SearchEntry>("search_entry")
+        .object::<gtk::SearchEntry>("search_entry")
         .expect("search_entry in window.ui");
     let search_button = builder
         .object::<Button>("search_button")
         .expect("search_button in window.ui");
-    let search_scroll = builder
-        .object::<ScrolledWindow>("search_scroll")
-        .expect("search_scroll in window.ui");
     let search_flow = builder
         .object::<FlowBox>("search_flow")
         .expect("search_flow in window.ui");
-    let watch_later_scroll = builder
-        .object::<ScrolledWindow>("watch_later_scroll")
-        .expect("watch_later_scroll in window.ui");
     let watch_later_flow = builder
         .object::<FlowBox>("watch_later_flow")
         .expect("watch_later_flow in window.ui");
 
-    configure_scrolled_window_layout(&feed_scroll);
-    configure_scrolled_window_layout(&search_scroll);
-    configure_scrolled_window_layout(&watch_later_scroll);
-    configure_flow_box_layout(&feed_flow);
-    configure_flow_box_layout(&search_flow);
-    configure_flow_box_layout(&watch_later_flow);
-
-    window.set_titlebar(Some(&header));
-    window.add(&stack);
+    window.set_content(Some(&toolbar_view));
 
     let feed_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let search_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let watch_later_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
-    let context_menu = Popover::new(None::<&gtk::Widget>);
+    let context_menu = Popover::new();
 
     let ui_context = AppContext {
         summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
@@ -1309,14 +1052,11 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         window: window.clone(),
         context_menu: context_menu.clone(),
         stack: stack.clone(),
-        feed_scroll: feed_scroll.clone(),
+        watch_later_page,
         feed_flow,
-        search_scroll: search_scroll.clone(),
         search_flow,
-        watch_later_scroll: watch_later_scroll.clone(),
         watch_later_flow,
         selected_video,
-        badge,
         feed_cards,
         search_cards,
         watch_later_cards,
@@ -1324,58 +1064,13 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
-    // Resize card rows when scroll viewports change.
-    for tab in [Tab::Feed, Tab::Search, Tab::WatchLater] {
-        connect_flow_resize(&ui_context, tab);
-    }
-
-    // Tab toggle buttons switch the stack page and update sibling active state.
-    connect_tab_toggle(
-        &ui_context,
-        Tab::Feed,
-        &feed_tab,
-        [search_tab.clone(), watch_later_tab.clone()],
-        || {},
-    );
-    connect_tab_toggle(
-        &ui_context,
-        Tab::WatchLater,
-        &watch_later_tab,
-        [feed_tab.clone(), search_tab.clone()],
-        || {},
-    );
+    // Focus the search entry whenever the Search page becomes visible.
     {
         let search_entry = search_entry.clone();
-        connect_tab_toggle(
-            &ui_context,
-            Tab::Search,
-            &search_tab,
-            [feed_tab, watch_later_tab],
-            move || search_entry.grab_focus(),
-        );
-    }
-
-    {
-        let ui_context = ui_context.clone();
-        window.connect_size_allocate(move |_, _| {
-            update_all_flow_widths(&ui_context);
-        });
-    }
-    {
-        let ui_context = ui_context.clone();
-        window.connect_map(move |_| {
-            queue_settled_flow_width_updates(&ui_context);
-            queue_window_size_flow_width_updates(&ui_context);
-        });
-    }
-    {
-        let ui_context = ui_context.clone();
-        window.connect_configure_event(move |_, event| {
-            let (window_width, _) = event.size();
-            if let Ok(window_width) = i32::try_from(window_width) {
-                update_visible_flow_width_for_viewport(&ui_context, window_width);
+        stack.connect_visible_child_name_notify(move |stack| {
+            if stack.visible_child_name().as_deref() == Some(Tab::Search.stack_child_name()) {
+                search_entry.grab_focus();
             }
-            false
         });
     }
 
@@ -1403,7 +1098,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
         let ui_context = ui_context.clone();
         let spinner = spinner.clone();
         let status_label = status_label.clone();
-        let search_entry = search_entry;
         search_button.connect_clicked(move |button| {
             start_youtube_search(
                 state.clone(),
@@ -1418,8 +1112,6 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
 
     {
         let state = state.clone();
-        let status_label = status_label;
-        let spinner = spinner;
         let ui_context = ui_context.clone();
         let refresh_button_for_handler = refresh_button.clone();
         refresh_button.connect_clicked(move |_| {
@@ -1445,26 +1137,18 @@ pub fn build_ui(app: &Application, subs_file: PathBuf) {
     };
     spawn_thumbnail_refreshes(&state, &ui_context, startup_thumbnail_completion);
 
-    window.show_all();
-    queue_settled_flow_width_updates(&ui_context);
-    queue_window_size_flow_width_updates(&ui_context);
+    window.present();
 }
 
-fn update_watch_later_badge(badge: &Label, count: usize) {
-    if count > 0 {
-        badge.set_text(&count.to_string());
-        badge.show();
-    } else {
-        badge.hide();
-    }
+fn update_watch_later_badge(page: &adw::ViewStackPage, count: usize) {
+    page.set_badge_number(u32::try_from(count).unwrap_or(u32::MAX));
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        debit_frogpoints, decrement_frogpoints, flow_column_count_for_viewport,
-        flow_width_for_viewport, has_recent_svg_modification, usable_viewport_width, AppState,
-        FrogpointsError, CARD_SPACING, CARD_WIDTH, FROGPOINTS_REFRESH_COST,
+        debit_frogpoints, decrement_frogpoints, has_recent_svg_modification, AppState,
+        FrogpointsError, FROGPOINTS_REFRESH_COST,
     };
     use crate::cache::Storage;
     use crate::data::Video;
@@ -1481,56 +1165,6 @@ mod tests {
             "yt-gtk-{test_name}-{}-{unique_id}.md",
             std::process::id()
         ))
-    }
-
-    #[test]
-    fn flow_width_for_viewport_handles_startup_and_narrow_widths() {
-        assert_eq!(flow_width_for_viewport(0), CARD_WIDTH);
-        assert_eq!(flow_width_for_viewport(1), CARD_WIDTH);
-        assert_eq!(flow_width_for_viewport(CARD_WIDTH), CARD_WIDTH);
-    }
-
-    #[test]
-    fn flow_width_for_viewport_uses_largest_complete_column_count() {
-        let two_column_viewport = CARD_WIDTH * 2 + CARD_SPACING;
-        let almost_three_column_viewport = CARD_WIDTH * 3 + CARD_SPACING * 2 - 1;
-        let three_column_viewport = almost_three_column_viewport + 1;
-
-        assert_eq!(
-            flow_width_for_viewport(two_column_viewport),
-            CARD_WIDTH * 2 + CARD_SPACING
-        );
-        assert_eq!(
-            flow_width_for_viewport(almost_three_column_viewport),
-            CARD_WIDTH * 2 + CARD_SPACING
-        );
-        assert_eq!(
-            flow_width_for_viewport(three_column_viewport),
-            CARD_WIDTH * 3 + CARD_SPACING * 2
-        );
-    }
-
-    #[test]
-    fn flow_column_count_for_viewport_matches_available_card_slots() {
-        let two_column_viewport = CARD_WIDTH * 2 + CARD_SPACING;
-        let almost_three_column_viewport = CARD_WIDTH * 3 + CARD_SPACING * 2 - 1;
-        let three_column_viewport = almost_three_column_viewport + 1;
-
-        assert_eq!(flow_column_count_for_viewport(0), 1);
-        assert_eq!(flow_column_count_for_viewport(two_column_viewport), 2);
-        assert_eq!(
-            flow_column_count_for_viewport(almost_three_column_viewport),
-            2
-        );
-        assert_eq!(flow_column_count_for_viewport(three_column_viewport), 3);
-    }
-
-    #[test]
-    fn usable_viewport_width_uses_fallback_for_hidden_stack_pages() {
-        assert_eq!(usable_viewport_width(1, 900), Some(900));
-        assert_eq!(usable_viewport_width(700, 900), Some(700));
-        assert_eq!(usable_viewport_width(900, 700), Some(900));
-        assert_eq!(usable_viewport_width(1, 1), None);
     }
 
     struct TestDirs {

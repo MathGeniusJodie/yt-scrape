@@ -1,88 +1,62 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface>
+  <requires lib="gtk" version="4.0"/>
   <!-- Popover content box for the video context menu -->
   <object class="GtkBox" id="menu_box">
     <property name="orientation">vertical</property>
-    <property name="margin-start">8</property>
-    <property name="margin-end">8</property>
-    <property name="margin-top">8</property>
-    <property name="margin-bottom">8</property>
+    <property name="spacing">4</property>
+    <property name="margin-start">4</property>
+    <property name="margin-end">4</property>
+    <property name="margin-top">4</property>
+    <property name="margin-bottom">4</property>
     <child>
       <object class="GtkButton" id="play_button">
         <property name="label">Play</property>
         <property name="name">menu-play</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
     <child>
       <object class="GtkButton" id="watch_later_button">
         <property name="label">Toggle Watch Later</property>
         <property name="name">menu-watch-later</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
     <child>
       <object class="GtkButton" id="copy_url_button">
         <property name="label">Copy URL</property>
         <property name="name">menu-copy-url</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
     <child>
       <object class="GtkButton" id="summary_button">
         <property name="label">AI Summary</property>
         <property name="name">menu-summary</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
     <child>
       <object class="GtkButton" id="transcript_button">
         <property name="label">Transcript</property>
         <property name="name">menu-transcript</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
     <child>
       <object class="GtkButton" id="comments_button">
         <property name="label">Comments</property>
         <property name="name">menu-comments</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
     <child>
       <object class="GtkButton" id="unsub_button">
         <property name="label">Unsub from Channel</property>
         <property name="name">menu-unsub</property>
+        <style><class name="flat"/></style>
       </object>
-      <packing>
-        <property name="expand">False</property>
-        <property name="fill">False</property>
-        <property name="padding">4</property>
-      </packing>
     </child>
   </object>
 </interface>
