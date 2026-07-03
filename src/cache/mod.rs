@@ -4,7 +4,7 @@ mod subtitle_requests;
 mod transcript;
 
 pub use downloader::download_video;
-pub use storage::{Storage, StorageError};
+pub use storage::Storage;
 pub use transcript::{fetch_transcript, transcript_from_vtt_file};
 
 /// Checks whether `program` is on `PATH`.

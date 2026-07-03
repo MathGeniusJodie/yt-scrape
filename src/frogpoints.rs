@@ -5,7 +5,7 @@
 
 use log::{info, warn};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,23 +69,31 @@ fn svg_watch_dirs() -> Result<[PathBuf; 2], FrogpointsError> {
     ])
 }
 
-/// Applies `compute` to the current balance under an exclusive file lock and
-/// persists the result, so concurrent processes (e.g. a file-sync tool or a
-/// second app instance) cannot interleave read-modify-write cycles.
+/// Applies `compute` to the current balance under an exclusive lock and persists the
+/// result crash-safely, so concurrent processes (e.g. a file-sync tool or a second app
+/// instance) cannot interleave read-modify-write cycles, and a crash mid-write never
+/// leaves `frogpoints.md` truncated or corrupt.
+///
+/// The lock is taken on a dedicated sibling `.lock` file rather than `path` itself,
+/// because the update is performed via write-to-temp-then-rename: if the lock were on
+/// `path`, a rename would silently release it out from under a concurrent waiter. The
+/// new balance is written to a sibling temp file, `sync_all`'d, then atomically renamed
+/// over `path`, so a crash at any point leaves either the old or the new balance intact.
 fn update_frogpoints_locked(
     path: &Path,
     compute: impl FnOnce(i64) -> Result<i64, FrogpointsError>,
 ) -> Result<i64, FrogpointsError> {
-    let mut file = fs::OpenOptions::new()
-        .read(true)
+    let lock_path = path.with_extension("md.lock");
+    // The lock file's contents are irrelevant; only its inode matters.
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
         .write(true)
-        .open(path)
+        .open(&lock_path)
         .map_err(FrogpointsError::Read)?;
-    file.lock().map_err(FrogpointsError::Read)?;
+    lock_file.lock().map_err(FrogpointsError::Read)?;
 
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .map_err(FrogpointsError::Read)?;
+    let contents = fs::read_to_string(path).map_err(FrogpointsError::Read)?;
     let current = contents
         .trim()
         .parse::<i64>()
@@ -93,11 +101,20 @@ fn update_frogpoints_locked(
 
     let updated = compute(current)?;
 
-    file.seek(SeekFrom::Start(0))
+    let temp_path = path.with_extension("md.tmp");
+    let mut temp_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
         .map_err(FrogpointsError::Write)?;
-    file.set_len(0).map_err(FrogpointsError::Write)?;
-    file.write_all(format!("{updated}\n").as_bytes())
+    temp_file
+        .write_all(format!("{updated}\n").as_bytes())
         .map_err(FrogpointsError::Write)?;
+    temp_file.sync_all().map_err(FrogpointsError::Write)?;
+    drop(temp_file);
+    fs::rename(&temp_path, path).map_err(FrogpointsError::Write)?;
+
     Ok(updated)
 }
 
@@ -355,6 +372,27 @@ mod tests {
             std::fs::read_to_string(path).expect("read updated frogpoints file"),
             "5\n"
         );
+    }
+
+    #[test]
+    fn repeated_updates_with_lock_sibling_do_not_corrupt_the_balance() {
+        let file = temporary_frogpoints_file();
+        let path = file.path();
+        std::fs::write(path, "100").expect("write test frogpoints file");
+
+        for _ in 0..5 {
+            adjust_frogpoints(path, -1).expect("adjust frogpoints");
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read updated frogpoints file"),
+            "95\n"
+        );
+
+        let lock_path = path.with_extension("md.lock");
+        let _ = std::fs::remove_file(lock_path);
+        let temp_path = path.with_extension("md.tmp");
+        let _ = std::fs::remove_file(temp_path);
     }
 
     #[test]

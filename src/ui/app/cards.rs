@@ -14,7 +14,7 @@ use gtk::{Align, Box as GtkBox, Button, FlowBox, Label, Orientation, Picture, Po
 use gtk::{gdk, graphene, pango};
 use log::{error, warn};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -28,40 +28,55 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
         return;
     }
 
-    let video_title = {
+    let (video_title, storage) = {
         let state = state_rc.borrow();
-        state
-            .video_by_id(video_id)
-            .map(|current_video| current_video.title().to_string())
+        (
+            state
+                .video_by_id(video_id)
+                .map(|current_video| current_video.title().to_string()),
+            state.storage.clone(),
+        )
     };
     let Some(video_title) = video_title else {
         error!("Cannot play missing video {video_id}");
         ui_context.videos_playing.borrow_mut().remove(video_id);
         return;
     };
-    let local_path = resolve_playback_path(state_rc, ui_context, video_id, &video_title);
 
-    let playback_end_rx = match play_video(video_id, &video_title, local_path.as_deref()) {
-        Ok(playback_end_rx) => playback_end_rx,
-        Err(play_error) => {
-            error!("Failed to play video {video_id}: {play_error}");
-            ui_context.videos_playing.borrow_mut().remove(video_id);
-            return;
-        }
-    };
-
-    // Mark watched optimistically for a responsive badge; revert if mpv fails
-    // to actually start playback.
-    if let Err(e) = state_rc.borrow_mut().set_video_watched(video_id, true) {
-        error!("Failed to mark video {video_id} as watched: {e}");
-    } else {
-        refresh_video_watched_badge(ui_context, video_id, true);
-    }
+    // The local-file lookup scans the cache directory; keep it off the main thread.
+    let path_rx =
+        super::find_video_path_in_background(&ui_context.runtime, storage, video_id.to_string());
 
     let state_rc = state_rc.clone();
     let ui_context = ui_context.clone();
     let video_id = video_id.to_string();
     glib::MainContext::default().spawn_local(async move {
+        let scanned_path = path_rx.recv().await.unwrap_or(None);
+        let local_path = resolve_playback_path(
+            &state_rc,
+            &ui_context,
+            &video_id,
+            &video_title,
+            scanned_path,
+        );
+
+        let playback_end_rx = match play_video(&video_id, &video_title, local_path.as_deref()) {
+            Ok(playback_end_rx) => playback_end_rx,
+            Err(play_error) => {
+                error!("Failed to play video {video_id}: {play_error}");
+                ui_context.videos_playing.borrow_mut().remove(&video_id);
+                return;
+            }
+        };
+
+        // Mark watched optimistically for a responsive badge; revert if mpv
+        // fails to actually start playback.
+        if let Err(e) = state_rc.borrow_mut().set_video_watched(&video_id, true) {
+            error!("Failed to mark video {video_id} as watched: {e}");
+        } else {
+            refresh_video_watched_badge(&ui_context, &video_id, true);
+        }
+
         let playback_end = playback_end_rx.recv().await;
         ui_context.videos_playing.borrow_mut().remove(&video_id);
         if playback_end == Ok(PlaybackEnd::FailedImmediately) {
@@ -144,7 +159,7 @@ pub(super) fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     }
 }
 
-const fn card_map_for_tab(ui_context: &AppContext, tab: Tab) -> &Rc<RefCell<TabCards>> {
+fn card_map_for_tab(ui_context: &AppContext, tab: Tab) -> &Rc<RefCell<TabCards>> {
     match tab {
         Tab::Feed => &ui_context.feed_cards,
         Tab::Search => &ui_context.search_cards,
@@ -152,16 +167,30 @@ const fn card_map_for_tab(ui_context: &AppContext, tab: Tab) -> &Rc<RefCell<TabC
     }
 }
 
+/// Watch Later IDs ordered newest-published first: deterministic and stable
+/// across refreshes, unlike raw video-map order (refreshes re-append preserved
+/// Watch Later entries at the end of the map).
+fn watch_later_ids_sorted(state: &AppState) -> Vec<String> {
+    let mut entries = state
+        .videos
+        .values()
+        .filter(|video| state.watch_later.contains(video.video_id()))
+        .map(|video| {
+            (
+                std::cmp::Reverse(video.published()),
+                video.video_id().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.into_iter().map(|(_, video_id)| video_id).collect()
+}
+
 fn video_ids_for_tab(state: &AppState, tab: Tab) -> Vec<String> {
     match tab {
         Tab::Feed => state.feed_video_ids().to_vec(),
         Tab::Search => state.search_video_ids().to_vec(),
-        Tab::WatchLater => state
-            .videos
-            .keys()
-            .filter(|video_id| state.watch_later.contains(video_id.as_str()))
-            .cloned()
-            .collect(),
+        Tab::WatchLater => watch_later_ids_sorted(state),
     }
 }
 
@@ -305,6 +334,17 @@ fn refresh_cards_from_state(
     }
 }
 
+/// Detaches a card's root widget from its `FlowBoxChild` wrapper so it can be
+/// re-inserted at a new position.
+fn detach_card_from_flow(flow_box: &FlowBox, card: &VideoCardWidgets) {
+    if let Some(flow_child) = card.root().parent() {
+        flow_box.remove(&flow_child);
+        if let Some(flow_child) = flow_child.downcast_ref::<gtk::FlowBoxChild>() {
+            flow_child.set_child(gtk::Widget::NONE);
+        }
+    }
+}
+
 pub(super) fn populate_flow_box(
     tab: Tab,
     state_rc: &Rc<RefCell<AppState>>,
@@ -318,29 +358,50 @@ pub(super) fn populate_flow_box(
         video_ids_for_tab(&state, tab)
     };
 
-    // Same videos in the same order: refresh badges in place instead of
-    // rebuilding every card, preserving scroll position and download spinners.
-    if card_map.borrow().order == video_ids {
-        refresh_cards_from_state(state_rc, ui_context, card_map);
-        return;
-    }
-
-    flow_box.remove_all();
+    // Diff against the current grid instead of rebuilding it: unchanged cards
+    // stay in place, preserving scroll position and download spinners even
+    // when a refresh only prepends a few new videos.
+    let desired_id_set = video_ids.iter().cloned().collect::<HashSet<_>>();
     {
         let mut tab_cards = card_map.borrow_mut();
-        tab_cards.cards.clear();
-        tab_cards.order.clear();
+
+        let stale_ids = tab_cards
+            .order
+            .iter()
+            .filter(|id| !desired_id_set.contains(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for stale_id in stale_ids {
+            if let Some(card) = tab_cards.cards.remove(&stale_id) {
+                detach_card_from_flow(flow_box, &card);
+            }
+        }
+        tab_cards.order.retain(|id| desired_id_set.contains(id));
+
+        for (position, video_id) in video_ids.iter().enumerate() {
+            if tab_cards.order.get(position) == Some(video_id) {
+                continue;
+            }
+
+            if let Some(existing_position) = tab_cards.order.iter().position(|id| id == video_id) {
+                // Existing card in the wrong slot: move it instead of rebuilding.
+                let card = tab_cards.cards[video_id].clone();
+                detach_card_from_flow(flow_box, &card);
+                add_card_to_flow(flow_box, &card, Some(position));
+                tab_cards.order.remove(existing_position);
+                let position = position.min(tab_cards.order.len());
+                tab_cards.order.insert(position, video_id.clone());
+            } else if let Some(card_widgets) = build_video_card(video_id, state_rc, ui_context) {
+                add_card_to_flow(flow_box, &card_widgets, Some(position));
+                let position = position.min(tab_cards.order.len());
+                tab_cards.order.insert(position, video_id.clone());
+                tab_cards.cards.insert(video_id.clone(), card_widgets);
+            }
+        }
     }
 
-    for video_id in video_ids {
-        let Some(card_widgets) = build_video_card(&video_id, state_rc, ui_context) else {
-            continue;
-        };
-        add_card_to_flow(flow_box, &card_widgets, None);
-        let mut tab_cards = card_map.borrow_mut();
-        tab_cards.order.push(video_id.clone());
-        tab_cards.cards.insert(video_id, card_widgets);
-    }
+    // Badge state may have changed for cards that were kept in place.
+    refresh_cards_from_state(state_rc, ui_context, card_map);
 }
 
 pub(super) fn for_each_card_matching<F>(ui_context: &AppContext, video_id: &str, mut action: F)
@@ -369,11 +430,9 @@ pub(super) fn update_watch_later_toggles(
 }
 
 fn watch_later_insert_position(state: &AppState, video_id: &str) -> Option<usize> {
-    state
-        .videos
-        .values()
-        .filter(|video| state.watch_later.contains(video.video_id()))
-        .position(|video| video.video_id() == video_id)
+    watch_later_ids_sorted(state)
+        .iter()
+        .position(|id| id == video_id)
 }
 
 pub(super) fn sync_watch_later_card(
@@ -910,8 +969,9 @@ mod tests {
         let videos: Vec<Video> = video_ids.iter().map(|id| test_video(id)).collect();
         let feed_video_ids = video_ids.iter().map(ToString::to_string).collect();
         let watch_later: HashSet<String> = watch_later.iter().map(ToString::to_string).collect();
+        let (sidecar_saves, _rx) = async_channel::unbounded();
         (
-            super::AppState::new(videos, feed_video_ids, watch_later, storage),
+            super::AppState::new(videos, feed_video_ids, watch_later, storage, sidecar_saves),
             root,
         )
     }

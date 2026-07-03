@@ -1005,11 +1005,105 @@ pub fn load_channel_ids(path: &Path) -> Result<Vec<String>, FeedError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommentItem, CommentSnippet, CommentThreadItem, CommentThreadReplies, CommentThreadSnippet,
-        INITIAL_BACKOFF_MS, backoff_ms_with_base, format_comment_threads,
-        parse_iso8601_duration_seconds,
+        ApiRequestError, CommentItem, CommentSnippet, CommentThreadItem, CommentThreadReplies,
+        CommentThreadSnippet, INITIAL_BACKOFF_MS, api_error_message, backoff_ms_with_base,
+        format_comment_threads, get_json, parse_iso8601_duration_seconds,
     };
     use chrono::{TimeZone, Utc};
+    use serde::Deserialize;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// Starts a throwaway HTTP server on an ephemeral port that answers exactly one
+    /// request with `response` (a full raw HTTP response including status line and
+    /// headers, minus the trailing blank line and body which this appends).
+    fn spawn_one_shot_server(status_line: &str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let status_line = status_line.to_string();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept connection");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            // Drain the request until the blank line terminating the headers.
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let mut stream = stream;
+            let response = format!(
+                "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            stream.flush().expect("flush response");
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct TestPayload {
+        value: u32,
+    }
+
+    #[tokio::test]
+    async fn get_json_decodes_success_body() {
+        let url = spawn_one_shot_server("HTTP/1.1 200 OK", r#"{"value":42}"#);
+        let client = reqwest::Client::new();
+
+        let payload: TestPayload = get_json(&client, &url, &[]).await.expect("should succeed");
+
+        assert_eq!(payload, TestPayload { value: 42 });
+    }
+
+    #[tokio::test]
+    async fn get_json_surfaces_youtube_error_message_on_403() {
+        let url = spawn_one_shot_server(
+            "HTTP/1.1 403 Forbidden",
+            r#"{"error":{"message":"quota exceeded"}}"#,
+        );
+        let client = reqwest::Client::new();
+
+        let error = get_json::<TestPayload>(&client, &url, &[])
+            .await
+            .expect_err("403 should fail");
+
+        match error {
+            ApiRequestError::Status { status, message } => {
+                assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+                assert_eq!(message, "quota exceeded");
+            }
+            other => panic!("expected Status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_json_falls_back_to_truncated_body_on_non_json_error() {
+        let url = spawn_one_shot_server("HTTP/1.1 500 Internal Server Error", "kaboom");
+        let client = reqwest::Client::new();
+
+        let error = get_json::<TestPayload>(&client, &url, &[])
+            .await
+            .expect_err("500 should fail");
+
+        match error {
+            ApiRequestError::Status { status, message } => {
+                assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(message, "kaboom");
+            }
+            other => panic!("expected Status error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_message_truncates_non_json_body() {
+        let long_body = "x".repeat(400);
+        assert_eq!(api_error_message(&long_body).chars().count(), 300);
+    }
 
     #[test]
     fn parses_common_iso_durations() {

@@ -38,6 +38,8 @@ pub(super) enum StartSummaryGenerationError {
     AlreadyCached,
     #[error("Summary generation is already in progress.")]
     AlreadyInProgress,
+    #[error("A prefetch was already attempted this session.")]
+    AlreadyAttempted,
 }
 
 /// Service responsible for summary generation orchestration.
@@ -49,6 +51,10 @@ pub(super) struct SummaryGenerator {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
     summaries_in_progress: Rc<RefCell<HashSet<String>>>,
+    /// Videos already prefetched once this session. Prefetches call paid AI
+    /// providers, so toggling Watch Later repeatedly (or retrying after a
+    /// failure) must never re-bill; explicit user actions still can.
+    prefetch_attempted: Rc<RefCell<HashSet<String>>>,
 }
 
 impl SummaryGenerator {
@@ -58,6 +64,7 @@ impl SummaryGenerator {
             runtime,
             http_client,
             summaries_in_progress: Rc::new(RefCell::new(HashSet::new())),
+            prefetch_attempted: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
@@ -77,6 +84,7 @@ impl SummaryGenerator {
             let video = prepare_summary_generation_video(
                 &state,
                 &mut self.summaries_in_progress.borrow_mut(),
+                &mut self.prefetch_attempted.borrow_mut(),
                 video_id,
                 mode,
             )?;
@@ -181,6 +189,7 @@ impl SummaryGenerationTask {
 fn prepare_summary_generation_video(
     state: &AppState,
     summaries_in_progress: &mut HashSet<String>,
+    prefetch_attempted: &mut HashSet<String>,
     video_id: &str,
     mode: SummaryGenerationMode,
 ) -> Result<Video, StartSummaryGenerationError> {
@@ -188,8 +197,15 @@ fn prepare_summary_generation_video(
         return Err(StartSummaryGenerationError::MissingVideo);
     };
 
-    if matches!(mode, SummaryGenerationMode::Prefetch) && video.has_ai_summary() {
-        return Err(StartSummaryGenerationError::AlreadyCached);
+    if matches!(mode, SummaryGenerationMode::Prefetch) {
+        if video.has_ai_summary() {
+            return Err(StartSummaryGenerationError::AlreadyCached);
+        }
+        // First prefetch for this video claims the once-per-session slot;
+        // later ones are refused so repeated Watch Later toggles never re-bill.
+        if !prefetch_attempted.insert(video_id.to_string()) {
+            return Err(StartSummaryGenerationError::AlreadyAttempted);
+        }
     }
     if summaries_in_progress.contains(video_id) {
         return Err(StartSummaryGenerationError::AlreadyInProgress);
@@ -214,7 +230,8 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
             }
             Err(
                 StartSummaryGenerationError::AlreadyCached
-                | StartSummaryGenerationError::AlreadyInProgress,
+                | StartSummaryGenerationError::AlreadyInProgress
+                | StartSummaryGenerationError::AlreadyAttempted,
             ) => {
                 return;
             }
@@ -518,7 +535,14 @@ mod tests {
             .iter()
             .map(|video| video.video_id().to_string())
             .collect();
-        let state = AppState::new(videos, feed_video_ids, HashSet::new(), storage);
+        let (sidecar_saves, _rx) = async_channel::unbounded();
+        let state = AppState::new(
+            videos,
+            feed_video_ids,
+            HashSet::new(),
+            storage,
+            sidecar_saves,
+        );
         (state, dirs)
     }
 
@@ -526,10 +550,12 @@ mod tests {
     fn prepare_request_returns_missing_video_error() {
         let (state, _dirs) = test_state(Vec::new());
         let mut summaries_in_progress = HashSet::new();
+        let mut prefetch_attempted = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
             &mut summaries_in_progress,
+            &mut prefetch_attempted,
             "missing-video-id",
             SummaryGenerationMode::Prefetch,
         );
@@ -547,10 +573,12 @@ mod tests {
         video.set_ai_summary(Some("cached summary".to_string()));
         let (state, _dirs) = test_state(vec![video]);
         let mut summaries_in_progress = HashSet::new();
+        let mut prefetch_attempted = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
             &mut summaries_in_progress,
+            &mut prefetch_attempted,
             video_id,
             SummaryGenerationMode::Prefetch,
         );
@@ -567,10 +595,12 @@ mod tests {
         let video_id = "video-id";
         let (state, _dirs) = test_state(vec![test_video(video_id)]);
         let mut summaries_in_progress = HashSet::from([video_id.to_string()]);
+        let mut prefetch_attempted = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
             &mut summaries_in_progress,
+            &mut prefetch_attempted,
             video_id,
             SummaryGenerationMode::Prefetch,
         );
@@ -586,10 +616,12 @@ mod tests {
         let video_id = "video-id";
         let (state, _dirs) = test_state(vec![test_video(video_id)]);
         let mut summaries_in_progress = HashSet::new();
+        let mut prefetch_attempted = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
             &mut summaries_in_progress,
+            &mut prefetch_attempted,
             video_id,
             SummaryGenerationMode::Prefetch,
         );
@@ -599,16 +631,40 @@ mod tests {
     }
 
     #[test]
+    fn prepare_request_refuses_second_prefetch_attempt_in_session() {
+        let video_id = "video-id";
+        let (state, _dirs) = test_state(vec![test_video(video_id)]);
+        let mut summaries_in_progress = HashSet::new();
+        let mut prefetch_attempted = HashSet::from([video_id.to_string()]);
+
+        let result = prepare_summary_generation_video(
+            &state,
+            &mut summaries_in_progress,
+            &mut prefetch_attempted,
+            video_id,
+            SummaryGenerationMode::Prefetch,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StartSummaryGenerationError::AlreadyAttempted)
+        ));
+        assert!(!summaries_in_progress.contains(video_id));
+    }
+
+    #[test]
     fn prepare_request_allows_interactive_regeneration_when_cached() {
         let video_id = "video-id";
         let mut video = test_video(video_id);
         video.set_ai_summary(Some("cached summary".to_string()));
         let (state, _dirs) = test_state(vec![video]);
         let mut summaries_in_progress = HashSet::new();
+        let mut prefetch_attempted = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
             &mut summaries_in_progress,
+            &mut prefetch_attempted,
             video_id,
             SummaryGenerationMode::Interactive,
         )
@@ -623,10 +679,12 @@ mod tests {
         let video_id = "video-id";
         let (state, _dirs) = test_state(vec![test_video(video_id)]);
         let mut summaries_in_progress = HashSet::from([video_id.to_string()]);
+        let mut prefetch_attempted = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
             &mut summaries_in_progress,
+            &mut prefetch_attempted,
             video_id,
             SummaryGenerationMode::Interactive,
         );

@@ -149,32 +149,44 @@ fn is_valid_video_id(video_id: &str) -> bool {
         })
 }
 
-/// Reads and deserializes a JSON file, returning `None` on any failure.
+/// Reads and deserializes a JSON file.
 ///
-/// Missing files are silently ignored; read/parse errors are logged as warnings.
-fn try_load_json_file<T: DeserializeOwned>(path: &Path, context: &str) -> Option<T> {
+/// A missing file is `Ok(None)`. Read or parse failures are errors: callers
+/// that gate destructive work (cache cleanup) must be able to distinguish
+/// "no state saved yet" from "state file damaged".
+fn load_json_file<T: DeserializeOwned>(path: &Path, context: &str) -> StorageResult<Option<T>> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             warn!("Failed to read {} {}: {}", context, path.display(), e);
-            return None;
+            return Err(e.into());
         }
     };
     serde_json::from_reader(file)
-        .map_err(|e| warn!("Failed to parse {} {}: {}", context, path.display(), e))
-        .ok()
+        .map_err(|e| {
+            warn!("Failed to parse {} {}: {}", context, path.display(), e);
+            e.into()
+        })
+        .map(Some)
 }
 
-fn collect_cached_video_ids_from_dir(videos_dir: &Path) -> HashSet<String> {
-    let Ok(entries) = std::fs::read_dir(videos_dir) else {
-        return HashSet::new();
-    };
+/// Serializes `value` as pretty JSON and writes it crash-safely: the bytes go
+/// to a sibling temp file which is fsynced and then atomically renamed over
+/// `path`, so a crash mid-write can never leave a truncated state file.
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> StorageResult<()> {
+    use std::io::Write as _;
 
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| cached_video_id_for_path(&entry.path()).map(str::to_string))
-        .collect()
+    let json = serde_json::to_string_pretty(value)?;
+    let mut tmp_path = path.as_os_str().to_owned();
+    tmp_path.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_path);
+
+    let mut tmp_file = std::fs::File::create(&tmp_path)?;
+    tmp_file.write_all(json.as_bytes())?;
+    tmp_file.sync_all()?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 fn cached_video_id_for_path(path: &Path) -> Option<&str> {
@@ -335,6 +347,10 @@ impl Storage {
 
     fn ensure_owned_cache_dir(path: &Path) -> StorageResult<()> {
         if path.exists() && !path.is_dir() {
+            warn!(
+                "Removing unexpected file {} that shadows an app cache directory",
+                path.display()
+            );
             std::fs::remove_file(path)?;
         }
         std::fs::create_dir_all(path)?;
@@ -514,13 +530,37 @@ impl Storage {
         })
     }
 
-    /// Scans the local videos directory and returns all discovered downloaded video IDs.
+    /// Scans the videos directory once and splits downloaded IDs by container.
     ///
     /// # Returns
     ///
-    /// A set of video IDs extracted from cached video filenames.
-    pub fn cached_video_ids(&self) -> HashSet<String> {
-        collect_cached_video_ids_from_dir(&self.videos_dir)
+    /// `(downloaded, legacy)`: all video IDs with a local media file, and the
+    /// subset whose newest-priority file is a legacy (non-`.mkv`) container.
+    pub fn scan_downloaded_video_ids(&self) -> (HashSet<String>, HashSet<String>) {
+        let mut downloaded = HashSet::new();
+        let mut has_mkv = HashSet::new();
+        let mut has_legacy = HashSet::new();
+
+        let Ok(entries) = std::fs::read_dir(&self.videos_dir) else {
+            return (downloaded, has_legacy);
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Some(video_id) = cached_video_id_for_path(&path) else {
+                continue;
+            };
+            let video_id = video_id.to_string();
+            if path.extension().and_then(OsStr::to_str) == Some("mkv") {
+                has_mkv.insert(video_id.clone());
+            } else {
+                has_legacy.insert(video_id.clone());
+            }
+            downloaded.insert(video_id);
+        }
+
+        // Only IDs with no .mkv at all still need a container upgrade.
+        let legacy = &has_legacy - &has_mkv;
+        (downloaded, legacy)
     }
 
     /// Scans the videos directory and returns all `(path, video_id)` pairs for cached video files.
@@ -647,24 +687,28 @@ impl Storage {
             return Ok(());
         }
 
-        let json = serde_json::to_string_pretty(sidecar)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        write_json_atomic(&path, sidecar)
     }
 
     /// Loads watch-later IDs from disk.
     ///
     /// # Returns
     ///
-    /// Saved IDs. If file loading or parsing fails, an empty set is returned.
-    pub fn load_watch_later(&self) -> HashSet<String> {
+    /// Saved IDs; an empty set when no watch-later file exists yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but cannot be read or parsed.
+    /// Callers must NOT treat that as an empty list: cache cleanup keyed off an
+    /// accidentally-empty set would delete every downloaded video.
+    pub fn load_watch_later(&self) -> StorageResult<HashSet<String>> {
         if let Err(error) = self.ensure_directories() {
             warn!("Failed to recreate storage directories before loading watch-later: {error}");
         }
         let path = self.data_dir.join(WATCH_LATER_FILE);
-        try_load_json_file::<WatchLaterData>(&path, "watch-later file")
+        Ok(load_json_file::<WatchLaterData>(&path, "watch-later file")?
             .map(|data| data.video_ids.into_iter().collect())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Saves watch-later IDs to disk using deterministic ordering.
@@ -685,9 +729,7 @@ impl Storage {
         let data = WatchLaterData {
             video_ids: sorted_video_ids,
         };
-        let json = serde_json::to_string_pretty(&data)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        write_json_atomic(&path, &data)
     }
 
     /// Hydrates in-memory videos with transcript/summary metadata from sidecar files.
@@ -707,15 +749,20 @@ impl Storage {
     ///
     /// # Returns
     ///
-    /// Cached videos, or an empty vector if cache loading/parsing fails.
-    pub fn load_videos(&self) -> Vec<Video> {
+    /// Cached videos; an empty vector when no cache file exists yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cache file exists but cannot be read or parsed,
+    /// so callers can avoid destructive cleanup keyed off an empty video list.
+    pub fn load_videos(&self) -> StorageResult<Vec<Video>> {
         if let Err(error) = self.ensure_directories() {
             warn!("Failed to recreate storage directories before loading videos: {error}");
         }
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
-        let mut videos: Vec<Video> = try_load_json_file(&path, "videos cache").unwrap_or_default();
+        let mut videos: Vec<Video> = load_json_file(&path, "videos cache")?.unwrap_or_default();
         self.hydrate_videos_from_sidecars(&mut videos);
-        videos
+        Ok(videos)
     }
 
     /// Persists video metadata to cache.
@@ -730,22 +777,27 @@ impl Storage {
     pub fn save_videos(&self, videos: &[Video]) -> StorageResult<()> {
         self.ensure_directories()?;
         let path = self.cache_dir.join(VIDEOS_CACHE_FILE);
-        let json = serde_json::to_string_pretty(videos)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        write_json_atomic(&path, &videos)
     }
 
     /// Loads cached IDs for the current feed.
     ///
     /// # Returns
     ///
-    /// Saved feed IDs, or `None` if no feed-ID cache exists or the cache cannot be read.
-    pub fn load_feed_video_ids(&self) -> Option<Vec<String>> {
+    /// Saved feed IDs, or `None` if no feed-ID cache exists yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cache file exists but cannot be read or parsed.
+    pub fn load_feed_video_ids(&self) -> StorageResult<Option<Vec<String>>> {
         if let Err(error) = self.ensure_directories() {
             warn!("Failed to recreate storage directories before loading feed IDs: {error}");
         }
         let path = self.cache_dir.join(FEED_VIDEO_IDS_CACHE_FILE);
-        try_load_json_file::<VideoIdsData>(&path, "feed video IDs cache").map(|data| data.video_ids)
+        Ok(
+            load_json_file::<VideoIdsData>(&path, "feed video IDs cache")?
+                .map(|data| data.video_ids),
+        )
     }
 
     /// Persists IDs that belong to the current feed.
@@ -763,9 +815,7 @@ impl Storage {
         let data = VideoIdsData {
             video_ids: video_ids.to_vec(),
         };
-        let json = serde_json::to_string_pretty(&data)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        write_json_atomic(&path, &data)
     }
 
     /// Rebuilds missing Watch Later video records from cached `yt-dlp` info sidecars.
@@ -803,7 +853,10 @@ impl Storage {
                 if known_video_ids.contains(video_id) || !watch_later.contains(video_id) {
                     return None;
                 }
-                let info = try_load_json_file::<YtDlpInfoJson>(&path, "yt-dlp info JSON")?;
+                // Best-effort repair: a damaged info JSON only skips that video.
+                let info = load_json_file::<YtDlpInfoJson>(&path, "yt-dlp info JSON")
+                    .ok()
+                    .flatten()?;
                 let video = info.into_video(video_id)?;
                 Some(video)
             })
@@ -861,8 +914,8 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_TITLE_LENGTH, Storage, VIDEOS_CACHE_FILE, VideoMetadataSidecar,
-        collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem,
+        MAX_TITLE_LENGTH, Storage, VIDEOS_CACHE_FILE, VideoMetadataSidecar, sanitize_filename,
+        video_id_from_stem,
     };
     use crate::data::{NewVideo, Video};
     use chrono::{DateTime, Utc};
@@ -938,15 +991,16 @@ mod tests {
     }
 
     #[test]
-    fn collect_cached_video_ids_from_dir_only_keeps_supported_video_files() {
+    fn scan_downloaded_video_ids_only_keeps_supported_video_files() {
         let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(temp_dir.path());
 
-        touch(&temp_dir.path().join("my_title_C9ww_8cg_5g.mkv"));
-        touch(&temp_dir.path().join("another_title_abc123DEF45.mp4"));
-        touch(&temp_dir.path().join("skip_me.txt"));
-        touch(&temp_dir.path().join("missing_suffix_.webm"));
+        touch(&storage.videos_dir.join("my_title_C9ww_8cg_5g.mkv"));
+        touch(&storage.videos_dir.join("another_title_abc123DEF45.mp4"));
+        touch(&storage.videos_dir.join("skip_me.txt"));
+        touch(&storage.videos_dir.join("missing_suffix_.webm"));
 
-        let ids = collect_cached_video_ids_from_dir(temp_dir.path());
+        let (ids, _legacy) = storage.scan_downloaded_video_ids();
         assert!(ids.contains("C9ww_8cg_5g"));
         assert!(ids.contains("abc123DEF45"));
         assert_eq!(ids.len(), 2);
@@ -1101,7 +1155,10 @@ mod tests {
             .save_feed_video_ids(&ids)
             .expect("feed IDs should save");
 
-        assert_eq!(storage.load_feed_video_ids(), Some(ids));
+        assert_eq!(
+            storage.load_feed_video_ids().expect("feed IDs should load"),
+            Some(ids)
+        );
     }
 
     #[test]
@@ -1186,7 +1243,7 @@ mod tests {
             )
             .expect("Writing existing sidecar should succeed");
 
-        let loaded = storage.load_videos();
+        let loaded = storage.load_videos().expect("videos cache should load");
         assert_eq!(loaded.len(), 1);
 
         let mixed_loaded = loaded
@@ -1200,6 +1257,55 @@ mod tests {
             Some("sidecar transcript")
         );
         assert_eq!(mixed_loaded.ai_summary(), Some("sidecar summary"));
+    }
+
+    #[test]
+    fn load_watch_later_distinguishes_missing_from_corrupt_files() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(temp_dir.path());
+
+        assert!(
+            storage
+                .load_watch_later()
+                .expect("missing file should load as empty")
+                .is_empty()
+        );
+
+        std::fs::write(storage.data_dir.join("watch_later.json"), "{truncated")
+            .expect("corrupt watch-later file should be writable");
+        assert!(storage.load_watch_later().is_err());
+    }
+
+    #[test]
+    fn load_videos_errors_on_corrupt_cache_file() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(temp_dir.path());
+
+        assert!(
+            storage
+                .load_videos()
+                .expect("missing cache should load as empty")
+                .is_empty()
+        );
+
+        std::fs::write(storage.cache_dir.join(VIDEOS_CACHE_FILE), "not json")
+            .expect("corrupt videos cache should be writable");
+        assert!(storage.load_videos().is_err());
+    }
+
+    #[test]
+    fn scan_downloaded_video_ids_splits_legacy_from_mkv() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(temp_dir.path());
+        touch(&storage.videos_dir.join("modern_C9ww_8cg_5g.mkv"));
+        touch(&storage.videos_dir.join("legacy_abc123DEF45.mp4"));
+        touch(&storage.videos_dir.join("upgraded_zzz999ZZZ99.mkv"));
+        touch(&storage.videos_dir.join("upgraded_zzz999ZZZ99.webm"));
+
+        let (downloaded, legacy) = storage.scan_downloaded_video_ids();
+
+        assert_eq!(downloaded.len(), 3);
+        assert_eq!(legacy, HashSet::from(["abc123DEF45".to_string()]));
     }
 
     #[test]

@@ -62,19 +62,40 @@ pub async fn transcript_from_vtt_file(subtitle_path: &Path) -> Option<String> {
     (!transcript.is_empty()).then_some(transcript)
 }
 
-/// Removes inline `WebVTT` markup spans such as `<c>` and `<00:00:01.319>`.
+/// Removes inline `WebVTT` markup spans such as `<c>`, `</c>`, `<c.colorCCCCCC>`,
+/// and `<00:00:01.319>`.
+///
+/// A `<` only opens a tag when a matching `>` follows later on the line with no
+/// whitespace in between (real VTT tags never contain spaces); otherwise the `<`
+/// is emitted verbatim, so caption text like "x < y" survives unmangled.
 fn strip_vtt_tags(line: &str) -> String {
     let mut stripped = String::with_capacity(line.len());
-    let mut in_tag = false;
-    for character in line.chars() {
-        match character {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            c if !in_tag => stripped.push(c),
-            _ => {}
+    let mut chars = line.char_indices().peekable();
+    while let Some((start, character)) = chars.next() {
+        if character != '<' {
+            stripped.push(character);
+            continue;
+        }
+        match tag_end(&line[start..]) {
+            Some(tag_len) => {
+                for _ in 1..line[start..start + tag_len].chars().count() {
+                    chars.next();
+                }
+            }
+            None => stripped.push('<'),
         }
     }
     stripped
+}
+
+/// If `text` (which must start with `<`) opens a valid inline VTT tag, returns the
+/// byte length of that tag including both angle brackets.
+fn tag_end(text: &str) -> Option<usize> {
+    let inner_start = '<'.len_utf8();
+    let close_offset = text[inner_start..].find('>')?;
+    let inner = &text[inner_start..inner_start + close_offset];
+    (!inner.is_empty() && !inner.contains(char::is_whitespace) && !inner.contains('<'))
+        .then_some(inner_start + close_offset + '>'.len_utf8())
 }
 
 /// Parse `WebVTT` subtitle text into clean transcript text.
@@ -238,6 +259,28 @@ mod tests {
     fn parse_vtt_strips_headers_timestamps_and_inline_tags() {
         let vtt = "WEBVTT\nKind: captions\nLanguage: en\n\n00:00:00.000 --> 00:00:02.000 align:start position:0%\nhello<00:00:01.319><c> world</c>\n\n00:00:02.000 --> 00:00:04.000\nhello world\nnext line\n";
         assert_eq!(super::parse_vtt(vtt), "hello world next line");
+    }
+
+    #[test]
+    fn strip_vtt_tags_preserves_real_inline_tags() {
+        assert_eq!(
+            super::strip_vtt_tags("hello<00:00:01.319><c> world</c>"),
+            "hello world"
+        );
+        assert_eq!(
+            super::strip_vtt_tags("<c.colorCCCCCC>colored</c>"),
+            "colored"
+        );
+    }
+
+    #[test]
+    fn strip_vtt_tags_preserves_literal_less_than() {
+        assert_eq!(super::strip_vtt_tags("x < y"), "x < y");
+    }
+
+    #[test]
+    fn strip_vtt_tags_preserves_bracket_with_space_inside() {
+        assert_eq!(super::strip_vtt_tags("a < b > c"), "a < b > c");
     }
 
     #[test]

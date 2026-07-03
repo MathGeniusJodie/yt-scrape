@@ -8,7 +8,6 @@ mod ui;
 mod urls;
 
 use adw::prelude::*;
-use anyhow::Context;
 use cache::is_on_path;
 use gtk::glib;
 use log::{error, warn};
@@ -44,7 +43,7 @@ fn run() -> anyhow::Result<()> {
     glib::set_prgname(Some("yt-gtk"));
     glib::set_application_name("yt-gtk");
 
-    let subs_file = find_subs_file().context("Failed locating youtube-subs.txt")?;
+    let subs_file = find_subs_file()?;
 
     let app = adw::Application::builder()
         .application_id("com.github.yt-gtk")
@@ -64,6 +63,15 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Locates `youtube-subs.txt`, preferring the XDG config directory, then walking up
+/// from the executable's directory (covering cargo layouts where the repo root holds
+/// the subs file: target/debug is two levels down, target/<triple>/debug three).
+///
+/// The subs file is optional: subscriptions are only one of several data sources (search
+/// and watch-later work without them), so a missing file is not fatal here. When no
+/// candidate exists, this logs a warning and falls back to the XDG config candidate path
+/// (letting the refresh flow surface a readable error later) rather than bailing. Only
+/// when XDG config is itself unavailable *and* nothing was found does this return an error.
 fn find_subs_file() -> anyhow::Result<PathBuf> {
     let exe_path = std::env::current_exe()?;
     let exe_dir = exe_path.parent().ok_or_else(|| {
@@ -76,16 +84,15 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
     let xdg_config_candidate = directories::ProjectDirs::from("", "", "yt-gtk")
         .map(|dirs| dirs.config_dir().join("youtube-subs.txt"));
 
-    // The ancestor walk covers cargo layouts where the repo root holds the subs
-    // file: target/debug (../..) and target/<triple>/debug (../../..).
     let candidates = xdg_config_candidate
+        .clone()
         .into_iter()
-        .chain([
-            exe_dir.join("youtube-subs.txt"),
-            exe_dir.join("../youtube-subs.txt"),
-            exe_dir.join("../../youtube-subs.txt"),
-            exe_dir.join("../../../youtube-subs.txt"),
-        ])
+        .chain(
+            exe_dir
+                .ancestors()
+                .take(4)
+                .map(|dir| dir.join("youtube-subs.txt")),
+        )
         .collect::<Vec<_>>();
 
     for candidate in &candidates {
@@ -100,11 +107,22 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
         .collect::<Vec<_>>()
         .join(", ");
 
-    anyhow::bail!(
-        "Could not find youtube-subs.txt relative to executable {}. Searched: {}",
-        exe_path.display(),
-        searched
-    )
+    match xdg_config_candidate {
+        Some(fallback) => {
+            warn!(
+                "Could not find youtube-subs.txt relative to executable {}. Searched: {}. \
+                 Continuing without subscriptions; refresh will report a readable error.",
+                exe_path.display(),
+                searched
+            );
+            Ok(fallback)
+        }
+        None => anyhow::bail!(
+            "Could not find youtube-subs.txt relative to executable {}. Searched: {}",
+            exe_path.display(),
+            searched
+        ),
+    }
 }
 
 /// Logs a warning for each external dependency in [`EXTERNAL_DEPENDENCIES`] that is missing

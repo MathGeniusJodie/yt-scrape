@@ -2,7 +2,7 @@ mod cards;
 mod comments;
 mod summary_generator;
 
-use crate::cache::{Storage, StorageError, download_video};
+use crate::cache::{Storage, download_video};
 use crate::data::{Tab, Video};
 use crate::feed::{FetchProgress, fetch_all_feeds, fetch_youtube_search, load_channel_ids};
 use crate::frogpoints;
@@ -36,18 +36,24 @@ struct AppState {
     /// IDs with a completed local download, kept in sync with the videos cache
     /// directory so UI paths never rescan it on the main thread.
     downloaded_video_ids: HashSet<String>,
+    /// Downloaded IDs whose only local file is a legacy (non-`.mkv`) container,
+    /// so upgrade decisions never rescan the cache directory on the main thread.
+    legacy_video_ids: HashSet<String>,
     storage: Storage,
+    /// Ordered queue for sidecar writes (see [`spawn_sidecar_persister`]), so
+    /// per-video read-modify-write cycles never run on the main thread.
+    sidecar_saves: async_channel::Sender<SidecarSave>,
+}
+
+/// One persisted sidecar mutation, applied strictly in send order.
+enum SidecarSave {
+    Watched { video_id: String, watched: bool },
+    Transcript { video_id: String, text: String },
+    Summary { video_id: String, text: String },
 }
 
 #[derive(Debug, Error)]
 pub(super) enum CacheVideoError {
-    #[error("Failed to persist {sidecar_name} sidecar for {video_id}: {source}")]
-    Persist {
-        video_id: String,
-        sidecar_name: &'static str,
-        #[source]
-        source: StorageError,
-    },
     #[error("Video {video_id} is no longer available")]
     MissingVideo { video_id: String },
 }
@@ -58,19 +64,22 @@ impl AppState {
         feed_video_ids: Vec<String>,
         watch_later: HashSet<String>,
         storage: Storage,
+        sidecar_saves: async_channel::Sender<SidecarSave>,
     ) -> Self {
         let videos = videos
             .into_iter()
             .map(|video| (video.video_id().to_string(), video))
             .collect::<IndexMap<_, _>>();
-        let downloaded_video_ids = storage.cached_video_ids();
+        let (downloaded_video_ids, legacy_video_ids) = storage.scan_downloaded_video_ids();
         Self {
             videos,
             feed_video_ids,
             search_result_ids: Vec::new(),
             watch_later,
             downloaded_video_ids,
+            legacy_video_ids,
             storage,
+            sidecar_saves,
         }
     }
 
@@ -143,19 +152,23 @@ impl AppState {
         &self.search_result_ids
     }
 
+    /// Queues a sidecar mutation on the ordered background persister, so the
+    /// main thread never performs the sidecar read-modify-write itself.
+    fn queue_sidecar_save(&self, save: SidecarSave) {
+        if self.sidecar_saves.send_blocking(save).is_err() {
+            error!("Sidecar persister is gone; sidecar changes will not be saved");
+        }
+    }
+
     fn cache_video_transcript(
         &mut self,
         video_id: &str,
         transcript: String,
     ) -> Result<(), CacheVideoError> {
-        self.storage
-            .save_video_metadata(video_id, Some(&transcript), None)
-            .map_err(|source| CacheVideoError::Persist {
-                video_id: video_id.to_string(),
-                sidecar_name: "transcript",
-                source,
-            })?;
-
+        self.queue_sidecar_save(SidecarSave::Transcript {
+            video_id: video_id.to_string(),
+            text: transcript.clone(),
+        });
         let video =
             self.video_by_id_mut(video_id)
                 .ok_or_else(|| CacheVideoError::MissingVideo {
@@ -166,13 +179,10 @@ impl AppState {
     }
 
     fn set_video_watched(&mut self, video_id: &str, watched: bool) -> Result<(), CacheVideoError> {
-        self.storage
-            .save_video_watched(video_id, watched)
-            .map_err(|source| CacheVideoError::Persist {
-                video_id: video_id.to_string(),
-                sidecar_name: "watched",
-                source,
-            })?;
+        self.queue_sidecar_save(SidecarSave::Watched {
+            video_id: video_id.to_string(),
+            watched,
+        });
         let video =
             self.video_by_id_mut(video_id)
                 .ok_or_else(|| CacheVideoError::MissingVideo {
@@ -187,14 +197,10 @@ impl AppState {
         video_id: &str,
         ai_summary: String,
     ) -> Result<(), CacheVideoError> {
-        self.storage
-            .save_video_metadata(video_id, None, Some(&ai_summary))
-            .map_err(|source| CacheVideoError::Persist {
-                video_id: video_id.to_string(),
-                sidecar_name: "summary",
-                source,
-            })?;
-
+        self.queue_sidecar_save(SidecarSave::Summary {
+            video_id: video_id.to_string(),
+            text: ai_summary.clone(),
+        });
         let video =
             self.video_by_id_mut(video_id)
                 .ok_or_else(|| CacheVideoError::MissingVideo {
@@ -203,12 +209,45 @@ impl AppState {
         video.set_ai_summary(Some(ai_summary));
         Ok(())
     }
+
+    /// Videos worth persisting to `videos.json`: current feed and Watch Later
+    /// entries. Transient search results must never leak into the on-disk cache.
+    fn persistable_videos(&self) -> Vec<Video> {
+        let feed_ids = self
+            .feed_video_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        self.videos
+            .values()
+            .filter(|video| {
+                feed_ids.contains(video.video_id()) || self.watch_later.contains(video.video_id())
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 type CardMap = Rc<RefCell<TabCards>>;
 
+/// Cheaply cloneable handle to the shared UI context.
+///
+/// Cards attach several closures each, every one holding a clone; a single
+/// `Rc` keeps that at one refcount bump instead of ~15 GObject/Rc bumps.
 #[derive(Clone)]
 struct AppContext {
+    inner: Rc<AppContextInner>,
+}
+
+impl std::ops::Deref for AppContext {
+    type Target = AppContextInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+struct AppContextInner {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
     summary_generator: SummaryGenerator,
@@ -233,6 +272,21 @@ struct AppContext {
     /// Video IDs with a running mpv session, so accidental double-plays never
     /// spawn a second player racing the watched-state heuristic.
     videos_playing: Rc<RefCell<HashSet<String>>>,
+    /// `true` while a feed refresh or search owns the shared status widgets,
+    /// so the two activities can never interleave spinner/label updates.
+    activity_in_progress: std::cell::Cell<bool>,
+}
+
+impl AppContext {
+    /// Claims the shared refresh/search activity slot. Returns `false` when
+    /// another activity already owns it.
+    fn try_begin_activity(&self) -> bool {
+        !self.activity_in_progress.replace(true)
+    }
+
+    fn end_activity(&self) {
+        self.activity_in_progress.set(false);
+    }
 }
 
 /// Toolbar widgets that report long-running feed/search activity.
@@ -255,10 +309,6 @@ impl StatusUi {
 
 fn is_legacy_download(path: &Path) -> bool {
     !matches!(path.extension().and_then(|ext| ext.to_str()), Some("mkv"))
-}
-
-fn needs_download_upgrade(local_path: Option<&Path>) -> bool {
-    local_path.is_none_or(is_legacy_download)
 }
 
 /// Spawns a background video download, reporting completion (`true`) or failure
@@ -320,20 +370,34 @@ fn start_tracked_download(
             let mut state = state_rc.borrow_mut();
             if succeeded {
                 state.downloaded_video_ids.insert(video_id.clone());
+                state.legacy_video_ids.remove(&video_id);
                 // A legacy-format upgrade leaves the old .mp4/.webm behind;
                 // delete it so it can never shadow the fresh .mkv.
-                if let Err(remove_error) = state.storage.remove_legacy_video_files(&video_id) {
-                    error!("Failed to remove legacy video files for {video_id}: {remove_error}");
-                }
+                let storage = state.storage.clone();
+                let legacy_video_id = video_id.clone();
+                persist_in_background(
+                    &ui_context.runtime,
+                    "legacy video file removal",
+                    move || {
+                        storage
+                            .remove_legacy_video_files(&legacy_video_id)
+                            .map(drop)
+                    },
+                );
             }
             let still_wanted = state.watch_later.contains(&video_id);
             // Removed from Watch Later mid-download: honor the removal now
             // that yt-dlp is no longer writing the files.
             if !still_wanted {
                 state.downloaded_video_ids.remove(&video_id);
-                if let Err(remove_error) = state.storage.remove_cached_video_files(&video_id) {
-                    error!("Failed to remove cached video {video_id}: {remove_error}");
-                }
+                state.legacy_video_ids.remove(&video_id);
+                let storage = state.storage.clone();
+                let removed_video_id = video_id.clone();
+                persist_in_background(&ui_context.runtime, "cached video removal", move || {
+                    storage
+                        .remove_cached_video_files(&removed_video_id)
+                        .map(drop)
+                });
             }
             still_wanted
         };
@@ -382,6 +446,39 @@ fn spawn_watch_later_persister(
                 Ok(Ok(())) => {}
                 Ok(Err(save_error)) => error!("Failed to persist watch-later list: {save_error}"),
                 Err(join_error) => error!("Watch-later persistence task failed: {join_error}"),
+            }
+        }
+    });
+    tx
+}
+
+/// Starts the single consumer that applies sidecar mutations strictly in the
+/// order they were produced, keeping per-video read-modify-write cycles off
+/// the main thread without letting them interleave.
+fn spawn_sidecar_persister(
+    runtime: &Arc<Runtime>,
+    storage: Storage,
+) -> async_channel::Sender<SidecarSave> {
+    let (tx, rx) = async_channel::unbounded::<SidecarSave>();
+    runtime.spawn(async move {
+        while let Ok(save) = rx.recv().await {
+            let storage = storage.clone();
+            let save_result = tokio::task::spawn_blocking(move || match save {
+                SidecarSave::Watched { video_id, watched } => {
+                    storage.save_video_watched(&video_id, watched)
+                }
+                SidecarSave::Transcript { video_id, text } => {
+                    storage.save_video_metadata(&video_id, Some(&text), None)
+                }
+                SidecarSave::Summary { video_id, text } => {
+                    storage.save_video_metadata(&video_id, None, Some(&text))
+                }
+            })
+            .await;
+            match save_result {
+                Ok(Ok(())) => {}
+                Ok(Err(save_error)) => error!("Failed to persist video sidecar: {save_error}"),
+                Err(join_error) => error!("Sidecar persistence task failed: {join_error}"),
             }
         }
     });
@@ -444,30 +541,42 @@ fn persist_feed_video_ids(runtime: &Arc<Runtime>, storage: Storage, video_ids: V
     });
 }
 
+/// Scans for a local video file on the runtime, keeping the directory walk off
+/// the main thread. The receiver yields exactly once.
+fn find_video_path_in_background(
+    runtime: &Arc<Runtime>,
+    storage: Storage,
+    video_id: String,
+) -> async_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = async_channel::bounded(1);
+    runtime.spawn(async move {
+        let found = tokio::task::spawn_blocking(move || storage.find_video_path(&video_id)).await;
+        let _ = tx.send(found.unwrap_or(None)).await;
+    });
+    rx
+}
+
+/// Decides what to play given the pre-scanned local path, kicking off a
+/// background container upgrade for legacy Watch Later downloads.
 fn resolve_playback_path(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
     video_id: &str,
     video_title: &str,
+    local_path: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let (local_path, in_watch_later) = {
-        let state = state_rc.borrow();
-        (
-            state.storage.find_video_path(video_id),
-            state.watch_later.contains(video_id),
-        )
-    };
     match local_path {
         Some(path) if is_legacy_download(&path) => {
             // Legacy downloads lack embedded chapter/caption metadata. Upgrade in
             // background — but only for Watch Later videos, since the cache policy
             // deletes downloads of anything else — and still play the local file.
-            if in_watch_later {
+            if state_rc.borrow().watch_later.contains(video_id) {
                 start_tracked_download(state_rc, ui_context, video_id, video_title);
             }
             Some(path)
         }
-        other => other,
+        Some(path) => Some(path),
+        None => None,
     }
 }
 
@@ -484,18 +593,24 @@ fn perform_watch_later_toggle(
             state.watch_later.insert(video_id.to_string());
         }
 
-        let needs_download = added && {
-            let local_path = state.storage.find_video_path(video_id);
-            needs_download_upgrade(local_path.as_deref())
-        };
+        // Decided from in-memory download state so the click handler never
+        // rescans the cache directory on the main thread.
+        let needs_download = added
+            && (!state.downloaded_video_ids.contains(video_id)
+                || state.legacy_video_ids.contains(video_id));
 
         // When a download is in flight its completion handler owns the files
         // and performs the deferred deletion; deleting here would race yt-dlp.
         if !added && !ui_context.downloads_in_progress.borrow().contains(video_id) {
             state.downloaded_video_ids.remove(video_id);
-            if let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
-                error!("Failed to remove cached video {video_id}: {remove_error}");
-            }
+            state.legacy_video_ids.remove(video_id);
+            let storage = state.storage.clone();
+            let removed_video_id = video_id.to_string();
+            persist_in_background(&ui_context.runtime, "cached video removal", move || {
+                storage
+                    .remove_cached_video_files(&removed_video_id)
+                    .map(drop)
+            });
         }
 
         (added, needs_download, state.watch_later.clone())
@@ -637,6 +752,7 @@ fn refund_refresh_frogpoints_in_background() {
 fn spawn_refresh_progress_updates(
     progress_rx: async_channel::Receiver<FetchProgress>,
     status_ui: StatusUi,
+    ui_context: AppContext,
 ) {
     let StatusUi {
         spinner,
@@ -703,7 +819,15 @@ fn spawn_refresh_progress_updates(
                     failed_channels: final_failed,
                 } => {
                     spinner.stop();
-                    if final_failed > 0 {
+                    // A majority-failed refresh delivered a degraded feed;
+                    // give the points back even though results were applied.
+                    if final_failed > successful_channels {
+                        refund_refresh_frogpoints_in_background();
+                        status_label.set_text(&format!(
+                            "{total_videos} videos loaded ({successful_channels} channels ok, \
+                             {final_failed} failed; frogpoints refunded)"
+                        ));
+                    } else if final_failed > 0 {
                         status_label.set_text(&format!(
                             "{total_videos} videos loaded ({successful_channels} channels ok, {final_failed} failed)"
                         ));
@@ -717,6 +841,7 @@ fn spawn_refresh_progress_updates(
 
         spinner.stop();
         refresh_button.set_sensitive(true);
+        ui_context.end_activity();
     });
 }
 
@@ -754,8 +879,12 @@ fn spawn_refreshed_videos_apply(
                 .map(|video| video.video_id().to_string())
                 .collect::<Vec<_>>();
             state.set_refreshed_feed_videos(videos);
-            let all_videos = state.videos.values().cloned().collect::<Vec<_>>();
-            persist_videos(&ui_context.runtime, state.storage.clone(), all_videos);
+            let persistable_videos = state.persistable_videos();
+            persist_videos(
+                &ui_context.runtime,
+                state.storage.clone(),
+                persistable_videos,
+            );
             persist_feed_video_ids(&ui_context.runtime, state.storage.clone(), feed_video_ids);
 
             let thumbnail_completion = download_missing_thumbnails(
@@ -797,6 +926,15 @@ fn start_youtube_search(
         state_rc.borrow_mut().set_search_results(Vec::new());
         refresh_search_results(&state_rc, &ui_context);
         status_ui.label.set_text("");
+        return;
+    }
+
+    // Enter in the search entry bypasses the disabled button, and refresh
+    // shares the same status widgets: one activity at a time.
+    if !ui_context.try_begin_activity() {
+        status_ui
+            .label
+            .set_text("A refresh or search is already running.");
         return;
     }
 
@@ -849,67 +987,90 @@ fn start_youtube_search(
 
         status_ui.spinner.stop();
         status_ui.button.set_sensitive(true);
+        ui_context.end_activity();
     });
+}
+
+/// Reads the subscriptions file and debits the refresh cost, in that order,
+/// so a refresh that cannot possibly succeed never costs anything. Runs on a
+/// blocking thread: both steps are file I/O that must stay off the main loop.
+fn prepare_refresh(subs_file: &Path) -> Result<(Vec<String>, i64), String> {
+    let channel_ids = load_channel_ids(subs_file).map_err(|error| format!("Error: {error}"))?;
+    if !crate::feed::has_google_api_key() {
+        return Err("Refresh blocked: GOOGLE_API_KEY is not set.".to_string());
+    }
+    let remaining = frogpoints::debit_refresh_frogpoints()
+        .map_err(|error| format!("Refresh blocked: {error}"))?;
+    Ok((channel_ids, remaining))
 }
 
 fn start_feed_refresh(
     state: Rc<RefCell<AppState>>,
     ui_context: AppContext,
     status_ui: StatusUi,
-    subs_file: &Path,
+    subs_file: PathBuf,
 ) {
+    if !ui_context.try_begin_activity() {
+        status_ui
+            .label
+            .set_text("A refresh or search is already running.");
+        return;
+    }
+
     status_ui.button.set_sensitive(false);
     status_ui.spinner.start();
     status_ui.label.set_text("Refreshing...");
 
-    // Validate every cheap precondition before charging frogpoints, so a
-    // refresh that cannot possibly succeed never costs anything.
-    let channel_ids = match load_channel_ids(subs_file) {
-        Ok(ids) => ids,
-        Err(error) => {
-            status_ui.finish(&format!("Error: {error}"));
-            return;
-        }
-    };
-    if !crate::feed::has_google_api_key() {
-        status_ui.finish("Refresh blocked: GOOGLE_API_KEY is not set.");
-        return;
-    }
-
-    match frogpoints::debit_refresh_frogpoints() {
-        Ok(remaining) => {
-            status_ui
-                .label
-                .set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
-        }
-        Err(error) => {
-            status_ui.finish(&format!("Refresh blocked: {error}"));
-            return;
-        }
-    }
-
-    let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
-    let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
-
-    let progress_tx_for_errors = progress_tx.clone();
-    let fetch_client = ui_context.http_client.clone();
+    let (prepared_tx, prepared_rx) =
+        async_channel::bounded::<Result<(Vec<String>, i64), String>>(1);
     ui_context.runtime.spawn(async move {
-        match fetch_all_feeds(&fetch_client, channel_ids, progress_tx).await {
-            Ok(videos) => {
-                let _ = videos_tx.send(videos).await;
-            }
-            Err(error) => {
-                let _ = progress_tx_for_errors
-                    .send(FetchProgress::Fatal {
-                        error: error.to_string(),
-                    })
-                    .await;
-            }
-        }
+        let prepared = tokio::task::spawn_blocking(move || prepare_refresh(&subs_file))
+            .await
+            .unwrap_or_else(|join_error| Err(format!("Refresh setup failed: {join_error}")));
+        let _ = prepared_tx.send(prepared).await;
     });
 
-    spawn_refresh_progress_updates(progress_rx, status_ui);
-    spawn_refreshed_videos_apply(videos_rx, state, ui_context);
+    glib::MainContext::default().spawn_local(async move {
+        let (channel_ids, remaining) = match prepared_rx.recv().await {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(message)) => {
+                status_ui.finish(&message);
+                ui_context.end_activity();
+                return;
+            }
+            Err(_) => {
+                status_ui.finish("Refresh setup task was dropped.");
+                ui_context.end_activity();
+                return;
+            }
+        };
+        status_ui
+            .label
+            .set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
+
+        let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
+        let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
+
+        let progress_tx_for_errors = progress_tx.clone();
+        let fetch_client = ui_context.http_client.clone();
+        ui_context.runtime.spawn(async move {
+            match fetch_all_feeds(&fetch_client, channel_ids, progress_tx).await {
+                Ok(videos) => {
+                    let _ = videos_tx.send(videos).await;
+                }
+                Err(error) => {
+                    let _ = progress_tx_for_errors
+                        .send(FetchProgress::Fatal {
+                            error: error.to_string(),
+                        })
+                        .await;
+                }
+            }
+        });
+
+        spawn_refresh_progress_updates(progress_rx, status_ui, ui_context.clone());
+        spawn_refreshed_videos_apply(videos_rx, state, ui_context);
+    });
 }
 
 /// Builds and presents the primary application window.
@@ -936,10 +1097,25 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         }
     };
 
-    let watch_later = storage.load_watch_later();
-    let mut videos = storage.load_videos();
-    let loaded_feed_video_ids = storage.load_feed_video_ids();
-    let should_seed_feed_video_ids = loaded_feed_video_ids.is_none();
+    // A state file that exists but fails to load is NOT "empty state": cache
+    // cleanup keyed off an accidentally-empty set would delete every download.
+    let mut state_files_healthy = true;
+    let watch_later = storage.load_watch_later().unwrap_or_else(|load_error| {
+        error!("Watch-later state file is damaged; continuing without it: {load_error}");
+        state_files_healthy = false;
+        HashSet::new()
+    });
+    let mut videos = storage.load_videos().unwrap_or_else(|load_error| {
+        error!("Videos cache file is damaged; continuing without it: {load_error}");
+        state_files_healthy = false;
+        Vec::new()
+    });
+    let loaded_feed_video_ids = storage.load_feed_video_ids().unwrap_or_else(|load_error| {
+        error!("Feed ID cache file is damaged; continuing without it: {load_error}");
+        state_files_healthy = false;
+        None
+    });
+    let should_seed_feed_video_ids = state_files_healthy && loaded_feed_video_ids.is_none();
     let mut feed_video_ids = loaded_feed_video_ids.unwrap_or_else(|| {
         videos
             .iter()
@@ -972,7 +1148,9 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
 
     // Cache pruning walks several directories; keep it off the main thread so
     // startup stays responsive.
-    {
+    if !state_files_healthy {
+        warn!("Skipping cache cleanup: a state file is damaged and cleanup would over-delete");
+    } else {
         let storage = storage.clone();
         let watch_later = watch_later.clone();
         runtime.spawn(async move {
@@ -1007,11 +1185,13 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     };
 
     let watch_later_saves = spawn_watch_later_persister(&runtime, storage.clone());
+    let sidecar_saves = spawn_sidecar_persister(&runtime, storage.clone());
     let state = Rc::new(RefCell::new(AppState::new(
         videos,
         feed_video_ids,
         watch_later,
         storage,
+        sidecar_saves,
     )));
     let selected_video: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
@@ -1075,24 +1255,27 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     let subscription_removals = spawn_subscription_remover(&runtime, subs_file.clone());
 
     let ui_context = AppContext {
-        summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
-        runtime,
-        http_client,
-        window: window.clone(),
-        context_menu: context_menu.clone(),
-        stack: stack.clone(),
-        watch_later_page,
-        feed_flow,
-        search_flow,
-        watch_later_flow,
-        selected_video,
-        feed_cards: CardMap::default(),
-        search_cards: CardMap::default(),
-        watch_later_cards: CardMap::default(),
-        watch_later_saves,
-        subscription_removals,
-        downloads_in_progress: Rc::new(RefCell::new(HashSet::new())),
-        videos_playing: Rc::new(RefCell::new(HashSet::new())),
+        inner: Rc::new(AppContextInner {
+            summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
+            runtime,
+            http_client,
+            window: window.clone(),
+            context_menu: context_menu.clone(),
+            stack: stack.clone(),
+            watch_later_page,
+            feed_flow,
+            search_flow,
+            watch_later_flow,
+            selected_video,
+            feed_cards: CardMap::default(),
+            search_cards: CardMap::default(),
+            watch_later_cards: CardMap::default(),
+            watch_later_saves,
+            subscription_removals,
+            downloads_in_progress: Rc::new(RefCell::new(HashSet::new())),
+            videos_playing: Rc::new(RefCell::new(HashSet::new())),
+            activity_in_progress: std::cell::Cell::new(false),
+        }),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
@@ -1152,7 +1335,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
                 state.clone(),
                 ui_context.clone(),
                 refresh_status_ui.clone(),
-                &subs_file,
+                subs_file.clone(),
             );
         });
     }
@@ -1234,7 +1417,14 @@ mod tests {
             .iter()
             .map(|video| video.video_id().to_string())
             .collect();
-        AppState::new(videos, feed_video_ids, watch_later, test_storage(dirs))
+        let (sidecar_saves, _rx) = async_channel::unbounded();
+        AppState::new(
+            videos,
+            feed_video_ids,
+            watch_later,
+            test_storage(dirs),
+            sidecar_saves,
+        )
     }
 
     #[test]

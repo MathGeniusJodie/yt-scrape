@@ -42,6 +42,19 @@ fn mpv_base_command(title: &str) -> Command {
     command
 }
 
+/// Returns `true` if `line` is an mpv stderr line reporting that playback never
+/// started (dead URL, missing file, unrecognized format, ...).
+fn is_fatal_open_failure(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "failed to open",
+        "errors when loading file",
+        "failed to recognize file format",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn spawn_mpv_watched(
     command: &mut Command,
 ) -> Result<async_channel::Receiver<PlaybackEnd>, PlayerError> {
@@ -50,20 +63,24 @@ fn spawn_mpv_watched(
     let stderr = child.stderr.take();
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
+        let mut open_failed = false;
         if let Some(stderr) = stderr {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
+                if is_fatal_open_failure(&line) {
+                    open_failed = true;
+                }
                 log::debug!("mpv: {line}");
             }
         }
         let _ = child.wait();
-        // Elapsed time alone decides: mpv can exit 0 on failures (and a user
-        // who quits within seconds never really watched), while a long-running
-        // session counts as watched regardless of how mpv exited.
-        let end = if started.elapsed() > IMMEDIATE_FAILURE_WINDOW {
-            PlaybackEnd::Watched
-        } else {
+        // A fatal open-failure line or a too-short session both mean the video
+        // was never really watched; mpv can exit 0 on failures, and a
+        // long-running session counts as watched regardless of exit status.
+        let end = if open_failed || started.elapsed() <= IMMEDIATE_FAILURE_WINDOW {
             PlaybackEnd::FailedImmediately
+        } else {
+            PlaybackEnd::Watched
         };
         let _ = end_tx.send_blocking(end);
     });
@@ -127,7 +144,25 @@ pub fn play_video(
 
 #[cfg(test)]
 mod tests {
-    use super::mpv_base_command;
+    use super::{is_fatal_open_failure, mpv_base_command};
+
+    #[test]
+    fn is_fatal_open_failure_detects_known_failure_lines() {
+        assert!(is_fatal_open_failure("Failed to open ."));
+        assert!(is_fatal_open_failure(
+            "[ffmpeg/demuxer] Errors when loading file"
+        ));
+        assert!(is_fatal_open_failure("Failed to recognize file format."));
+        // Case-insensitive substring match.
+        assert!(is_fatal_open_failure("FAILED TO OPEN /some/path"));
+    }
+
+    #[test]
+    fn is_fatal_open_failure_ignores_ordinary_log_lines() {
+        assert!(!is_fatal_open_failure("AO: [pipewire] 48000Hz stereo"));
+        assert!(!is_fatal_open_failure("Video--vo=gpu (opengl)"));
+        assert!(!is_fatal_open_failure("Cache fill: 12.34% (1234 bytes)"));
+    }
 
     #[test]
     fn mpv_base_command_sets_expected_flags() {
