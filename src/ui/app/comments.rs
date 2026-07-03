@@ -36,15 +36,15 @@ pub(super) fn show_comments_dialog(
         |_| {},
     );
 
-    let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
+    let Some(api_key) = ui_context.config.google_api_key.clone() else {
+        buffer.set_text("GOOGLE_API_KEY is not set. Set it before loading comments.");
+        return;
+    };
+
     let client = ui_context.http_client.clone();
-    let runtime = ui_context.runtime.clone();
     let video_id_for_task = video_id.to_string();
-    runtime.spawn(async move {
-        let result = fetch_youtube_comments(&client, &video_id_for_task)
-            .await
-            .map_err(|comment_error| comment_error.to_string());
-        let _ = tx.send(result).await;
+    let rx = super::run_in_background(&ui_context.runtime, async move {
+        fetch_youtube_comments(&client, &api_key, &video_id_for_task).await
     });
 
     glib::MainContext::default().spawn_local(async move {

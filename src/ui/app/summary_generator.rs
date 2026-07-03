@@ -1,8 +1,9 @@
 use super::cards::refresh_video_summary_badges;
 use super::{AppContext, AppState, CacheVideoError};
 use crate::cache::{fetch_transcript, transcript_from_vtt_file};
+use crate::config::Config;
 use crate::data::Video;
-use crate::summary::{SummarizeRequest, SummaryOutcome, summarize_video};
+use crate::summary::{SummarizeRequest, SummaryError, SummaryOutcome, summarize_video};
 use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
 use gtk::glib;
 use gtk::prelude::*;
@@ -50,6 +51,7 @@ pub(super) enum StartSummaryGenerationError {
 pub(super) struct SummaryGenerator {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
+    config: Arc<Config>,
     summaries_in_progress: Rc<RefCell<HashSet<String>>>,
     /// Videos already prefetched once this session. Prefetches call paid AI
     /// providers, so toggling Watch Later repeatedly (or retrying after a
@@ -59,10 +61,15 @@ pub(super) struct SummaryGenerator {
 
 impl SummaryGenerator {
     /// Creates a generator backed by the application's async runtime.
-    pub(super) fn new(runtime: Arc<Runtime>, http_client: reqwest::Client) -> Self {
+    pub(super) fn new(
+        runtime: Arc<Runtime>,
+        http_client: reqwest::Client,
+        config: Arc<Config>,
+    ) -> Self {
         Self {
             runtime,
             http_client,
+            config,
             summaries_in_progress: Rc::new(RefCell::new(HashSet::new())),
             prefetch_attempted: Rc::new(RefCell::new(HashSet::new())),
         }
@@ -79,7 +86,7 @@ impl SummaryGenerator {
         video_id: &str,
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
-        let request = {
+        let (mut request, storage) = {
             let state = state_rc.borrow();
             let video = prepare_summary_generation_video(
                 &state,
@@ -88,23 +95,31 @@ impl SummaryGenerator {
                 video_id,
                 mode,
             )?;
-            SummarizeRequest {
-                video_url: video.watch_url(),
-                video_title: video.title().to_string(),
-                channel_name: video.channel_name().to_string(),
-                video_id: video.video_id().to_string(),
-                transcripts_work_dir: state.storage.transcripts_work_dir().to_path_buf(),
-                local_subtitle_path: state.storage.find_subtitle_path(video_id),
-            }
+            (
+                SummarizeRequest {
+                    video_url: video.watch_url(),
+                    video_title: video.title().to_string(),
+                    channel_name: video.channel_name().to_string(),
+                    video_id: video.video_id().to_string(),
+                    transcripts_work_dir: state.storage.transcripts_work_dir().to_path_buf(),
+                    // Resolved on the blocking pool below: the lookup scans a directory.
+                    local_subtitle_path: None,
+                },
+                state.storage.clone(),
+            )
         };
 
         let task_video_id = request.video_id.clone();
-        let (tx, result_rx) = async_channel::bounded::<Result<SummaryOutcome, String>>(1);
+        let (tx, result_rx) = async_channel::bounded::<Result<SummaryOutcome, SummaryError>>(1);
         let http_client = self.http_client.clone();
+        let config = self.config.clone();
         self.runtime.spawn(async move {
-            let result = summarize_video(&http_client, &request)
-                .await
-                .map_err(|summary_error| summary_error.to_string());
+            let subtitle_video_id = request.video_id.clone();
+            request.local_subtitle_path =
+                tokio::task::spawn_blocking(move || storage.find_subtitle_path(&subtitle_video_id))
+                    .await
+                    .unwrap_or(None);
+            let result = summarize_video(&http_client, &config, &request).await;
             let _ = tx.send(result).await;
         });
 
@@ -163,7 +178,7 @@ impl SummaryGenerator {
 /// In-flight summarization handle.
 pub(super) struct SummaryGenerationTask {
     video_id: String,
-    result_rx: async_channel::Receiver<Result<SummaryOutcome, String>>,
+    result_rx: async_channel::Receiver<Result<SummaryOutcome, SummaryError>>,
 }
 
 impl SummaryGenerationTask {
@@ -178,11 +193,11 @@ impl SummaryGenerationTask {
     ///
     /// Returns the provider failure description when summarization fails or the
     /// background task is dropped before producing a result.
-    pub(super) async fn wait(self) -> Result<SummaryOutcome, String> {
+    pub(super) async fn wait(self) -> Result<SummaryOutcome, SummaryError> {
         self.result_rx
             .recv()
             .await
-            .unwrap_or_else(|_| Err("summary task ended without a result".to_string()))
+            .unwrap_or(Err(SummaryError::TaskAborted))
     }
 }
 
@@ -429,35 +444,30 @@ pub(super) fn show_transcript_dialog(
         |_| {},
     );
 
-    let (work_dir, local_subtitle_path) = {
+    let (work_dir, storage) = {
         let state = state_rc.borrow();
         (
             state.storage.transcripts_work_dir().to_path_buf(),
-            state.storage.find_subtitle_path(video_id),
+            state.storage.clone(),
         )
     };
 
-    let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
-
     let video_id_for_thread = video_id.to_string();
-    let runtime = ui_context.runtime.clone();
-    runtime.spawn(async move {
+    let rx = super::run_in_background(&ui_context.runtime, async move {
         // Prefer a subtitle file downloaded alongside the video over another
-        // rate-limited yt-dlp subtitle request.
+        // rate-limited yt-dlp subtitle request. The lookup scans a directory,
+        // so it runs on the blocking pool.
+        let subtitle_video_id = video_id_for_thread.clone();
+        let local_subtitle_path =
+            tokio::task::spawn_blocking(move || storage.find_subtitle_path(&subtitle_video_id))
+                .await
+                .unwrap_or(None);
         if let Some(subtitle_path) = local_subtitle_path.as_deref()
             && let Some(transcript) = transcript_from_vtt_file(subtitle_path).await
         {
-            let _ = tx.send(Ok(transcript)).await;
-            return;
+            return Ok(transcript);
         }
-        match fetch_transcript(&video_id_for_thread, &work_dir).await {
-            Ok(transcript) => {
-                let _ = tx.send(Ok(transcript)).await;
-            }
-            Err(transcript_error) => {
-                let _ = tx.send(Err(transcript_error.to_string())).await;
-            }
-        }
+        fetch_transcript(&video_id_for_thread, &work_dir).await
     });
 
     let video_id = video_id.to_string();
@@ -488,7 +498,7 @@ mod tests {
     };
     use crate::cache::Storage;
     use crate::data::{NewVideo, Video};
-    use crate::summary::SummaryOutcome;
+    use crate::summary::{SummaryError, SummaryOutcome};
     use crate::ui::app::AppState;
 
     use chrono::Utc;
@@ -716,9 +726,12 @@ mod tests {
     #[tokio::test]
     async fn wait_returns_stream_error() {
         let (tx, rx) = async_channel::bounded(1);
-        tx.send(Err("provider failed".to_string()))
-            .await
-            .expect("error send should succeed");
+        tx.send(Err(SummaryError::NoSummaryOrTranscript {
+            gemini: "provider failed".to_string(),
+            transcript: "none".to_string(),
+        }))
+        .await
+        .expect("error send should succeed");
 
         let result = SummaryGenerationTask {
             video_id: "video-id".to_string(),
@@ -727,12 +740,15 @@ mod tests {
         .wait()
         .await;
 
-        assert_eq!(result, Err("provider failed".to_string()));
+        assert!(matches!(
+            result,
+            Err(SummaryError::NoSummaryOrTranscript { .. })
+        ));
     }
 
     #[tokio::test]
     async fn wait_reports_dropped_task() {
-        let (tx, rx) = async_channel::bounded::<Result<SummaryOutcome, String>>(1);
+        let (tx, rx) = async_channel::bounded::<Result<SummaryOutcome, SummaryError>>(1);
         drop(tx);
 
         let result = SummaryGenerationTask {
@@ -742,6 +758,6 @@ mod tests {
         .wait()
         .await;
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(SummaryError::TaskAborted)));
     }
 }

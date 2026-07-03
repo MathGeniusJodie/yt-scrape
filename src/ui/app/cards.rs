@@ -20,11 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
-    if !ui_context
-        .videos_playing
-        .borrow_mut()
-        .insert(video_id.to_string())
-    {
+    if !ui_context.videos_playing.try_claim(video_id) {
         return;
     }
 
@@ -39,7 +35,7 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     };
     let Some(video_title) = video_title else {
         error!("Cannot play missing video {video_id}");
-        ui_context.videos_playing.borrow_mut().remove(video_id);
+        ui_context.videos_playing.release(video_id);
         return;
     };
 
@@ -60,11 +56,23 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
             scanned_path,
         );
 
-        let playback_end_rx = match play_video(&video_id, &video_title, local_path.as_deref()) {
-            Ok(playback_end_rx) => playback_end_rx,
-            Err(play_error) => {
+        // Launching mpv reads/writes chapter sidecars beside the video, so it
+        // runs on the blocking pool, not the main thread.
+        let launch_video_id = video_id.clone();
+        let launch_title = video_title.clone();
+        let launch_rx = super::run_blocking_in_background(&ui_context.runtime, move || {
+            play_video(&launch_video_id, &launch_title, local_path.as_deref())
+        });
+        let playback_end_rx = match launch_rx.recv().await {
+            Ok(Ok(playback_end_rx)) => playback_end_rx,
+            Ok(Err(play_error)) => {
                 error!("Failed to play video {video_id}: {play_error}");
-                ui_context.videos_playing.borrow_mut().remove(&video_id);
+                ui_context.videos_playing.release(&video_id);
+                return;
+            }
+            Err(_) => {
+                error!("mpv launch task for {video_id} died before reporting a result");
+                ui_context.videos_playing.release(&video_id);
                 return;
             }
         };
@@ -78,7 +86,7 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
         }
 
         let playback_end = playback_end_rx.recv().await;
-        ui_context.videos_playing.borrow_mut().remove(&video_id);
+        ui_context.videos_playing.release(&video_id);
         if playback_end == Ok(PlaybackEnd::FailedImmediately) {
             error!("mpv failed to play {video_id}; reverting watched state");
             if let Err(e) = state_rc.borrow_mut().set_video_watched(&video_id, false) {
@@ -284,10 +292,7 @@ fn card_flags_for_video(state: &AppState, ui_context: &AppContext, video: &Video
     CardFlags {
         is_watch_later: state.watch_later.contains(video.video_id()),
         is_downloaded: state.downloaded_video_ids.contains(video.video_id()),
-        is_downloading: ui_context
-            .downloads_in_progress
-            .borrow()
-            .contains(video.video_id()),
+        is_downloading: ui_context.downloads_in_progress.contains(video.video_id()),
         has_ai_summary: video.has_ai_summary(),
         is_watched: video.is_watched(),
     }
@@ -542,43 +547,44 @@ pub(super) fn refresh_video_thumbnail(
 ///
 /// # Returns
 ///
-/// `Some(receiver)` when at least one thumbnail download was scheduled. The receiver yields once
-/// with the downloaded video's IDs when all scheduled downloads have completed (successfully or
-/// not). `None` when there is no work to do.
+/// A receiver that yields exactly once with the IDs whose thumbnails were
+/// missing, after every scheduled download has completed (successfully or not).
 pub(super) fn download_missing_thumbnails<'a>(
     videos: impl IntoIterator<Item = &'a Video>,
     storage: &Storage,
     client: reqwest::Client,
     runtime: &Arc<tokio::runtime::Runtime>,
-) -> Option<async_channel::Receiver<Vec<String>>> {
+) -> async_channel::Receiver<Vec<String>> {
     const THUMBNAIL_DOWNLOAD_CONCURRENCY: usize = 12;
 
-    let pending_downloads: Vec<(String, String, PathBuf)> = videos
+    // Candidate list is built without touching the filesystem; the per-file
+    // existence checks (stat syscalls) run on the blocking pool below.
+    let candidates: Vec<(String, String, PathBuf)> = videos
         .into_iter()
-        .filter_map(|video| {
-            let path = storage.thumbnail_path(video.video_id());
-            if path.exists() {
-                None
-            } else {
-                Some((
-                    video.video_id().to_string(),
-                    video.thumbnail_url().to_string(),
-                    path,
-                ))
-            }
+        .map(|video| {
+            (
+                video.video_id().to_string(),
+                video.thumbnail_url().to_string(),
+                storage.thumbnail_path(video.video_id()),
+            )
         })
         .collect();
 
-    if pending_downloads.is_empty() {
-        return None;
-    }
-
     let (completion_tx, completion_rx) = async_channel::bounded(1);
-    let pending_video_ids = pending_downloads
-        .iter()
-        .map(|(video_id, _, _)| video_id.clone())
-        .collect::<Vec<_>>();
     runtime.spawn(async move {
+        let pending_downloads = tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter(|(_, _, path)| !path.exists())
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+
+        let pending_video_ids = pending_downloads
+            .iter()
+            .map(|(video_id, _, _)| video_id.clone())
+            .collect::<Vec<_>>();
         stream::iter(pending_downloads)
             .for_each_concurrent(
                 THUMBNAIL_DOWNLOAD_CONCURRENCY,
@@ -638,7 +644,7 @@ pub(super) fn download_missing_thumbnails<'a>(
         let _ = completion_tx.send(pending_video_ids).await;
     });
 
-    Some(completion_rx)
+    completion_rx
 }
 
 // ---------------------------------------------------------------------------
@@ -922,9 +928,9 @@ fn format_video_duration(total_seconds: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_video_duration, watch_later_insert_position};
+    use super::{format_video_duration, video_ids_for_tab, watch_later_insert_position};
     use crate::cache::Storage;
-    use crate::data::{NewVideo, Video};
+    use crate::data::{NewVideo, Tab, Video};
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
 
@@ -943,9 +949,9 @@ mod tests {
         assert_eq!(format_video_duration(7 * 3600 + 9 * 60 + 5), "7:09:05");
     }
 
-    fn test_video(video_id: &str) -> Video {
+    fn test_video(video_id: &str, published_day: u32) -> Video {
         let published = Utc
-            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .with_ymd_and_hms(2024, 1, published_day, 0, 0, 0)
             .single()
             .expect("valid fixed test timestamp");
         Video::new(NewVideo {
@@ -960,14 +966,17 @@ mod tests {
     }
 
     fn test_state(
-        video_ids: &[&str],
+        videos: &[(&str, u32)],
         watch_later: &[&str],
     ) -> (super::AppState, tempfile::TempDir) {
         let root = tempfile::tempdir().expect("test directory must be creatable");
         let storage = Storage::new_at(root.path().join("data"), root.path().join("cache"))
             .expect("test storage must initialize");
-        let videos: Vec<Video> = video_ids.iter().map(|id| test_video(id)).collect();
-        let feed_video_ids = video_ids.iter().map(ToString::to_string).collect();
+        let feed_video_ids = videos.iter().map(|(id, _)| (*id).to_string()).collect();
+        let videos: Vec<Video> = videos
+            .iter()
+            .map(|(id, published_day)| test_video(id, *published_day))
+            .collect();
         let watch_later: HashSet<String> = watch_later.iter().map(ToString::to_string).collect();
         let (sidecar_saves, _rx) = async_channel::unbounded();
         (
@@ -977,18 +986,50 @@ mod tests {
     }
 
     #[test]
-    fn watch_later_insert_position_orders_by_video_map_order() {
-        let (state, _root) = test_state(&["a", "b", "c", "d"], &["b", "d"]);
+    fn watch_later_insert_position_orders_by_newest_published_first() {
+        // Feed order is a,b,c,d but "d" is newer than "b": published date wins.
+        let (state, _root) = test_state(&[("a", 1), ("b", 2), ("c", 3), ("d", 4)], &["b", "d"]);
 
-        assert_eq!(watch_later_insert_position(&state, "b"), Some(0));
-        assert_eq!(watch_later_insert_position(&state, "d"), Some(1));
+        assert_eq!(watch_later_insert_position(&state, "d"), Some(0));
+        assert_eq!(watch_later_insert_position(&state, "b"), Some(1));
     }
 
     #[test]
     fn watch_later_insert_position_is_none_for_videos_not_in_watch_later() {
-        let (state, _root) = test_state(&["a", "b"], &["b"]);
+        let (state, _root) = test_state(&[("a", 1), ("b", 2)], &["b"]);
 
         assert_eq!(watch_later_insert_position(&state, "a"), None);
         assert_eq!(watch_later_insert_position(&state, "missing"), None);
+    }
+
+    #[test]
+    fn video_ids_for_watch_later_tab_are_newest_published_first() {
+        let (state, _root) = test_state(&[("a", 1), ("b", 2), ("c", 3), ("d", 4)], &["b", "d"]);
+
+        assert_eq!(
+            video_ids_for_tab(&state, Tab::WatchLater),
+            vec!["d".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn video_ids_for_feed_tab_preserves_feed_order() {
+        let (state, _root) = test_state(&[("c", 3), ("a", 1), ("b", 2)], &[]);
+
+        assert_eq!(
+            video_ids_for_tab(&state, Tab::Feed),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn video_ids_for_search_tab_returns_search_results() {
+        let (mut state, _root) = test_state(&[("a", 1)], &[]);
+        state.set_search_results(vec![test_video("x", 5), test_video("y", 6)]);
+
+        assert_eq!(
+            video_ids_for_tab(&state, Tab::Search),
+            vec!["x".to_string(), "y".to_string()]
+        );
     }
 }

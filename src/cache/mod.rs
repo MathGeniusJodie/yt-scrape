@@ -4,7 +4,7 @@ mod subtitle_requests;
 mod transcript;
 
 pub use downloader::download_video;
-pub use storage::Storage;
+pub use storage::{Storage, write_text_atomic};
 pub use transcript::{fetch_transcript, transcript_from_vtt_file};
 
 /// Checks whether `program` is on `PATH`.
@@ -35,7 +35,12 @@ pub fn nice_command(program: &str) -> tokio::process::Command {
 
 /// Browser to pass to `yt-dlp --cookies-from-browser`.
 ///
-/// Reads `YT_DLP_COOKIES_BROWSER` from the environment, defaulting to `"chromium"`.
-pub fn cookies_browser() -> String {
-    std::env::var("YT_DLP_COOKIES_BROWSER").unwrap_or_else(|_| "chromium".to_string())
+/// Reads `YT_DLP_COOKIES_BROWSER` once per process, defaulting to `"chromium"`.
+pub fn cookies_browser() -> &'static str {
+    static BROWSER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BROWSER
+        .get_or_init(|| {
+            std::env::var("YT_DLP_COOKIES_BROWSER").unwrap_or_else(|_| "chromium".to_string())
+        })
+        .as_str()
 }

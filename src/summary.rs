@@ -1,4 +1,5 @@
 use crate::cache::{fetch_transcript, transcript_from_vtt_file};
+use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -6,10 +7,8 @@ use thiserror::Error;
 // Summarizing a long video can far exceed the app-wide 120s HTTP timeout, so
 // provider requests override it per-request.
 const SUMMARY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-const GEMINI_FLASH_MODEL: &str = "gemini-3.5-flash";
 const GEMINI_THINKING_LEVEL: &str = "minimal";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_MODELS: [&str; 1] = ["@preset/cheap"];
 const OPENROUTER_REASONING_EFFORT: &str = "none";
 const SUMMARY_PROMPT: &str = concat!(
     "Summarize this YouTube video with all the relevant information so I don't have to watch. ",
@@ -196,6 +195,9 @@ pub enum SummaryError {
         /// Transcript failure description.
         transcript: String,
     },
+    /// The background summarization task ended without producing a result.
+    #[error("summary task ended without a result")]
+    TaskAborted,
 }
 
 fn visit_openrouter_content_parts(content: &serde_json::Value, emit: &mut dyn FnMut(&str)) {
@@ -266,26 +268,6 @@ fn extract_openrouter_text(body: &str) -> Result<String, ProviderCallError> {
         })
 }
 
-fn gemini_model() -> String {
-    std::env::var("GEMINI_MODEL").unwrap_or_else(|_| GEMINI_FLASH_MODEL.to_string())
-}
-
-fn configured_openrouter_models() -> Vec<String> {
-    if let Ok(models_raw) = std::env::var("OPENROUTER_MODELS") {
-        let models = models_raw
-            .split(',')
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        if !models.is_empty() {
-            return models;
-        }
-    }
-
-    OPENROUTER_MODELS.map(str::to_string).into()
-}
-
 /// Inputs for [`summarize_video`].
 #[derive(Debug, Clone)]
 pub struct SummarizeRequest {
@@ -336,20 +318,21 @@ async fn resolve_transcript(request: &SummarizeRequest) -> Result<String, String
 /// Returns [`SummaryError`] when every provider and the transcript fallback fail.
 pub async fn summarize_video(
     client: &reqwest::Client,
+    config: &Config,
     request: &SummarizeRequest,
 ) -> Result<SummaryOutcome, SummaryError> {
-    let gemini_result = match std::env::var("GEMINI_API_KEY") {
-        Ok(api_key) => {
+    let gemini_result = match config.gemini_api_key.as_deref() {
+        Some(api_key) => {
             call_gemini(
                 client,
-                &api_key,
-                &gemini_model(),
+                api_key,
+                &config.gemini_model,
                 &request.video_url,
                 SUMMARY_PROMPT,
             )
             .await
         }
-        Err(_) => Err(ProviderCallError::MissingEnvVar {
+        None => Err(ProviderCallError::MissingEnvVar {
             variable: "GEMINI_API_KEY",
         }),
     };
@@ -369,7 +352,9 @@ pub async fn summarize_video(
         }
     };
 
-    match call_openrouter_with_transcript(client, request, SUMMARY_PROMPT, &transcript).await {
+    match call_openrouter_with_transcript(client, config, request, SUMMARY_PROMPT, &transcript)
+        .await
+    {
         Ok(summary) => Ok(SummaryOutcome::Summary(summary)),
         Err(openrouter_error) => {
             log::warn!(
@@ -422,7 +407,8 @@ async fn call_gemini(
     let response = client
         .post(&url)
         .timeout(SUMMARY_REQUEST_TIMEOUT)
-        .query(&[("key", api_key)])
+        // Header, not query string: keys in URLs leak into proxies and logs.
+        .header("x-goog-api-key", api_key)
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
@@ -442,12 +428,15 @@ async fn call_gemini(
 
 async fn call_openrouter_with_transcript(
     client: &reqwest::Client,
+    config: &Config,
     request: &SummarizeRequest,
     prompt: &str,
     transcript: &str,
 ) -> Result<String, ProviderCallError> {
-    let api_key =
-        std::env::var("OPENROUTER_API_KEY").map_err(|_| ProviderCallError::MissingEnvVar {
+    let api_key = config
+        .openrouter_api_key
+        .as_deref()
+        .ok_or(ProviderCallError::MissingEnvVar {
             variable: "OPENROUTER_API_KEY",
         })?;
 
@@ -455,7 +444,7 @@ async fn call_openrouter_with_transcript(
         return Err(ProviderCallError::EmptyTranscript);
     }
 
-    let openrouter_models = configured_openrouter_models();
+    let openrouter_models = &config.openrouter_models;
     if openrouter_models.is_empty() {
         return Err(ProviderCallError::NoOpenRouterModels);
     }

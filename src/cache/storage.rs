@@ -17,6 +17,9 @@ const VIDEOS_DIR: &str = "videos";
 const VIDEO_SIDECARS_DIR: &str = "video_sidecars";
 const TRANSCRIPTS_WORK_DIR: &str = "transcripts_work";
 const VIDEO_SIDECAR_EXTENSION: &str = "json";
+/// Transcripts can be hundreds of KB, so they live in their own file instead of
+/// being rewritten inside the JSON sidecar on every watched/summary update.
+const TRANSCRIPT_FILE_SUFFIX: &str = ".transcript.txt";
 const THUMBNAIL_EXTENSION: &str = "jpg";
 const INFO_JSON_EXTENSION: &str = "json";
 const VIDEO_EXTENSIONS: [&str; 3] = ["mkv", "mp4", "webm"];
@@ -46,6 +49,8 @@ fn is_false(b: &bool) -> bool {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct VideoMetadataSidecar {
+    /// Legacy only: transcripts now live in `{id}.transcript.txt`. Kept so old
+    /// sidecars can be read and migrated; never written back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,21 +176,27 @@ fn load_json_file<T: DeserializeOwned>(path: &Path, context: &str) -> StorageRes
         .map(Some)
 }
 
-/// Serializes `value` as pretty JSON and writes it crash-safely: the bytes go
-/// to a sibling temp file which is fsynced and then atomically renamed over
-/// `path`, so a crash mid-write can never leave a truncated state file.
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> StorageResult<()> {
+/// Writes `contents` crash-safely: the bytes go to a sibling temp file which is
+/// fsynced and then atomically renamed over `path`, so a crash mid-write can
+/// never leave a truncated file.
+pub fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
-    let json = serde_json::to_string_pretty(value)?;
     let mut tmp_path = path.as_os_str().to_owned();
     tmp_path.push(".tmp");
     let tmp_path = PathBuf::from(tmp_path);
 
     let mut tmp_file = std::fs::File::create(&tmp_path)?;
-    tmp_file.write_all(json.as_bytes())?;
+    tmp_file.write_all(contents.as_bytes())?;
     tmp_file.sync_all()?;
     std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// Serializes `value` as pretty JSON and writes it via [`write_text_atomic`].
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> StorageResult<()> {
+    let json = serde_json::to_string_pretty(value)?;
+    write_text_atomic(path, &json)?;
     Ok(())
 }
 
@@ -237,6 +248,13 @@ fn video_id_from_thumbnail_path(path: &Path) -> Option<&str> {
 
     path.file_stem()
         .and_then(OsStr::to_str)
+        .filter(|video_id| is_valid_video_id(video_id))
+}
+
+fn video_id_from_transcript_path(path: &Path) -> Option<&str> {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|file_name| file_name.strip_suffix(TRANSCRIPT_FILE_SUFFIX))
         .filter(|video_id| is_valid_video_id(video_id))
 }
 
@@ -388,6 +406,11 @@ impl Storage {
     /// Downloaded video artifacts are kept only for Watch Later IDs. Card metadata artifacts such
     /// as thumbnails and sidecars are kept only for IDs present in the currently loaded feed.
     ///
+    /// Deletion is fail-safe: only files that positively parse as an artifact
+    /// this app wrote (and whose video ID is unreferenced) are removed. Anything
+    /// unrecognized — including artifact types added by future versions — is
+    /// left alone rather than destroyed.
+    ///
     /// # Arguments
     ///
     /// * `watch_later` - Video IDs allowed to keep downloaded media, subtitles, and info JSON.
@@ -411,37 +434,38 @@ impl Storage {
             .union(watch_later)
             .map(String::as_str)
             .collect::<HashSet<_>>();
+        // Remove only when the path parses as one of ours AND its ID is unreferenced.
+        let stale_ours = |video_id: Option<&str>, retained: &HashSet<&str>| {
+            video_id.is_some_and(|video_id| !retained.contains(video_id))
+        };
 
-        let mut removed_count = self.prune_directory_entries(&self.cache_dir, |path| {
-            let name = path.file_name().and_then(OsStr::to_str);
-            (path.is_file() && matches!(name, Some(VIDEOS_CACHE_FILE | FEED_VIDEO_IDS_CACHE_FILE)))
-                || path.is_dir()
-                    && matches!(
-                        name,
-                        Some(
-                            THUMBNAILS_DIR | VIDEOS_DIR | VIDEO_SIDECARS_DIR | TRANSCRIPTS_WORK_DIR
-                        )
-                    )
-        })?;
-
-        removed_count += self.prune_directory_entries(&self.thumbnails_dir, |path| {
-            path.is_file()
-                && video_id_from_thumbnail_path(path)
-                    .is_some_and(|video_id| retained_card_video_ids.contains(video_id))
+        let mut removed_count = self.prune_directory_entries(&self.thumbnails_dir, |path| {
+            !(path.is_file()
+                && stale_ours(video_id_from_thumbnail_path(path), &retained_card_video_ids))
         })?;
         removed_count += self.prune_directory_entries(&self.video_sidecars_dir, |path| {
-            path.is_file()
-                && video_id_from_sidecar_path(path)
-                    .is_some_and(|video_id| retained_card_video_ids.contains(video_id))
+            !(path.is_file()
+                && stale_ours(
+                    video_id_from_sidecar_path(path)
+                        .or_else(|| video_id_from_transcript_path(path)),
+                    &retained_card_video_ids,
+                ))
         })?;
+        let watch_later_refs = watch_later
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         removed_count += self.prune_directory_entries(&self.videos_dir, |path| {
-            path.is_file()
-                && (cached_video_id_for_path(path)
-                    .or_else(|| video_id_from_subtitle_path(path))
-                    .or_else(|| video_id_from_info_json_path(path))
-                    .or_else(|| video_id_from_chapters_path(path)))
-                .is_some_and(|video_id| watch_later.contains(video_id))
+            !(path.is_file()
+                && stale_ours(
+                    cached_video_id_for_path(path)
+                        .or_else(|| video_id_from_subtitle_path(path))
+                        .or_else(|| video_id_from_info_json_path(path))
+                        .or_else(|| video_id_from_chapters_path(path)),
+                    &watch_later_refs,
+                ))
         })?;
+        // The transcript work dir is app-owned scratch space: always emptied.
         removed_count += self.prune_directory_entries(&self.transcripts_work_dir, |_| false)?;
 
         self.ensure_directories()?;
@@ -661,7 +685,13 @@ impl Storage {
         video.set_watched(sidecar.watched);
     }
 
-    /// Loads a video's cached transcript from its sidecar file on demand.
+    fn transcript_path(&self, video_id: &str) -> PathBuf {
+        self.video_sidecars_dir
+            .join(format!("{video_id}{TRANSCRIPT_FILE_SUFFIX}"))
+    }
+
+    /// Loads a video's cached transcript on demand, falling back to the legacy
+    /// in-sidecar transcript field for files written by older versions.
     ///
     /// # Arguments
     ///
@@ -671,7 +701,41 @@ impl Storage {
     ///
     /// The cached transcript text, if one is stored.
     pub fn load_transcript(&self, video_id: &str) -> Option<String> {
+        if let Ok(transcript) = std::fs::read_to_string(self.transcript_path(video_id)) {
+            return Some(transcript);
+        }
         self.read_video_sidecar(video_id)?.transcript
+    }
+
+    /// Persists a transcript in its own file, keeping large transcript bodies
+    /// out of the JSON sidecar's read-modify-write cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be written.
+    pub fn save_transcript(&self, video_id: &str, transcript: &str) -> StorageResult<()> {
+        self.ensure_directories()?;
+        write_text_atomic(&self.transcript_path(video_id), transcript)?;
+        Ok(())
+    }
+
+    /// Reads the sidecar, migrates any legacy in-sidecar transcript to its own
+    /// file, applies `mutate`, and writes the result back.
+    fn update_sidecar(
+        &self,
+        video_id: &str,
+        mutate: impl FnOnce(&mut VideoMetadataSidecar),
+    ) -> StorageResult<()> {
+        self.ensure_directories()?;
+        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
+        if let Some(legacy_transcript) = sidecar.transcript.take() {
+            let transcript_path = self.transcript_path(video_id);
+            if !transcript_path.exists() {
+                write_text_atomic(&transcript_path, &legacy_transcript)?;
+            }
+        }
+        mutate(&mut sidecar);
+        self.write_video_sidecar(video_id, &sidecar)
     }
 
     fn write_video_sidecar(
@@ -865,32 +929,20 @@ impl Storage {
         repaired_videos
     }
 
-    /// Persists transcript and/or AI summary in a per-video sidecar file.
+    /// Persists an AI summary in the per-video sidecar file.
     ///
     /// # Arguments
     ///
     /// * `video_id` - `YouTube` video identifier.
-    /// * `transcript` - Optional transcript text to write.
-    /// * `ai_summary` - Optional summary text to write.
+    /// * `ai_summary` - Summary text to write.
     ///
     /// # Errors
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
-    pub fn save_video_metadata(
-        &self,
-        video_id: &str,
-        transcript: Option<&str>,
-        ai_summary: Option<&str>,
-    ) -> StorageResult<()> {
-        self.ensure_directories()?;
-        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
-        if let Some(transcript) = transcript {
-            sidecar.transcript = Some(transcript.to_string());
-        }
-        if let Some(ai_summary) = ai_summary {
+    pub fn save_video_summary(&self, video_id: &str, ai_summary: &str) -> StorageResult<()> {
+        self.update_sidecar(video_id, |sidecar| {
             sidecar.ai_summary = Some(ai_summary.to_string());
-        }
-        self.write_video_sidecar(video_id, &sidecar)
+        })
     }
 
     /// Persists the watched state for a video in its sidecar file.
@@ -904,10 +956,7 @@ impl Storage {
     ///
     /// Returns an error when sidecar loading, serialization, or file writes fail.
     pub fn save_video_watched(&self, video_id: &str, watched: bool) -> StorageResult<()> {
-        self.ensure_directories()?;
-        let mut sidecar = self.read_video_sidecar(video_id).unwrap_or_default();
-        sidecar.watched = watched;
-        self.write_video_sidecar(video_id, &sidecar)
+        self.update_sidecar(video_id, |sidecar| sidecar.watched = watched)
     }
 }
 
@@ -1031,12 +1080,7 @@ mod tests {
         let valid_video_id = "C9ww_8cg_5g";
         let stale_video_id = "abc123DEF45";
         let removed_paths = [
-            storage.cache_dir.join("stray.tmp"),
-            storage.thumbnails_dir.join("short.jpg"),
-            storage.thumbnails_dir.join(format!("{valid_video_id}.png")),
             storage.thumbnails_dir.join(format!("{stale_video_id}.jpg")),
-            storage.videos_dir.join("notes.txt"),
-            storage.videos_dir.join("bad_video_name.mkv"),
             storage
                 .videos_dir
                 .join(format!("stale_{stale_video_id}.mkv")),
@@ -1049,17 +1093,27 @@ mod tests {
             storage
                 .videos_dir
                 .join(format!("stale_{stale_video_id}.chapters.ffmeta")),
-            storage.video_sidecars_dir.join("bad.json"),
             storage
                 .video_sidecars_dir
                 .join(format!("{stale_video_id}.json")),
             storage
+                .video_sidecars_dir
+                .join(format!("{stale_video_id}.transcript.txt")),
+            storage
                 .transcripts_work_dir
                 .join(format!("{valid_video_id}.en.json3")),
         ];
+        // Fail-safe: unrecognized files (and files of future artifact types)
+        // must never be deleted, alongside referenced artifacts.
         let kept_paths = [
             storage.cache_dir.join(VIDEOS_CACHE_FILE),
+            storage.cache_dir.join("stray.tmp"),
+            storage.thumbnails_dir.join("short.jpg"),
+            storage.thumbnails_dir.join(format!("{valid_video_id}.png")),
             storage.thumbnails_dir.join(format!("{valid_video_id}.jpg")),
+            storage.videos_dir.join("notes.txt"),
+            storage.videos_dir.join("bad_video_name.mkv"),
+            storage.video_sidecars_dir.join("bad.json"),
             storage
                 .videos_dir
                 .join(format!("title_{valid_video_id}.mkv")),
@@ -1072,6 +1126,9 @@ mod tests {
             storage
                 .video_sidecars_dir
                 .join(format!("{valid_video_id}.json")),
+            storage
+                .video_sidecars_dir
+                .join(format!("{valid_video_id}.transcript.txt")),
             storage
                 .videos_dir
                 .join(format!("title_{valid_video_id}.chapters.ffmeta")),
@@ -1089,14 +1146,14 @@ mod tests {
             .cleanup_unreferenced_cache_files(&watch_later, &feed_video_ids)
             .expect("cleanup should succeed");
 
-        assert_eq!(removed_count, removed_paths.len() + 1);
+        assert_eq!(removed_count, removed_paths.len());
         for path in removed_paths {
             assert!(!path.exists(), "expected {} to be removed", path.display());
         }
         for path in kept_paths {
             assert!(path.exists(), "expected {} to be kept", path.display());
         }
-        assert!(!storage.cache_dir.join("unknown_dir").exists());
+        assert!(storage.cache_dir.join("unknown_dir").exists());
         assert!(storage.transcripts_work_dir.exists());
     }
 
@@ -1131,8 +1188,11 @@ mod tests {
             std::fs::read_to_string(&videos_path).expect("Baseline videos cache should exist");
 
         storage
-            .save_video_metadata("abc123", Some("Transcript body"), Some("Summary body"))
-            .expect("Saving sidecar metadata should succeed");
+            .save_transcript("abc123", "Transcript body")
+            .expect("Saving transcript should succeed");
+        storage
+            .save_video_summary("abc123", "Summary body")
+            .expect("Saving summary should succeed");
 
         let videos_after =
             std::fs::read_to_string(&videos_path).expect("Videos cache should remain readable");
@@ -1141,8 +1201,44 @@ mod tests {
         let sidecar = storage
             .read_video_sidecar("abc123")
             .expect("Expected sidecar to be written");
-        assert_eq!(sidecar.transcript.as_deref(), Some("Transcript body"));
+        // Transcripts live in their own file, never inside the JSON sidecar.
+        assert_eq!(sidecar.transcript, None);
         assert_eq!(sidecar.ai_summary.as_deref(), Some("Summary body"));
+        assert_eq!(
+            storage.load_transcript("abc123").as_deref(),
+            Some("Transcript body")
+        );
+    }
+
+    #[test]
+    fn updating_watched_migrates_legacy_in_sidecar_transcript() {
+        let temp_dir = create_unique_temp_dir();
+        let storage = create_test_storage(temp_dir.path());
+        let video_id = "legacy456_78";
+        storage
+            .write_video_sidecar(
+                video_id,
+                &VideoMetadataSidecar {
+                    transcript: Some("legacy transcript".to_string()),
+                    ai_summary: None,
+                    watched: false,
+                },
+            )
+            .expect("legacy sidecar should be writable");
+
+        storage
+            .save_video_watched(video_id, true)
+            .expect("watched update should succeed");
+
+        let sidecar = storage
+            .read_video_sidecar(video_id)
+            .expect("sidecar should exist");
+        assert_eq!(sidecar.transcript, None);
+        assert!(sidecar.watched);
+        assert_eq!(
+            storage.load_transcript(video_id).as_deref(),
+            Some("legacy transcript")
+        );
     }
 
     #[test]

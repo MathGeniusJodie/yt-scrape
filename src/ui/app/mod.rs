@@ -3,8 +3,11 @@ mod comments;
 mod summary_generator;
 
 use crate::cache::{Storage, download_video};
+use crate::config::Config;
 use crate::data::{Tab, Video};
-use crate::feed::{FetchProgress, fetch_all_feeds, fetch_youtube_search, load_channel_ids};
+use crate::feed::{
+    FeedError, FetchProgress, fetch_all_feeds, fetch_youtube_search, load_channel_ids,
+};
 use crate::frogpoints;
 use cards::TabCards;
 
@@ -58,6 +61,58 @@ pub(super) enum CacheVideoError {
     MissingVideo { video_id: String },
 }
 
+/// Set of video IDs with an operation currently in flight (download, playback,
+/// summary generation). Main-thread only; claim/release must be paired.
+#[derive(Clone, Default)]
+pub(super) struct InFlight {
+    ids: Rc<RefCell<HashSet<String>>>,
+}
+
+impl InFlight {
+    /// Claims the slot for `video_id`; returns `false` when already claimed.
+    pub(super) fn try_claim(&self, video_id: &str) -> bool {
+        self.ids.borrow_mut().insert(video_id.to_string())
+    }
+
+    pub(super) fn release(&self, video_id: &str) {
+        self.ids.borrow_mut().remove(video_id);
+    }
+
+    pub(super) fn contains(&self, video_id: &str) -> bool {
+        self.ids.borrow().contains(video_id)
+    }
+}
+
+/// Runs `task` on the tokio runtime and yields its output once on the returned
+/// channel, replacing the hand-rolled spawn/bounded-channel bridges.
+fn run_in_background<T, F>(runtime: &Arc<Runtime>, task: F) -> async_channel::Receiver<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let (tx, rx) = async_channel::bounded(1);
+    runtime.spawn(async move {
+        let _ = tx.send(task.await).await;
+    });
+    rx
+}
+
+/// Runs blocking `task` on the runtime's blocking pool and yields its output
+/// once on the returned channel. If the task panics, the channel just closes.
+fn run_blocking_in_background<T, F>(runtime: &Arc<Runtime>, task: F) -> async_channel::Receiver<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = async_channel::bounded(1);
+    runtime.spawn(async move {
+        if let Ok(value) = tokio::task::spawn_blocking(task).await {
+            let _ = tx.send(value).await;
+        }
+    });
+    rx
+}
+
 impl AppState {
     fn new(
         videos: Vec<Video>,
@@ -91,7 +146,22 @@ impl AppState {
         self.feed_video_ids = self.videos.keys().cloned().collect();
     }
 
-    fn set_refreshed_feed_videos(&mut self, videos: Vec<Video>) {
+    /// Copies session-mutable fields (watched, summary, transcript) from the
+    /// in-memory videos onto freshly hydrated incoming ones. In-memory state is
+    /// authoritative within a session: a queued sidecar write may not have
+    /// flushed yet when `videos` was hydrated from disk.
+    fn merge_in_memory_video_state(&self, videos: &mut [Video]) {
+        for video in videos {
+            if let Some(existing) = self.videos.get(video.video_id()) {
+                video.set_watched(existing.is_watched());
+                video.set_ai_summary(existing.ai_summary().map(ToString::to_string));
+                video.set_transcript(existing.transcript().map(ToString::to_string));
+            }
+        }
+    }
+
+    fn set_refreshed_feed_videos(&mut self, mut videos: Vec<Video>) {
+        self.merge_in_memory_video_state(&mut videos);
         let incoming_video_id_set: HashSet<String> = videos
             .iter()
             .map(|video| video.video_id().to_string())
@@ -121,7 +191,8 @@ impl AppState {
         self.feed_video_ids = feed_video_ids;
     }
 
-    fn set_search_results(&mut self, videos: Vec<Video>) {
+    fn set_search_results(&mut self, mut videos: Vec<Video>) {
+        self.merge_in_memory_video_state(&mut videos);
         let mut search_result_ids = Vec::with_capacity(videos.len());
         let mut seen_video_ids = HashSet::with_capacity(videos.len());
 
@@ -250,6 +321,8 @@ impl std::ops::Deref for AppContext {
 struct AppContextInner {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
+    /// Environment-derived configuration, read once at startup.
+    config: Arc<Config>,
     summary_generator: SummaryGenerator,
     window: adw::ApplicationWindow,
     context_menu: Popover,
@@ -268,10 +341,10 @@ struct AppContextInner {
     subscription_removals: async_channel::Sender<String>,
     /// Video IDs with an in-flight yt-dlp download, so duplicate downloads are
     /// never spawned and file deletion is deferred until the download finishes.
-    downloads_in_progress: Rc<RefCell<HashSet<String>>>,
+    downloads_in_progress: InFlight,
     /// Video IDs with a running mpv session, so accidental double-plays never
-    /// spawn a second player racing the watched-state heuristic.
-    videos_playing: Rc<RefCell<HashSet<String>>>,
+    /// spawn a second player racing the watched-state detection.
+    videos_playing: InFlight,
     /// `true` while a feed refresh or search owns the shared status widgets,
     /// so the two activities can never interleave spinner/label updates.
     activity_in_progress: std::cell::Cell<bool>,
@@ -318,18 +391,15 @@ fn spawn_video_download(
     video_id: String,
     video_path: PathBuf,
 ) -> async_channel::Receiver<bool> {
-    let (tx, rx) = async_channel::bounded(1);
-    runtime.spawn(async move {
-        let succeeded = match download_video(&video_id, &video_path).await {
+    run_in_background(runtime, async move {
+        match download_video(&video_id, &video_path).await {
             Ok(()) => true,
             Err(download_error) => {
                 error!("Failed to download video {video_id}: {download_error}");
                 false
             }
-        };
-        let _ = tx.send(succeeded).await;
-    });
-    rx
+        }
+    })
 }
 
 /// Starts a download for `video_id` unless one is already in flight, showing the
@@ -342,11 +412,7 @@ fn start_tracked_download(
     video_id: &str,
     video_title: &str,
 ) {
-    if !ui_context
-        .downloads_in_progress
-        .borrow_mut()
-        .insert(video_id.to_string())
-    {
+    if !ui_context.downloads_in_progress.try_claim(video_id) {
         return;
     }
 
@@ -361,10 +427,7 @@ fn start_tracked_download(
         // A closed channel means the download task died; treat as failure so
         // the spinner never spins forever.
         let succeeded = completion_rx.recv().await == Ok(true);
-        ui_context
-            .downloads_in_progress
-            .borrow_mut()
-            .remove(&video_id);
+        ui_context.downloads_in_progress.release(&video_id);
 
         let still_wanted = {
             let mut state = state_rc.borrow_mut();
@@ -468,10 +531,10 @@ fn spawn_sidecar_persister(
                     storage.save_video_watched(&video_id, watched)
                 }
                 SidecarSave::Transcript { video_id, text } => {
-                    storage.save_video_metadata(&video_id, Some(&text), None)
+                    storage.save_transcript(&video_id, &text)
                 }
                 SidecarSave::Summary { video_id, text } => {
-                    storage.save_video_metadata(&video_id, None, Some(&text))
+                    storage.save_video_summary(&video_id, &text)
                 }
             })
             .await;
@@ -499,7 +562,9 @@ fn remove_channel_from_subs_file(subs_file: &Path, channel_id: &str) -> std::io:
     if content.ends_with('\n') {
         output.push('\n');
     }
-    std::fs::write(subs_file, output)
+    // The subs file is primary user data with no cache to rebuild it from; a
+    // crash mid-rewrite must never truncate it.
+    crate::cache::write_text_atomic(subs_file, &output)
 }
 
 /// Starts the single consumer that rewrites the subscriptions file strictly in
@@ -548,12 +613,7 @@ fn find_video_path_in_background(
     storage: Storage,
     video_id: String,
 ) -> async_channel::Receiver<Option<PathBuf>> {
-    let (tx, rx) = async_channel::bounded(1);
-    runtime.spawn(async move {
-        let found = tokio::task::spawn_blocking(move || storage.find_video_path(&video_id)).await;
-        let _ = tx.send(found.unwrap_or(None)).await;
-    });
-    rx
+    run_blocking_in_background(runtime, move || storage.find_video_path(&video_id))
 }
 
 /// Decides what to play given the pre-scanned local path, kicking off a
@@ -601,7 +661,7 @@ fn perform_watch_later_toggle(
 
         // When a download is in flight its completion handler owns the files
         // and performs the deferred deletion; deleting here would race yt-dlp.
-        if !added && !ui_context.downloads_in_progress.borrow().contains(video_id) {
+        if !added && !ui_context.downloads_in_progress.contains(video_id) {
             state.downloaded_video_ids.remove(video_id);
             state.legacy_video_ids.remove(video_id);
             let storage = state.storage.clone();
@@ -684,7 +744,7 @@ fn apply_watch_later_action(
         };
         let removing = state.watch_later.contains(video_id);
         let has_local_files = state.downloaded_video_ids.contains(video_id)
-            || ui_context.downloads_in_progress.borrow().contains(video_id);
+            || ui_context.downloads_in_progress.contains(video_id);
         (video.title().to_string(), removing && has_local_files)
     };
 
@@ -849,11 +909,8 @@ fn spawn_refresh_progress_updates(
 fn spawn_thumbnail_refreshes(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
-    completion_rx: Option<async_channel::Receiver<Vec<String>>>,
+    completion_rx: async_channel::Receiver<Vec<String>>,
 ) {
-    let Some(completion_rx) = completion_rx else {
-        return;
-    };
     let state_rc = state_rc.clone();
     let ui_context = ui_context.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -872,8 +929,17 @@ fn spawn_refreshed_videos_apply(
 ) {
     glib::MainContext::default().spawn_local(async move {
         if let Ok(mut videos) = videos_rx.recv().await {
+            // Sidecar hydration reads one file per video; keep it off the main
+            // thread. In-memory state is merged back in `set_refreshed_feed_videos`.
+            let storage = state_rc.borrow().storage.clone();
+            let hydrated_rx = run_blocking_in_background(&ui_context.runtime, move || {
+                storage.hydrate_videos_from_sidecars(&mut videos);
+                videos
+            });
+            let Ok(videos) = hydrated_rx.recv().await else {
+                return;
+            };
             let mut state = state_rc.borrow_mut();
-            state.storage.hydrate_videos_from_sidecars(&mut videos);
             let feed_video_ids = videos
                 .iter()
                 .map(|video| video.video_id().to_string())
@@ -929,6 +995,13 @@ fn start_youtube_search(
         return;
     }
 
+    let Some(api_key) = ui_context.config.google_api_key.clone() else {
+        status_ui
+            .label
+            .set_text("Search blocked: GOOGLE_API_KEY is not set.");
+        return;
+    };
+
     // Enter in the search entry bypasses the disabled button, and refresh
     // shares the same status widgets: one activity at a time.
     if !ui_context.try_begin_activity() {
@@ -944,21 +1017,23 @@ fn start_youtube_search(
         .label
         .set_text(&format!("Searching YouTube for \"{query}\"..."));
 
-    let (results_tx, results_rx) = async_channel::bounded(1);
     let client = ui_context.http_client.clone();
-    let runtime = ui_context.runtime.clone();
-    runtime.spawn(async move {
-        let search_result = fetch_youtube_search(&client, &query).await;
-        let _ = results_tx.send(search_result).await;
+    let storage = state_rc.borrow().storage.clone();
+    let results_rx = run_in_background(&ui_context.runtime, async move {
+        let mut search_result = fetch_youtube_search(&client, &api_key, &query).await;
+        if let Ok(videos) = search_result.as_mut() {
+            // Sidecar hydration is file I/O: do it here, not on the main thread.
+            storage.hydrate_videos_from_sidecars(videos);
+        }
+        search_result
     });
 
     glib::MainContext::default().spawn_local(async move {
         match results_rx.recv().await {
-            Ok(Ok(mut videos)) => {
+            Ok(Ok(videos)) => {
                 let result_count = videos.len();
                 let thumbnail_completion = {
                     let mut state = state_rc.borrow_mut();
-                    state.storage.hydrate_videos_from_sidecars(&mut videos);
                     let completion = download_missing_thumbnails(
                         videos.iter(),
                         &state.storage,
@@ -991,17 +1066,30 @@ fn start_youtube_search(
     });
 }
 
+/// Why a refresh could not be prepared (no cost was charged).
+#[derive(Debug, Error)]
+enum RefreshPrepError {
+    #[error("Error: {0}")]
+    LoadChannels(#[from] FeedError),
+    #[error("Refresh blocked: GOOGLE_API_KEY is not set.")]
+    MissingApiKey,
+    #[error("Refresh blocked: {0}")]
+    Frogpoints(#[from] frogpoints::FrogpointsError),
+    #[error("Refresh setup task was dropped.")]
+    SetupTaskDropped,
+}
+
 /// Reads the subscriptions file and debits the refresh cost, in that order,
 /// so a refresh that cannot possibly succeed never costs anything. Runs on a
 /// blocking thread: both steps are file I/O that must stay off the main loop.
-fn prepare_refresh(subs_file: &Path) -> Result<(Vec<String>, i64), String> {
-    let channel_ids = load_channel_ids(subs_file).map_err(|error| format!("Error: {error}"))?;
-    if !crate::feed::has_google_api_key() {
-        return Err("Refresh blocked: GOOGLE_API_KEY is not set.".to_string());
-    }
-    let remaining = frogpoints::debit_refresh_frogpoints()
-        .map_err(|error| format!("Refresh blocked: {error}"))?;
-    Ok((channel_ids, remaining))
+fn prepare_refresh(
+    subs_file: &Path,
+    api_key: Option<String>,
+) -> Result<(Vec<String>, String, i64), RefreshPrepError> {
+    let channel_ids = load_channel_ids(subs_file)?;
+    let api_key = api_key.ok_or(RefreshPrepError::MissingApiKey)?;
+    let remaining = frogpoints::debit_refresh_frogpoints()?;
+    Ok((channel_ids, api_key, remaining))
 }
 
 fn start_feed_refresh(
@@ -1021,25 +1109,20 @@ fn start_feed_refresh(
     status_ui.spinner.start();
     status_ui.label.set_text("Refreshing...");
 
-    let (prepared_tx, prepared_rx) =
-        async_channel::bounded::<Result<(Vec<String>, i64), String>>(1);
-    ui_context.runtime.spawn(async move {
-        let prepared = tokio::task::spawn_blocking(move || prepare_refresh(&subs_file))
-            .await
-            .unwrap_or_else(|join_error| Err(format!("Refresh setup failed: {join_error}")));
-        let _ = prepared_tx.send(prepared).await;
+    let api_key = ui_context.config.google_api_key.clone();
+    let prepared_rx = run_blocking_in_background(&ui_context.runtime, move || {
+        prepare_refresh(&subs_file, api_key)
     });
 
     glib::MainContext::default().spawn_local(async move {
-        let (channel_ids, remaining) = match prepared_rx.recv().await {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(message)) => {
-                status_ui.finish(&message);
-                ui_context.end_activity();
-                return;
-            }
-            Err(_) => {
-                status_ui.finish("Refresh setup task was dropped.");
+        let prepared = prepared_rx
+            .recv()
+            .await
+            .unwrap_or(Err(RefreshPrepError::SetupTaskDropped));
+        let (channel_ids, api_key, remaining) = match prepared {
+            Ok(prepared) => prepared,
+            Err(prep_error) => {
+                status_ui.finish(&prep_error.to_string());
                 ui_context.end_activity();
                 return;
             }
@@ -1054,7 +1137,7 @@ fn start_feed_refresh(
         let progress_tx_for_errors = progress_tx.clone();
         let fetch_client = ui_context.http_client.clone();
         ui_context.runtime.spawn(async move {
-            match fetch_all_feeds(&fetch_client, channel_ids, progress_tx).await {
+            match fetch_all_feeds(&fetch_client, api_key, channel_ids, progress_tx).await {
                 Ok(videos) => {
                     let _ = videos_tx.send(videos).await;
                 }
@@ -1073,32 +1156,20 @@ fn start_feed_refresh(
     });
 }
 
-/// Builds and presents the primary application window.
-///
-/// # Arguments
-///
-/// * `app` - Active application instance.
-/// * `subs_file` - Path to the channel subscription file.
-#[allow(clippy::too_many_lines)]
-pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
-    let runtime = match Runtime::new() {
-        Ok(runtime) => Arc::new(runtime),
-        Err(runtime_error) => {
-            error!("Failed to create tokio runtime: {runtime_error}");
-            return;
-        }
-    };
+/// Persisted state loaded (and repaired) at startup.
+struct LoadedState {
+    videos: Vec<Video>,
+    feed_video_ids: Vec<String>,
+    watch_later: HashSet<String>,
+    /// `false` when any state file exists but failed to parse. A damaged file
+    /// is NOT "empty state": cache cleanup keyed off an accidentally-empty set
+    /// would delete every download.
+    state_files_healthy: bool,
+}
 
-    let storage = match Storage::new() {
-        Ok(storage) => storage,
-        Err(storage_error) => {
-            error!("Failed to initialize storage: {storage_error}");
-            return;
-        }
-    };
-
-    // A state file that exists but fails to load is NOT "empty state": cache
-    // cleanup keyed off an accidentally-empty set would delete every download.
+/// Loads watch-later, videos, and feed-ID state from disk, repairing missing
+/// Watch Later metadata from local `info.json` files.
+fn load_persisted_state(storage: &Storage) -> LoadedState {
     let mut state_files_healthy = true;
     let watch_later = storage.load_watch_later().unwrap_or_else(|load_error| {
         error!("Watch-later state file is damaged; continuing without it: {load_error}");
@@ -1144,6 +1215,73 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     {
         warn!("Failed to persist initial feed video IDs: {save_error}");
     }
+
+    LoadedState {
+        videos,
+        feed_video_ids,
+        watch_later,
+        state_files_healthy,
+    }
+}
+
+/// Presents a bare error window so a fatal startup failure is visible even
+/// when the app was not launched from a terminal.
+fn present_startup_error(app: &adw::Application, message: &str) {
+    error!("{message}");
+    let label = Label::new(Some(message));
+    label.set_wrap(true);
+    label.set_margin_top(24);
+    label.set_margin_bottom(24);
+    label.set_margin_start(24);
+    label.set_margin_end(24);
+    let window = adw::ApplicationWindow::builder()
+        .application(app)
+        .title("yt-gtk — startup error")
+        .default_width(500)
+        .content(&label)
+        .build();
+    window.present();
+}
+
+/// Builds and presents the primary application window.
+///
+/// # Arguments
+///
+/// * `app` - Active application instance.
+/// * `subs_file` - Path to the channel subscription file.
+#[allow(clippy::too_many_lines)]
+pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
+    let config = Arc::new(Config::from_env());
+
+    let runtime = match Runtime::new() {
+        Ok(runtime) => Arc::new(runtime),
+        Err(runtime_error) => {
+            present_startup_error(
+                app,
+                &format!("Failed to create tokio runtime: {runtime_error}"),
+            );
+            return;
+        }
+    };
+
+    let storage = match Storage::new() {
+        Ok(storage) => storage,
+        Err(storage_error) => {
+            present_startup_error(
+                app,
+                &format!("Failed to initialize storage: {storage_error}"),
+            );
+            return;
+        }
+    };
+
+    let loaded = load_persisted_state(&storage);
+    let LoadedState {
+        videos,
+        feed_video_ids,
+        watch_later,
+        state_files_healthy,
+    } = loaded;
     let feed_video_id_set = feed_video_ids.iter().cloned().collect::<HashSet<_>>();
 
     // Cache pruning walks several directories; keep it off the main thread so
@@ -1179,7 +1317,10 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     {
         Ok(client) => client,
         Err(client_error) => {
-            error!("Failed to initialize HTTP client: {client_error}");
+            present_startup_error(
+                app,
+                &format!("Failed to initialize HTTP client: {client_error}"),
+            );
             return;
         }
     };
@@ -1256,9 +1397,14 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
 
     let ui_context = AppContext {
         inner: Rc::new(AppContextInner {
-            summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
+            summary_generator: SummaryGenerator::new(
+                runtime.clone(),
+                http_client.clone(),
+                config.clone(),
+            ),
             runtime,
             http_client,
+            config,
             window: window.clone(),
             context_menu: context_menu.clone(),
             stack: stack.clone(),
@@ -1272,8 +1418,8 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
             watch_later_cards: CardMap::default(),
             watch_later_saves,
             subscription_removals,
-            downloads_in_progress: Rc::new(RefCell::new(HashSet::new())),
-            videos_playing: Rc::new(RefCell::new(HashSet::new())),
+            downloads_in_progress: InFlight::default(),
+            videos_playing: InFlight::default(),
             activity_in_progress: std::cell::Cell::new(false),
         }),
     };
@@ -1481,5 +1627,50 @@ mod tests {
         assert!(state.video_by_id("new-feed").is_some());
         assert!(state.video_by_id("old-watch-later").is_some());
         assert!(state.video_by_id("old-feed").is_none());
+    }
+
+    #[test]
+    fn refreshed_feed_preserves_in_memory_watched_state_and_summary() {
+        let dirs = TestDirs::new();
+        let mut state = test_state(
+            vec![test_video("a"), test_video("b")],
+            HashSet::new(),
+            &dirs,
+        );
+        state
+            .video_by_id_mut("a")
+            .expect("video a must exist")
+            .set_watched(true);
+        state
+            .video_by_id_mut("a")
+            .expect("video a must exist")
+            .set_ai_summary(Some("existing summary".to_string()));
+
+        state.set_refreshed_feed_videos(vec![test_video("a"), test_video("b")]);
+
+        let refreshed_a = state.video_by_id("a").expect("video a must exist");
+        assert!(refreshed_a.is_watched());
+        assert_eq!(refreshed_a.ai_summary(), Some("existing summary"));
+
+        let refreshed_b = state.video_by_id("b").expect("video b must exist");
+        assert!(!refreshed_b.is_watched());
+        assert_eq!(refreshed_b.ai_summary(), None);
+    }
+
+    #[test]
+    fn search_results_preserve_in_memory_watched_state() {
+        let dirs = TestDirs::new();
+        let mut state = test_state(vec![test_video("feed-a")], HashSet::new(), &dirs);
+        state
+            .video_by_id_mut("feed-a")
+            .expect("video feed-a must exist")
+            .set_watched(true);
+
+        state.set_search_results(vec![test_video("feed-a")]);
+
+        let video = state
+            .video_by_id("feed-a")
+            .expect("video feed-a must exist");
+        assert!(video.is_watched());
     }
 }

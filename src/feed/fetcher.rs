@@ -30,9 +30,6 @@ const MAX_BACKOFF_MULTIPLIER: u64 = 4;
 /// Errors that can occur while loading and fetching feed metadata.
 #[derive(Debug, Error)]
 pub enum FeedError {
-    /// Required API key was not present in the process environment.
-    #[error("GOOGLE_API_KEY is not set. Set it before refreshing feeds.")]
-    MissingApiKey,
     /// Channel ID file could not be read.
     #[error("failed to read channel IDs from {path}: {source}")]
     ReadChannelIds {
@@ -47,28 +44,6 @@ pub enum FeedError {
         /// Number of channels that failed.
         failed: usize,
     },
-}
-
-/// Errors that can occur while fetching `YouTube` search results.
-#[derive(Debug, Error)]
-pub enum SearchError {
-    /// Required API key was not present in the process environment.
-    #[error("GOOGLE_API_KEY is not set. Set it before searching YouTube.")]
-    MissingApiKey,
-    /// `YouTube` search or metadata request failed.
-    #[error("YouTube search request failed: {0}")]
-    Request(#[from] ApiRequestError),
-}
-
-/// Errors that can occur while fetching `YouTube` comments.
-#[derive(Debug, Error)]
-pub enum CommentError {
-    /// Required API key was not present in the process environment.
-    #[error("GOOGLE_API_KEY is not set. Set it before loading comments.")]
-    MissingApiKey,
-    /// `YouTube` comments request failed.
-    #[error("YouTube comments request failed: {0}")]
-    Request(#[from] ApiRequestError),
 }
 
 /// A failed `YouTube` Data API request with the server's explanation preserved.
@@ -381,24 +356,15 @@ enum ChannelFetchResult {
     Failed,
 }
 
-/// Returns `true` when a non-empty `GOOGLE_API_KEY` is present in the environment.
-///
-/// Lets the UI reject a refresh before charging for it; the fetch functions
-/// still perform their own authoritative check.
-pub fn has_google_api_key() -> bool {
-    std::env::var("GOOGLE_API_KEY").is_ok_and(|key| !key.trim().is_empty())
-}
-
 /// Fetch all feeds from the given channel IDs
 pub async fn fetch_all_feeds(
     client: &reqwest::Client,
+    api_key: String,
     channel_ids: Vec<String>,
     tx: Sender<FetchProgress>,
 ) -> Result<Vec<Video>, FeedError> {
     let total = channel_ids.len();
     let _ = tx.send(FetchProgress::Started { total }).await;
-
-    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| FeedError::MissingApiKey)?;
 
     let mut all_videos = Vec::new();
     let mut successful_channels = 0usize;
@@ -476,6 +442,7 @@ pub async fn fetch_all_feeds(
 /// # Arguments
 ///
 /// * `client` - HTTP client used for `YouTube` Data API requests.
+/// * `api_key` - `YouTube` Data API key.
 /// * `query` - Search text to send to `YouTube`.
 ///
 /// # Returns
@@ -484,13 +451,12 @@ pub async fn fetch_all_feeds(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::MissingApiKey`] if `GOOGLE_API_KEY` is unset.
-/// Returns [`SearchError::Request`] if the `YouTube` search or duration request fails.
+/// Returns [`ApiRequestError`] if the `YouTube` search request fails.
 pub async fn fetch_youtube_search(
     client: &reqwest::Client,
+    api_key: &str,
     query: &str,
-) -> Result<Vec<Video>, SearchError> {
-    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| SearchError::MissingApiKey)?;
+) -> Result<Vec<Video>, ApiRequestError> {
     let max_results = SEARCH_MAX_RESULTS.to_string();
     let payload: SearchResponse = get_json(
         client,
@@ -500,12 +466,19 @@ pub async fn fetch_youtube_search(
             ("type", "video"),
             ("maxResults", max_results.as_str()),
             ("q", query),
-            ("key", api_key.as_str()),
+            ("key", api_key),
         ],
     )
     .await?;
     let video_ids = video_ids_from_search_items(&payload);
-    let durations_by_video_id = fetch_video_durations(client, &api_key, &video_ids).await?;
+    // Durations are cosmetic; a failed lookup must not fail the whole search.
+    let durations_by_video_id = match fetch_video_durations(client, api_key, &video_ids).await {
+        Ok(durations) => durations,
+        Err(error) => {
+            warn!("Failed fetching durations for search results: {error}");
+            HashMap::new()
+        }
+    };
 
     Ok(videos_from_search_items(payload, &durations_by_video_id))
 }
@@ -515,6 +488,7 @@ pub async fn fetch_youtube_search(
 /// # Arguments
 ///
 /// * `client` - HTTP client used for `YouTube` Data API requests.
+/// * `api_key` - `YouTube` Data API key.
 /// * `video_id` - `YouTube` video ID whose public comment threads should be loaded.
 ///
 /// # Returns
@@ -523,13 +497,12 @@ pub async fn fetch_youtube_search(
 ///
 /// # Errors
 ///
-/// Returns [`CommentError::MissingApiKey`] if `GOOGLE_API_KEY` is unset.
-/// Returns [`CommentError::Request`] if `YouTube` rejects or fails the comments request.
+/// Returns [`ApiRequestError`] if `YouTube` rejects or fails the comments request.
 pub async fn fetch_youtube_comments(
     client: &reqwest::Client,
+    api_key: &str,
     video_id: &str,
-) -> Result<String, CommentError> {
-    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| CommentError::MissingApiKey)?;
+) -> Result<String, ApiRequestError> {
     let mut comments = Vec::with_capacity(MAX_COMMENT_THREADS);
     let mut next_page_token = None::<String>;
 
@@ -544,7 +517,7 @@ pub async fn fetch_youtube_comments(
             ("maxResults", page_size.as_str()),
             ("order", "relevance"),
             ("textFormat", "plainText"),
-            ("key", api_key.as_str()),
+            ("key", api_key),
         ];
         if let Some(page_token) = next_page_token.as_deref() {
             query.push(("pageToken", page_token));
@@ -1006,8 +979,9 @@ pub fn load_channel_ids(path: &Path) -> Result<Vec<String>, FeedError> {
 mod tests {
     use super::{
         ApiRequestError, CommentItem, CommentSnippet, CommentThreadItem, CommentThreadReplies,
-        CommentThreadSnippet, INITIAL_BACKOFF_MS, api_error_message, backoff_ms_with_base,
-        format_comment_threads, get_json, parse_iso8601_duration_seconds,
+        CommentThreadSnippet, FeedError, FetchProgress, INITIAL_BACKOFF_MS, api_error_message,
+        backoff_ms_with_base, fetch_all_feeds, format_comment_threads, get_json,
+        parse_iso8601_duration_seconds, should_retry, uploads_playlist_id_for_channel,
     };
     use chrono::{TimeZone, Utc};
     use serde::Deserialize;
@@ -1175,5 +1149,89 @@ mod tests {
                 like_count: Some(like_count),
             }),
         }
+    }
+
+    #[test]
+    fn uploads_playlist_id_derives_from_uc_prefixed_channel_id() {
+        assert_eq!(
+            uploads_playlist_id_for_channel("UCabc"),
+            Some("UUabc".to_string())
+        );
+        assert_eq!(uploads_playlist_id_for_channel("xyz"), None);
+    }
+
+    fn status_error(status: reqwest::StatusCode) -> ApiRequestError {
+        ApiRequestError::Status {
+            status,
+            message: "boom".to_string(),
+        }
+    }
+
+    #[test]
+    fn should_retry_on_transient_server_errors() {
+        assert!(should_retry(&status_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        )));
+        assert!(should_retry(&status_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(should_retry(&status_error(
+            reqwest::StatusCode::REQUEST_TIMEOUT
+        )));
+    }
+
+    #[test]
+    fn should_not_retry_on_permanent_client_errors() {
+        assert!(!should_retry(&status_error(reqwest::StatusCode::NOT_FOUND)));
+        assert!(!should_retry(&status_error(reqwest::StatusCode::FORBIDDEN)));
+    }
+
+    #[tokio::test]
+    async fn fetch_all_feeds_fails_when_every_channel_id_is_invalid() {
+        let client = reqwest::Client::new();
+        let (tx, rx) = async_channel::unbounded();
+        let channel_ids = vec!["invalid-1".to_string(), "invalid-2".to_string()];
+
+        let result = fetch_all_feeds(&client, "unused-key".to_string(), channel_ids, tx).await;
+
+        match result {
+            Err(FeedError::AllChannelsFailed { failed }) => assert_eq!(failed, 2),
+            other => panic!("expected AllChannelsFailed, got {other:?}"),
+        }
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(matches!(events[0], FetchProgress::Started { total: 2 }));
+        let error_count = events
+            .iter()
+            .filter(|event| matches!(event, FetchProgress::Error { .. }))
+            .count();
+        assert_eq!(error_count, 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_all_feeds_with_no_channels_completes_with_empty_feed() {
+        let client = reqwest::Client::new();
+        let (tx, rx) = async_channel::unbounded();
+
+        let videos = fetch_all_feeds(&client, "unused-key".to_string(), Vec::new(), tx)
+            .await
+            .expect("no channels should not fail");
+
+        assert!(videos.is_empty());
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            FetchProgress::AllComplete {
+                total_videos: 0,
+                ..
+            }
+        )));
     }
 }
