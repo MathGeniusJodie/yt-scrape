@@ -14,32 +14,23 @@ use gtk::{Align, Box as GtkBox, Button, FlowBox, Label, Orientation, Picture, Po
 use gtk::{gdk, graphene, pango};
 use log::{error, warn};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
-    let playback = {
+    let video_title = {
         let state = state_rc.borrow();
-        state.video_by_id(video_id).map(|current_video| {
-            let video_title = current_video.title().to_string();
-            let local_path = state.storage.find_video_path(video_id);
-            let local_path = resolve_playback_path(
-                &state.storage,
-                &ui_context.runtime,
-                video_id,
-                &video_title,
-                local_path,
-            );
-            (video_title, local_path)
-        })
+        state
+            .video_by_id(video_id)
+            .map(|current_video| current_video.title().to_string())
     };
-
-    let Some((video_title, local_path)) = playback else {
+    let Some(video_title) = video_title else {
         error!("Cannot play missing video {video_id}");
         return;
     };
+    let local_path = resolve_playback_path(state_rc, ui_context, video_id, &video_title);
 
     let playback_end_rx = match play_video(video_id, &video_title, local_path.as_deref()) {
         Ok(playback_end_rx) => playback_end_rx,
@@ -123,6 +114,16 @@ pub(super) fn create_context_menu(
     }
 }
 
+/// Cards currently shown on one tab, in display order.
+///
+/// `order` mirrors the `FlowBox` child order so repopulation can be skipped
+/// when the video list is unchanged.
+#[derive(Default)]
+pub(super) struct TabCards {
+    order: Vec<String>,
+    cards: HashMap<String, VideoCardWidgets>,
+}
+
 pub(super) fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     match tab {
         Tab::Feed => &ui_context.feed_flow,
@@ -131,10 +132,7 @@ pub(super) fn flow_for_tab(ui_context: &AppContext, tab: Tab) -> &FlowBox {
     }
 }
 
-const fn card_map_for_tab(
-    ui_context: &AppContext,
-    tab: Tab,
-) -> &Rc<RefCell<HashMap<String, VideoCardWidgets>>> {
+const fn card_map_for_tab(ui_context: &AppContext, tab: Tab) -> &Rc<RefCell<TabCards>> {
     match tab {
         Tab::Feed => &ui_context.feed_cards,
         Tab::Search => &ui_context.search_cards,
@@ -239,9 +237,23 @@ fn connect_card_handlers(
     }
 }
 
+/// Derives all card badge flags from application state, so cards can be built
+/// or refreshed at any time without losing transient download status.
+fn card_flags_for_video(state: &AppState, ui_context: &AppContext, video: &Video) -> CardFlags {
+    CardFlags {
+        is_watch_later: state.watch_later.contains(video.video_id()),
+        is_downloaded: state.downloaded_video_ids.contains(video.video_id()),
+        is_downloading: ui_context
+            .downloads_in_progress
+            .borrow()
+            .contains(video.video_id()),
+        has_ai_summary: video.has_ai_summary(),
+        is_watched: video.is_watched(),
+    }
+}
+
 fn build_video_card(
     video_id: &str,
-    downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
 ) -> Option<VideoCardWidgets> {
@@ -249,12 +261,7 @@ fn build_video_card(
         let state = state_rc.borrow();
         let video = state.video_by_id(video_id)?;
         let thumbnail_path = state.storage.thumbnail_path(video.video_id());
-        let flags = CardFlags {
-            is_watch_later: state.watch_later.contains(video.video_id()),
-            is_downloaded: downloaded_video_ids.contains(video.video_id()),
-            has_ai_summary: video.has_ai_summary(),
-            is_watched: video.is_watched(),
-        };
+        let flags = card_flags_for_video(&state, ui_context, video);
         create_video_card(video, &thumbnail_path, &flags)
     };
     connect_card_handlers(state_rc, ui_context, video_id, &card_widgets);
@@ -271,31 +278,56 @@ fn add_card_to_flow(flow_box: &FlowBox, card_widgets: &VideoCardWidgets, positio
     }
 }
 
+/// Reapplies state-derived badge visibility to every card on a tab.
+fn refresh_cards_from_state(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    card_map: &Rc<RefCell<TabCards>>,
+) {
+    let state = state_rc.borrow();
+    for (video_id, card) in &card_map.borrow().cards {
+        let Some(video) = state.video_by_id(video_id) else {
+            continue;
+        };
+        card.apply_flags(&card_flags_for_video(&state, ui_context, video));
+    }
+}
+
 pub(super) fn populate_flow_box(
     tab: Tab,
-    downloaded_video_ids: &HashSet<String>,
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
 ) {
     let flow_box = flow_for_tab(ui_context, tab);
     let card_map = card_map_for_tab(ui_context, tab);
 
-    flow_box.remove_all();
-    card_map.borrow_mut().clear();
-
     let video_ids = {
         let state = state_rc.borrow();
         video_ids_for_tab(&state, tab)
     };
 
+    // Same videos in the same order: refresh badges in place instead of
+    // rebuilding every card, preserving scroll position and download spinners.
+    if card_map.borrow().order == video_ids {
+        refresh_cards_from_state(state_rc, ui_context, card_map);
+        return;
+    }
+
+    flow_box.remove_all();
+    {
+        let mut tab_cards = card_map.borrow_mut();
+        tab_cards.cards.clear();
+        tab_cards.order.clear();
+    }
+
     for video_id in video_ids {
-        let Some(card_widgets) =
-            build_video_card(&video_id, downloaded_video_ids, state_rc, ui_context)
-        else {
+        let Some(card_widgets) = build_video_card(&video_id, state_rc, ui_context) else {
             continue;
         };
         add_card_to_flow(flow_box, &card_widgets, None);
-        card_map.borrow_mut().insert(video_id, card_widgets);
+        let mut tab_cards = card_map.borrow_mut();
+        tab_cards.order.push(video_id.clone());
+        tab_cards.cards.insert(video_id, card_widgets);
     }
 }
 
@@ -308,7 +340,7 @@ where
         &ui_context.search_cards,
         &ui_context.watch_later_cards,
     ] {
-        if let Some(card) = card_map.borrow().get(video_id).cloned() {
+        if let Some(card) = card_map.borrow().cards.get(video_id).cloned() {
             action(&card);
         }
     }
@@ -337,40 +369,42 @@ pub(super) fn sync_watch_later_card(
     ui_context: &AppContext,
     video_id: &str,
 ) {
-    let (in_watch_later, insert_position, is_downloaded) = {
+    let (in_watch_later, insert_position) = {
         let state = state_rc.borrow();
-        let in_watch_later = state.watch_later.contains(video_id);
-        let insert_position = watch_later_insert_position(&state, video_id);
-        let is_downloaded = state.storage.find_video_path(video_id).is_some();
-        (in_watch_later, insert_position, is_downloaded)
+        (
+            state.watch_later.contains(video_id),
+            watch_later_insert_position(&state, video_id),
+        )
     };
 
     let mut watch_later_cards = ui_context.watch_later_cards.borrow_mut();
     if !in_watch_later {
-        if let Some(card) = watch_later_cards.remove(video_id)
+        if let Some(card) = watch_later_cards.cards.remove(video_id)
             && let Some(flow_child) = card.root().parent()
         {
             ui_context.watch_later_flow.remove(&flow_child);
         }
+        watch_later_cards.order.retain(|id| id != video_id);
         return;
     }
 
-    if watch_later_cards.contains_key(video_id) {
+    if watch_later_cards.cards.contains_key(video_id) {
         return;
     }
 
-    let downloaded_video_ids = if is_downloaded {
-        HashSet::from([video_id.to_string()])
-    } else {
-        HashSet::new()
-    };
-    let Some(card_widgets) =
-        build_video_card(video_id, &downloaded_video_ids, state_rc, ui_context)
-    else {
+    let Some(card_widgets) = build_video_card(video_id, state_rc, ui_context) else {
         return;
     };
     add_card_to_flow(&ui_context.watch_later_flow, &card_widgets, insert_position);
-    watch_later_cards.insert(video_id.to_string(), card_widgets);
+    let order_position = insert_position
+        .unwrap_or(watch_later_cards.order.len())
+        .min(watch_later_cards.order.len());
+    watch_later_cards
+        .order
+        .insert(order_position, video_id.to_string());
+    watch_later_cards
+        .cards
+        .insert(video_id.to_string(), card_widgets);
 }
 
 pub(super) fn refresh_video_summary_badges(
@@ -612,6 +646,20 @@ impl VideoCardWidgets {
     pub fn refresh_thumbnail(&self, thumbnail_path: &Path) {
         set_thumbnail_file(&self.thumbnail, thumbnail_path);
     }
+
+    /// Applies state-derived badge visibility without rebuilding the card.
+    pub fn apply_flags(&self, flags: &CardFlags) {
+        set_watch_later_toggle_state(&self.watch_later_toggle, flags.is_watch_later);
+        self.set_summary_available(flags.has_ai_summary);
+        self.set_watched(flags.is_watched);
+        if flags.is_downloading {
+            self.set_downloading();
+        } else if flags.is_downloaded {
+            self.set_downloaded();
+        } else {
+            self.set_download_failed();
+        }
+    }
 }
 
 fn set_thumbnail_file(thumbnail: &Picture, thumbnail_path: &Path) {
@@ -621,14 +669,25 @@ fn set_thumbnail_file(thumbnail: &Picture, thumbnail_path: &Path) {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-struct CardFlags {
+pub(super) struct CardFlags {
     is_watch_later: bool,
     is_downloaded: bool,
+    is_downloading: bool,
     has_ai_summary: bool,
     is_watched: bool,
 }
 
-fn build_status_row(flags: &CardFlags) -> (GtkBox, Button, Button, Spinner, GtkBox, Button) {
+/// Widgets composing a card's bottom status row.
+struct StatusRowWidgets {
+    status_box: GtkBox,
+    watch_later_toggle: Button,
+    watched_button: Button,
+    download_spinner: Spinner,
+    downloaded_badge: GtkBox,
+    summary_button: Button,
+}
+
+fn build_status_row(flags: &CardFlags) -> StatusRowWidgets {
     let status_box = GtkBox::new(Orientation::Horizontal, 4);
 
     let watch_later_toggle = Button::new();
@@ -667,14 +726,14 @@ fn build_status_row(flags: &CardFlags) -> (GtkBox, Button, Button, Spinner, GtkB
     download_spinner.set_visible(false);
     status_box.append(&download_spinner);
 
-    (
+    StatusRowWidgets {
         status_box,
         watch_later_toggle,
         watched_button,
         download_spinner,
         downloaded_badge,
         summary_button,
-    )
+    }
 }
 
 fn create_video_card(video: &Video, thumbnail_path: &Path, flags: &CardFlags) -> VideoCardWidgets {
@@ -733,27 +792,24 @@ fn create_video_card(video: &Video, thumbnail_path: &Path, flags: &CardFlags) ->
 
     content_box.append(&meta_box);
 
-    let (
-        status_box,
-        watch_later_toggle,
-        watched_button,
-        download_spinner,
-        downloaded_badge,
-        summary_button,
-    ) = build_status_row(flags);
-    content_box.append(&status_box);
+    let status_row = build_status_row(flags);
+    content_box.append(&status_row.status_box);
 
     card.append(&content_box);
 
-    VideoCardWidgets {
+    let card_widgets = VideoCardWidgets {
         root: card,
-        watch_later_toggle,
-        summary_button,
-        watched_button,
-        downloaded_badge,
-        download_spinner,
+        watch_later_toggle: status_row.watch_later_toggle,
+        summary_button: status_row.summary_button,
+        watched_button: status_row.watched_button,
+        downloaded_badge: status_row.downloaded_badge,
+        download_spinner: status_row.download_spinner,
         thumbnail,
+    };
+    if flags.is_downloading {
+        card_widgets.set_downloading();
     }
+    card_widgets
 }
 
 /// Update the Watch Later toggle visuals for a card button.
@@ -799,9 +855,6 @@ mod tests {
     use crate::data::{NewVideo, Video};
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn format_video_duration_omits_hours_when_under_an_hour() {
@@ -834,23 +887,25 @@ mod tests {
         })
     }
 
-    fn test_state(video_ids: &[&str], watch_later: &[&str]) -> super::AppState {
-        let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "yt-gtk-cards-tests-{}-{unique_id}",
-            std::process::id()
-        ));
-        let storage = Storage::new_at(root.join("data"), root.join("cache"))
+    fn test_state(
+        video_ids: &[&str],
+        watch_later: &[&str],
+    ) -> (super::AppState, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("test directory must be creatable");
+        let storage = Storage::new_at(root.path().join("data"), root.path().join("cache"))
             .expect("test storage must initialize");
         let videos: Vec<Video> = video_ids.iter().map(|id| test_video(id)).collect();
         let feed_video_ids = video_ids.iter().map(ToString::to_string).collect();
         let watch_later: HashSet<String> = watch_later.iter().map(ToString::to_string).collect();
-        super::AppState::new(videos, feed_video_ids, watch_later, storage)
+        (
+            super::AppState::new(videos, feed_video_ids, watch_later, storage),
+            root,
+        )
     }
 
     #[test]
     fn watch_later_insert_position_orders_by_video_map_order() {
-        let state = test_state(&["a", "b", "c", "d"], &["b", "d"]);
+        let (state, _root) = test_state(&["a", "b", "c", "d"], &["b", "d"]);
 
         assert_eq!(watch_later_insert_position(&state, "b"), Some(0));
         assert_eq!(watch_later_insert_position(&state, "d"), Some(1));
@@ -858,7 +913,7 @@ mod tests {
 
     #[test]
     fn watch_later_insert_position_is_none_for_videos_not_in_watch_later() {
-        let state = test_state(&["a", "b"], &["b"]);
+        let (state, _root) = test_state(&["a", "b"], &["b"]);
 
         assert_eq!(watch_later_insert_position(&state, "a"), None);
         assert_eq!(watch_later_insert_position(&state, "missing"), None);

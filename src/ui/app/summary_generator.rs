@@ -1,8 +1,8 @@
 use super::cards::refresh_video_summary_badges;
 use super::{AppContext, AppState, CacheVideoError};
-use crate::cache::fetch_transcript;
+use crate::cache::{fetch_transcript, transcript_from_vtt_file};
 use crate::data::Video;
-use crate::summary::{SummaryOutcome, summarize_video};
+use crate::summary::{SummarizeRequest, SummaryOutcome, summarize_video};
 use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
 use gtk::glib;
 use gtk::prelude::*;
@@ -72,7 +72,7 @@ impl SummaryGenerator {
         video_id: &str,
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
-        let (video, transcripts_work_dir) = {
+        let request = {
             let state = state_rc.borrow();
             let video = prepare_summary_generation_video(
                 &state,
@@ -80,24 +80,23 @@ impl SummaryGenerator {
                 video_id,
                 mode,
             )?;
-            (video, state.storage.transcripts_work_dir().to_path_buf())
+            SummarizeRequest {
+                video_url: video.watch_url(),
+                video_title: video.title().to_string(),
+                channel_name: video.channel_name().to_string(),
+                video_id: video.video_id().to_string(),
+                transcripts_work_dir: state.storage.transcripts_work_dir().to_path_buf(),
+                local_subtitle_path: state.storage.find_subtitle_path(video_id),
+            }
         };
 
-        let task_video_id = video.video_id().to_string();
+        let task_video_id = request.video_id.clone();
         let (tx, result_rx) = async_channel::bounded::<Result<SummaryOutcome, String>>(1);
         let http_client = self.http_client.clone();
         self.runtime.spawn(async move {
-            let video_url = video.watch_url();
-            let result = summarize_video(
-                &http_client,
-                video.video_id(),
-                &video_url,
-                video.title(),
-                video.channel_name(),
-                &transcripts_work_dir,
-            )
-            .await
-            .map_err(|summary_error| summary_error.to_string());
+            let result = summarize_video(&http_client, &request)
+                .await
+                .map_err(|summary_error| summary_error.to_string());
             let _ = tx.send(result).await;
         });
 
@@ -408,17 +407,27 @@ pub(super) fn show_transcript_dialog(
         |_| {},
     );
 
-    let work_dir = state_rc
-        .borrow()
-        .storage
-        .transcripts_work_dir()
-        .to_path_buf();
+    let (work_dir, local_subtitle_path) = {
+        let state = state_rc.borrow();
+        (
+            state.storage.transcripts_work_dir().to_path_buf(),
+            state.storage.find_subtitle_path(video_id),
+        )
+    };
 
     let (tx, rx) = async_channel::bounded::<Result<String, String>>(1);
 
     let video_id_for_thread = video_id.to_string();
     let runtime = ui_context.runtime.clone();
     runtime.spawn(async move {
+        // Prefer a subtitle file downloaded alongside the video over another
+        // rate-limited yt-dlp subtitle request.
+        if let Some(subtitle_path) = local_subtitle_path.as_deref()
+            && let Some(transcript) = transcript_from_vtt_file(subtitle_path).await
+        {
+            let _ = tx.send(Ok(transcript)).await;
+            return;
+        }
         match fetch_transcript(&video_id_for_thread, &work_dir).await {
             Ok(transcript) => {
                 let _ = tx.send(Ok(transcript)).await;
@@ -463,38 +472,24 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+    use tempfile::TempDir;
 
     struct TestDirs {
-        root: PathBuf,
+        root: TempDir,
     }
 
     impl TestDirs {
         fn new() -> Self {
-            let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "yt-gtk-summary-generator-tests-{}-{}",
-                std::process::id(),
-                unique_id
-            ));
-            std::fs::create_dir_all(&root).expect("test directory must be creatable");
+            let root = tempfile::tempdir().expect("test directory must be creatable");
             Self { root }
         }
 
         fn data_dir(&self) -> PathBuf {
-            self.root.join("data")
+            self.root.path().join("data")
         }
 
         fn cache_dir(&self) -> PathBuf {
-            self.root.join("cache")
-        }
-    }
-
-    impl Drop for TestDirs {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
+            self.root.path().join("cache")
         }
     }
 

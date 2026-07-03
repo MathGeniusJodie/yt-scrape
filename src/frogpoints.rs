@@ -129,6 +129,17 @@ pub fn debit_refresh_frogpoints() -> Result<i64, FrogpointsError> {
     debit_frogpoints(&path, REFRESH_COST)
 }
 
+/// Credits the feed-refresh cost back after a refresh that failed mid-flight,
+/// so users are never charged for a refresh that produced nothing.
+///
+/// # Errors
+///
+/// Returns [`FrogpointsError`] when the file is missing/invalid or cannot be written.
+pub fn refund_refresh_frogpoints() -> Result<i64, FrogpointsError> {
+    let path = frogpoints_path()?;
+    decrement_frogpoints(&path, -REFRESH_COST)
+}
+
 fn has_recent_svg_modification(
     template_dir: &Path,
     idle_duration: Duration,
@@ -257,64 +268,34 @@ mod tests {
         FrogpointsError, REFRESH_COST, debit_frogpoints, decrement_frogpoints,
         has_recent_svg_modification,
     };
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use tempfile::NamedTempFile;
 
-    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn temporary_frogpoints_path(test_name: &str) -> PathBuf {
-        let unique_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "yt-gtk-{test_name}-{}-{unique_id}.md",
-            std::process::id()
-        ))
-    }
-
-    struct TestDir {
-        root: PathBuf,
-    }
-
-    impl TestDir {
-        fn new() -> Self {
-            let unique_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "yt-gtk-frogpoints-tests-{}-{}",
-                std::process::id(),
-                unique_id
-            ));
-            std::fs::create_dir_all(&root).expect("test directory must be creatable");
-            Self { root }
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
+    fn temporary_frogpoints_file() -> NamedTempFile {
+        NamedTempFile::new().expect("temporary frogpoints file must be creatable")
     }
 
     #[test]
     fn debit_frogpoints_subtracts_cost_and_returns_remaining_balance() {
-        let path = temporary_frogpoints_path("debit");
-        std::fs::write(&path, "18").expect("write test frogpoints file");
+        let file = temporary_frogpoints_file();
+        let path = file.path();
+        std::fs::write(path, "18").expect("write test frogpoints file");
 
-        let remaining = debit_frogpoints(&path, REFRESH_COST).expect("debit enough frogpoints");
+        let remaining = debit_frogpoints(path, REFRESH_COST).expect("debit enough frogpoints");
 
         assert_eq!(remaining, 8);
         assert_eq!(
-            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
+            std::fs::read_to_string(path).expect("read updated frogpoints file"),
             "8\n"
         );
-
-        std::fs::remove_file(path).expect("remove test frogpoints file");
     }
 
     #[test]
     fn debit_frogpoints_blocks_when_balance_is_too_small() {
-        let path = temporary_frogpoints_path("block");
-        std::fs::write(&path, "9").expect("write test frogpoints file");
+        let file = temporary_frogpoints_file();
+        let path = file.path();
+        std::fs::write(path, "9").expect("write test frogpoints file");
 
-        let error = debit_frogpoints(&path, REFRESH_COST).expect_err("block insufficient balance");
+        let error = debit_frogpoints(path, REFRESH_COST).expect_err("block insufficient balance");
 
         assert!(matches!(
             error,
@@ -324,52 +305,63 @@ mod tests {
             }
         ));
         assert_eq!(
-            std::fs::read_to_string(&path).expect("read unchanged frogpoints file"),
+            std::fs::read_to_string(path).expect("read unchanged frogpoints file"),
             "9"
         );
+    }
 
-        std::fs::remove_file(path).expect("remove test frogpoints file");
+    #[test]
+    fn decrement_frogpoints_with_negative_cost_credits_the_balance() {
+        let file = temporary_frogpoints_file();
+        let path = file.path();
+        std::fs::write(path, "3").expect("write test frogpoints file");
+
+        let remaining = decrement_frogpoints(path, -REFRESH_COST).expect("credit frogpoints");
+
+        assert_eq!(remaining, 13);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read updated frogpoints file"),
+            "13\n"
+        );
     }
 
     #[test]
     fn decrement_frogpoints_allows_negative_balances() {
-        let path = temporary_frogpoints_path("decrement");
-        std::fs::write(&path, "0").expect("write test frogpoints file");
+        let file = temporary_frogpoints_file();
+        let path = file.path();
+        std::fs::write(path, "0").expect("write test frogpoints file");
 
-        let remaining = decrement_frogpoints(&path, 1).expect("decrement frogpoints");
+        let remaining = decrement_frogpoints(path, 1).expect("decrement frogpoints");
 
         assert_eq!(remaining, -1);
         assert_eq!(
-            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
+            std::fs::read_to_string(path).expect("read updated frogpoints file"),
             "-1\n"
         );
-
-        std::fs::remove_file(path).expect("remove test frogpoints file");
     }
 
     #[test]
     fn decrement_frogpoints_writes_shorter_balance_without_stale_bytes() {
-        let path = temporary_frogpoints_path("truncate");
-        std::fs::write(&path, "1000").expect("write test frogpoints file");
+        let file = temporary_frogpoints_file();
+        let path = file.path();
+        std::fs::write(path, "1000").expect("write test frogpoints file");
 
-        let remaining = decrement_frogpoints(&path, 995).expect("decrement frogpoints");
+        let remaining = decrement_frogpoints(path, 995).expect("decrement frogpoints");
 
         assert_eq!(remaining, 5);
         assert_eq!(
-            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
+            std::fs::read_to_string(path).expect("read updated frogpoints file"),
             "5\n"
         );
-
-        std::fs::remove_file(path).expect("remove test frogpoints file");
     }
 
     #[test]
     fn has_recent_svg_modification_ignores_non_svg_files() {
-        let dir = TestDir::new();
-        std::fs::write(dir.root.join("not-svg.txt"), "fresh").expect("write non-svg file");
+        let dir = tempfile::tempdir().expect("test directory must be creatable");
+        std::fs::write(dir.path().join("not-svg.txt"), "fresh").expect("write non-svg file");
 
         let has_recent_svg =
-            has_recent_svg_modification(&dir.root, std::time::Duration::from_secs(120))
+            has_recent_svg_modification(dir.path(), std::time::Duration::from_secs(120))
                 .expect("scan temp directory");
 
         assert!(!has_recent_svg);
@@ -377,13 +369,13 @@ mod tests {
 
     #[test]
     fn has_recent_svg_modification_finds_nested_svg_files_case_insensitively() {
-        let dir = TestDir::new();
-        let nested_dir = dir.root.join("nested");
+        let dir = tempfile::tempdir().expect("test directory must be creatable");
+        let nested_dir = dir.path().join("nested");
         std::fs::create_dir_all(&nested_dir).expect("create nested test directory");
         std::fs::write(nested_dir.join("work.SVG"), "<svg />").expect("write svg file");
 
         let has_recent_svg =
-            has_recent_svg_modification(&dir.root, std::time::Duration::from_secs(120))
+            has_recent_svg_modification(dir.path(), std::time::Duration::from_secs(120))
                 .expect("scan temp directory");
 
         assert!(has_recent_svg);

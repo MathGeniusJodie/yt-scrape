@@ -104,12 +104,7 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Checks whether `program` is on `PATH`.
-fn is_on_path(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path_var| {
-        std::env::split_paths(&path_var).any(|dir| dir.join(program).is_file())
-    })
-}
+use cache::is_on_path;
 
 /// Logs a warning for each external dependency in [`EXTERNAL_DEPENDENCIES`] that is missing
 /// from `PATH`, explaining which feature degrades without it.
@@ -123,7 +118,7 @@ fn warn_about_missing_dependencies() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_on_path;
+    use crate::cache::is_on_path;
 
     #[test]
     fn is_on_path_finds_a_binary_known_to_exist() {

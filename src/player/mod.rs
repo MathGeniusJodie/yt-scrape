@@ -23,9 +23,9 @@ pub enum PlayerError {
 /// How an mpv playback session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackEnd {
-    /// mpv ran long enough to count as watched, or exited cleanly.
+    /// mpv ran long enough to count as watched.
     Watched,
-    /// mpv failed almost immediately; the video was never really played.
+    /// mpv exited almost immediately; the video was never really played.
     FailedImmediately,
 }
 
@@ -56,10 +56,11 @@ fn spawn_mpv_watched(
                 log::debug!("mpv: {line}");
             }
         }
-        let exit_ok = child.wait().is_ok_and(|status| status.success());
-        // A user quitting mpv (even via signal) after real playback still counts
-        // as watched; only an immediate non-zero exit means playback failed.
-        let end = if exit_ok || started.elapsed() > IMMEDIATE_FAILURE_WINDOW {
+        let _ = child.wait();
+        // Elapsed time alone decides: mpv can exit 0 on failures (and a user
+        // who quits within seconds never really watched), while a long-running
+        // session counts as watched regardless of how mpv exited.
+        let end = if started.elapsed() > IMMEDIATE_FAILURE_WINDOW {
             PlaybackEnd::Watched
         } else {
             PlaybackEnd::FailedImmediately

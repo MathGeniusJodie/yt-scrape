@@ -47,6 +47,55 @@ pub enum TranscriptError {
     MissingSubtitleEvents,
 }
 
+/// Reads and parses a locally downloaded `WebVTT` subtitle file into transcript text.
+///
+/// # Arguments
+///
+/// * `subtitle_path` - Path to a `.vtt` file downloaded alongside a video.
+///
+/// # Returns
+///
+/// `Some(transcript)` when the file is readable and yields non-empty text.
+pub async fn transcript_from_vtt_file(subtitle_path: &Path) -> Option<String> {
+    let vtt = tokio::fs::read_to_string(subtitle_path).await.ok()?;
+    let transcript = parse_vtt(&vtt);
+    (!transcript.is_empty()).then_some(transcript)
+}
+
+/// Removes inline `WebVTT` markup spans such as `<c>` and `<00:00:01.319>`.
+fn strip_vtt_tags(line: &str) -> String {
+    let mut stripped = String::with_capacity(line.len());
+    let mut in_tag = false;
+    for character in line.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => stripped.push(c),
+            _ => {}
+        }
+    }
+    stripped
+}
+
+/// Parse `WebVTT` subtitle text into clean transcript text.
+fn parse_vtt(vtt: &str) -> String {
+    let text = vtt
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.contains("-->")
+                || trimmed == "WEBVTT"
+                || trimmed.starts_with("Kind:")
+                || trimmed.starts_with("Language:")
+                || trimmed.starts_with("NOTE"))
+        })
+        .map(strip_vtt_tags)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    clean_transcript(&text)
+}
+
 /// Fetch transcript for a video using yt-dlp
 ///
 /// # Arguments
@@ -179,20 +228,21 @@ fn clean_transcript(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{TranscriptError, clean_transcript, find_subtitle_path, parse_json3};
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
 
-    static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    fn create_temp_test_dir() -> TempDir {
+        tempfile::tempdir().expect("temporary test directory should be created")
+    }
 
-    fn create_temp_test_dir(name: &str) -> PathBuf {
-        let unique_id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "yt_gtk_{name}_{}_{}",
-            std::process::id(),
-            unique_id
-        ));
-        std::fs::create_dir_all(&path).expect("temporary test directory should be created");
-        path
+    #[test]
+    fn parse_vtt_strips_headers_timestamps_and_inline_tags() {
+        let vtt = "WEBVTT\nKind: captions\nLanguage: en\n\n00:00:00.000 --> 00:00:02.000 align:start position:0%\nhello<00:00:01.319><c> world</c>\n\n00:00:02.000 --> 00:00:04.000\nhello world\nnext line\n";
+        assert_eq!(super::parse_vtt(vtt), "hello world next line");
+    }
+
+    #[test]
+    fn parse_vtt_returns_empty_for_metadata_only_input() {
+        assert_eq!(super::parse_vtt("WEBVTT\nKind: captions\n"), "");
     }
 
     #[test]
@@ -224,32 +274,30 @@ mod tests {
 
     #[test]
     fn find_subtitle_path_rejects_non_delimited_prefix_match() {
-        let temp_dir = create_temp_test_dir("subtitle_prefix_reject");
+        let temp_dir = create_temp_test_dir();
         let video_id = "abc123";
-        let wrong_file = temp_dir.join("abc123xyz.en.json3");
+        let wrong_file = temp_dir.path().join("abc123xyz.en.json3");
         std::fs::write(&wrong_file, "{}").expect("test subtitle file should be written");
 
-        let error =
-            find_subtitle_path(&temp_dir, video_id).expect_err("non-delimited prefix should fail");
+        let error = find_subtitle_path(temp_dir.path(), video_id)
+            .expect_err("non-delimited prefix should fail");
 
         assert!(matches!(
             error,
             TranscriptError::SubtitleFileNotFound { video_id: id } if id == video_id
         ));
-        std::fs::remove_dir_all(&temp_dir).expect("temporary test directory should be removed");
     }
 
     #[test]
     fn find_subtitle_path_accepts_dot_delimited_prefix_match() {
-        let temp_dir = create_temp_test_dir("subtitle_prefix_accept");
+        let temp_dir = create_temp_test_dir();
         let video_id = "abc123";
-        let expected_file = temp_dir.join("abc123.en.json3");
+        let expected_file = temp_dir.path().join("abc123.en.json3");
         std::fs::write(&expected_file, "{}").expect("test subtitle file should be written");
 
-        let found_path =
-            find_subtitle_path(&temp_dir, video_id).expect("dot-delimited prefix should resolve");
+        let found_path = find_subtitle_path(temp_dir.path(), video_id)
+            .expect("dot-delimited prefix should resolve");
 
         assert_eq!(found_path, expected_file);
-        std::fs::remove_dir_all(&temp_dir).expect("temporary test directory should be removed");
     }
 }

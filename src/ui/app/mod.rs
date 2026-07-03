@@ -6,7 +6,7 @@ use crate::cache::{Storage, StorageError, download_video};
 use crate::data::{Tab, Video};
 use crate::feed::{FetchProgress, fetch_all_feeds, fetch_youtube_search, load_channel_ids};
 use crate::frogpoints;
-use cards::VideoCardWidgets;
+use cards::TabCards;
 
 use adw::prelude::*;
 use gtk::{Button, FlowBox, Label, Popover, Spinner};
@@ -14,7 +14,7 @@ use gtk::{gdk, glib};
 use indexmap::IndexMap;
 use log::{error, info, warn};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,6 +33,9 @@ struct AppState {
     feed_video_ids: Vec<String>,
     search_result_ids: Vec<String>,
     watch_later: HashSet<String>,
+    /// IDs with a completed local download, kept in sync with the videos cache
+    /// directory so UI paths never rescan it on the main thread.
+    downloaded_video_ids: HashSet<String>,
     storage: Storage,
 }
 
@@ -60,11 +63,13 @@ impl AppState {
             .into_iter()
             .map(|video| (video.video_id().to_string(), video))
             .collect::<IndexMap<_, _>>();
+        let downloaded_video_ids = storage.cached_video_ids();
         Self {
             videos,
             feed_video_ids,
             search_result_ids: Vec::new(),
             watch_later,
+            downloaded_video_ids,
             storage,
         }
     }
@@ -200,7 +205,7 @@ impl AppState {
     }
 }
 
-type CardMap = Rc<RefCell<HashMap<String, VideoCardWidgets>>>;
+type CardMap = Rc<RefCell<TabCards>>;
 
 #[derive(Clone)]
 struct AppContext {
@@ -218,9 +223,31 @@ struct AppContext {
     feed_cards: CardMap,
     search_cards: CardMap,
     watch_later_cards: CardMap,
-    subs_file: PathBuf,
     /// Ordered queue for watch-later persistence (see [`spawn_watch_later_persister`]).
     watch_later_saves: async_channel::Sender<HashSet<String>>,
+    /// Ordered queue for subscription removals (see [`spawn_subscription_remover`]).
+    subscription_removals: async_channel::Sender<String>,
+    /// Video IDs with an in-flight yt-dlp download, so duplicate downloads are
+    /// never spawned and file deletion is deferred until the download finishes.
+    downloads_in_progress: Rc<RefCell<HashSet<String>>>,
+}
+
+/// Toolbar widgets that report long-running feed/search activity.
+#[derive(Clone)]
+struct StatusUi {
+    spinner: Spinner,
+    label: Label,
+    /// Button disabled while the activity runs.
+    button: Button,
+}
+
+impl StatusUi {
+    /// Stops the spinner, shows `message`, and re-enables the action button.
+    fn finish(&self, message: &str) {
+        self.spinner.stop();
+        self.label.set_text(message);
+        self.button.set_sensitive(true);
+    }
 }
 
 fn is_legacy_download(path: &Path) -> bool {
@@ -250,6 +277,65 @@ fn spawn_video_download(
         let _ = tx.send(succeeded).await;
     });
     rx
+}
+
+/// Starts a download for `video_id` unless one is already in flight, showing the
+/// downloading spinner and handling all completion bookkeeping (badges, the
+/// downloaded-ID set, and deferred deletion when the video was removed from
+/// Watch Later mid-download).
+fn start_tracked_download(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: &str,
+    video_title: &str,
+) {
+    if !ui_context
+        .downloads_in_progress
+        .borrow_mut()
+        .insert(video_id.to_string())
+    {
+        return;
+    }
+
+    let video_path = state_rc.borrow().storage.video_path(video_id, video_title);
+    let completion_rx = spawn_video_download(&ui_context.runtime, video_id.to_string(), video_path);
+    refresh_video_downloading_badge(ui_context, video_id);
+
+    let state_rc = state_rc.clone();
+    let ui_context = ui_context.clone();
+    let video_id = video_id.to_string();
+    glib::MainContext::default().spawn_local(async move {
+        // A closed channel means the download task died; treat as failure so
+        // the spinner never spins forever.
+        let succeeded = completion_rx.recv().await == Ok(true);
+        ui_context
+            .downloads_in_progress
+            .borrow_mut()
+            .remove(&video_id);
+
+        let still_wanted = {
+            let mut state = state_rc.borrow_mut();
+            if succeeded {
+                state.downloaded_video_ids.insert(video_id.clone());
+            }
+            let still_wanted = state.watch_later.contains(&video_id);
+            // Removed from Watch Later mid-download: honor the removal now
+            // that yt-dlp is no longer writing the files.
+            if !still_wanted {
+                state.downloaded_video_ids.remove(&video_id);
+                if let Err(remove_error) = state.storage.remove_cached_video_files(&video_id) {
+                    error!("Failed to remove cached video {video_id}: {remove_error}");
+                }
+            }
+            still_wanted
+        };
+
+        if succeeded && still_wanted {
+            refresh_video_downloaded_badge(&ui_context, &video_id);
+        } else {
+            refresh_video_download_failed_badge(&ui_context, &video_id);
+        }
+    });
 }
 
 /// Runs a blocking persistence task on the runtime, logging failures under `description`.
@@ -294,23 +380,48 @@ fn spawn_watch_later_persister(
     tx
 }
 
-fn persist_unsubscribe(runtime: &Arc<Runtime>, subs_file: PathBuf, channel_id: String) {
-    persist_in_background(runtime, "subscription removal", move || {
-        let content = std::fs::read_to_string(&subs_file)?;
-        let mut output = content
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                // Keep comments, blank lines, and lines not matching this channel
-                trimmed.starts_with('#') || trimmed.is_empty() || trimmed != channel_id
+fn remove_channel_from_subs_file(subs_file: &Path, channel_id: &str) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(subs_file)?;
+    let mut output = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            // Keep comments, blank lines, and lines not matching this channel
+            trimmed.starts_with('#') || trimmed.is_empty() || trimmed != channel_id
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if content.ends_with('\n') {
+        output.push('\n');
+    }
+    std::fs::write(subs_file, output)
+}
+
+/// Starts the single consumer that rewrites the subscriptions file strictly in
+/// request order, so rapid unsubscribes can never interleave their
+/// read-modify-write cycles and resurrect a removed channel.
+fn spawn_subscription_remover(
+    runtime: &Arc<Runtime>,
+    subs_file: PathBuf,
+) -> async_channel::Sender<String> {
+    let (tx, rx) = async_channel::unbounded::<String>();
+    runtime.spawn(async move {
+        while let Ok(channel_id) = rx.recv().await {
+            let subs_file = subs_file.clone();
+            let remove_result = tokio::task::spawn_blocking(move || {
+                remove_channel_from_subs_file(&subs_file, &channel_id)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if content.ends_with('\n') {
-            output.push('\n');
+            .await;
+            match remove_result {
+                Ok(Ok(())) => {}
+                Ok(Err(save_error)) => {
+                    error!("Failed to persist subscription removal: {save_error}");
+                }
+                Err(join_error) => error!("Subscription removal task failed: {join_error}"),
+            }
         }
-        std::fs::write(&subs_file, output)
     });
+    tx
 }
 
 fn persist_videos(runtime: &Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
@@ -326,54 +437,60 @@ fn persist_feed_video_ids(runtime: &Arc<Runtime>, storage: Storage, video_ids: V
 }
 
 fn resolve_playback_path(
-    storage: &Storage,
-    runtime: &Arc<Runtime>,
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
     video_id: &str,
     video_title: &str,
-    local_path: Option<PathBuf>,
 ) -> Option<PathBuf> {
+    let (local_path, in_watch_later) = {
+        let state = state_rc.borrow();
+        (
+            state.storage.find_video_path(video_id),
+            state.watch_later.contains(video_id),
+        )
+    };
     match local_path {
         Some(path) if is_legacy_download(&path) => {
-            // Legacy downloads lack embedded chapter/caption metadata. Upgrade in background
-            // but still play the local file.
-            let upgraded_path = storage.video_path(video_id, video_title);
-            spawn_video_download(runtime, video_id.to_string(), upgraded_path);
+            // Legacy downloads lack embedded chapter/caption metadata. Upgrade in
+            // background — but only for Watch Later videos, since the cache policy
+            // deletes downloads of anything else — and still play the local file.
+            if in_watch_later {
+                start_tracked_download(state_rc, ui_context, video_id, video_title);
+            }
             Some(path)
         }
         other => other,
     }
 }
 
-fn toggle_watch_later_and_download(
+fn perform_watch_later_toggle(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
     video_id: &str,
     video_title: &str,
-) -> (bool, Option<async_channel::Receiver<bool>>) {
-    let (added, download_rx, watch_later_snapshot) = {
+) {
+    let (added, needs_download, watch_later_snapshot) = {
         let mut state = state_rc.borrow_mut();
         let added = !state.watch_later.remove(video_id);
         if added {
             state.watch_later.insert(video_id.to_string());
         }
 
-        let local_path = state.storage.find_video_path(video_id);
-        let download_rx = if added && needs_download_upgrade(local_path.as_deref()) {
-            let video_path = state.storage.video_path(video_id, video_title);
-            Some(spawn_video_download(
-                &ui_context.runtime,
-                video_id.to_string(),
-                video_path,
-            ))
-        } else {
-            None
+        let needs_download = added && {
+            let local_path = state.storage.find_video_path(video_id);
+            needs_download_upgrade(local_path.as_deref())
         };
 
-        if !added && let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
-            error!("Failed to remove cached video {video_id}: {remove_error}");
+        // When a download is in flight its completion handler owns the files
+        // and performs the deferred deletion; deleting here would race yt-dlp.
+        if !added && !ui_context.downloads_in_progress.borrow().contains(video_id) {
+            state.downloaded_video_ids.remove(video_id);
+            if let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
+                error!("Failed to remove cached video {video_id}: {remove_error}");
+            }
         }
 
-        (added, download_rx, state.watch_later.clone())
+        (added, needs_download, state.watch_later.clone())
     };
 
     if ui_context
@@ -383,27 +500,7 @@ fn toggle_watch_later_and_download(
     {
         error!("Watch-later persister is gone; changes will not be saved");
     }
-    (added, download_rx)
-}
 
-fn apply_watch_later_action(
-    state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &AppContext,
-    video_id: &str,
-) {
-    let video_title = {
-        let state = state_rc.borrow();
-        state
-            .video_by_id(video_id)
-            .map(|video| video.title().to_string())
-    };
-    let Some(video_title) = video_title else {
-        error!("Cannot toggle watch-later for missing video {video_id}");
-        return;
-    };
-
-    let (added, download_rx) =
-        toggle_watch_later_and_download(state_rc, ui_context, video_id, &video_title);
     update_watch_later_toggles(ui_context, video_id, added);
     update_watch_later_badge(
         &ui_context.watch_later_page,
@@ -412,20 +509,60 @@ fn apply_watch_later_action(
     sync_watch_later_card(state_rc, ui_context, video_id);
     if added {
         maybe_prefetch_summary_for_watch_later(state_rc, ui_context, video_id);
-        if let Some(rx) = download_rx {
-            refresh_video_downloading_badge(ui_context, video_id);
-            let ui_ctx = ui_context.clone();
-            let video_id = video_id.to_string();
-            glib::MainContext::default().spawn_local(async move {
-                // A closed channel means the download task died; treat as failure
-                // so the spinner never spins forever.
-                if rx.recv().await == Ok(true) {
-                    refresh_video_downloaded_badge(&ui_ctx, &video_id);
-                } else {
-                    refresh_video_download_failed_badge(&ui_ctx, &video_id);
-                }
-            });
+        if needs_download {
+            start_tracked_download(state_rc, ui_context, video_id, video_title);
         }
+    }
+}
+
+/// Asks for confirmation before a Watch Later removal that would delete
+/// downloaded media, then performs the toggle on confirmation.
+fn confirm_watch_later_removal(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: &str,
+    video_title: &str,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Remove \"{video_title}\" from Watch Later?")),
+        Some("The downloaded video and subtitles will be deleted."),
+    );
+    dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove and Delete")]);
+    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let state_rc = state_rc.clone();
+    let ui_context_for_response = ui_context.clone();
+    let video_id = video_id.to_string();
+    let video_title = video_title.to_string();
+    dialog.connect_response(Some("remove"), move |_, _| {
+        perform_watch_later_toggle(&state_rc, &ui_context_for_response, &video_id, &video_title);
+    });
+    dialog.present(Some(&ui_context.window));
+}
+
+fn apply_watch_later_action(
+    state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: &str,
+) {
+    let (video_title, removal_deletes_files) = {
+        let state = state_rc.borrow();
+        let Some(video) = state.video_by_id(video_id) else {
+            error!("Cannot toggle watch-later for missing video {video_id}");
+            return;
+        };
+        let removing = state.watch_later.contains(video_id);
+        let has_local_files = state.downloaded_video_ids.contains(video_id)
+            || ui_context.downloads_in_progress.borrow().contains(video_id);
+        (video.title().to_string(), removing && has_local_files)
+    };
+
+    if removal_deletes_files {
+        confirm_watch_later_removal(state_rc, ui_context, video_id, &video_title);
+    } else {
+        perform_watch_later_toggle(state_rc, ui_context, video_id, &video_title);
     }
 }
 
@@ -460,21 +597,38 @@ fn unsubscribe_channel(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
 
-    let runtime = ui_context.runtime.clone();
-    let subs_file = ui_context.subs_file.clone();
+    let subscription_removals = ui_context.subscription_removals.clone();
     dialog.connect_response(Some("unsubscribe"), move |_, _| {
         // Only persist the change — videos disappear from the feed on next refresh.
-        persist_unsubscribe(&runtime, subs_file.clone(), channel_id.clone());
+        if subscription_removals
+            .send_blocking(channel_id.clone())
+            .is_err()
+        {
+            error!("Subscription remover is gone; unsubscribe will not be saved");
+        }
     });
     dialog.present(Some(&ui_context.window));
 }
 
+/// Refunds the refresh cost off the main thread after a fatal refresh failure.
+fn refund_refresh_frogpoints_in_background() {
+    std::thread::spawn(|| match frogpoints::refund_refresh_frogpoints() {
+        Ok(remaining) => {
+            info!("Refunded refresh frogpoints after fatal error; {remaining} remaining");
+        }
+        Err(refund_error) => warn!("Failed to refund refresh frogpoints: {refund_error}"),
+    });
+}
+
 fn spawn_refresh_progress_updates(
     progress_rx: async_channel::Receiver<FetchProgress>,
-    spinner: Spinner,
-    status_label: Label,
-    refresh_button: Button,
+    status_ui: StatusUi,
 ) {
+    let StatusUi {
+        spinner,
+        label: status_label,
+        button: refresh_button,
+    } = status_ui;
     glib::MainContext::default().spawn_local(async move {
         let mut total_channels = 0usize;
         let mut completed_channels = 0usize;
@@ -524,8 +678,9 @@ fn spawn_refresh_progress_updates(
                 }
                 FetchProgress::Fatal { error } => {
                     spinner.stop();
-                    status_label.set_text(&format!("Refresh failed: {error}"));
+                    status_label.set_text(&format!("Refresh failed (frogpoints refunded): {error}"));
                     error!("Fatal refresh error: {error}");
+                    refund_refresh_frogpoints_in_background();
                     break;
                 }
                 FetchProgress::AllComplete {
@@ -604,38 +759,38 @@ fn spawn_refreshed_videos_apply(
 }
 
 fn refresh_video_lists(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
-    let state_ref = state_rc.borrow();
-    let downloaded_video_ids = state_ref.storage.cached_video_ids();
-    update_watch_later_badge(&ui_context.watch_later_page, state_ref.watch_later.len());
-    populate_flow_box(Tab::Feed, &downloaded_video_ids, state_rc, ui_context);
-    populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
-    populate_flow_box(Tab::WatchLater, &downloaded_video_ids, state_rc, ui_context);
+    update_watch_later_badge(
+        &ui_context.watch_later_page,
+        state_rc.borrow().watch_later.len(),
+    );
+    populate_flow_box(Tab::Feed, state_rc, ui_context);
+    populate_flow_box(Tab::Search, state_rc, ui_context);
+    populate_flow_box(Tab::WatchLater, state_rc, ui_context);
 }
 
 fn refresh_search_results(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext) {
-    let downloaded_video_ids = state_rc.borrow().storage.cached_video_ids();
-    populate_flow_box(Tab::Search, &downloaded_video_ids, state_rc, ui_context);
+    populate_flow_box(Tab::Search, state_rc, ui_context);
 }
 
 fn start_youtube_search(
     state_rc: Rc<RefCell<AppState>>,
     ui_context: AppContext,
-    spinner: Spinner,
-    status_label: Label,
-    search_button: Button,
+    status_ui: StatusUi,
     query: &str,
 ) {
     let query = query.trim().to_string();
     if query.is_empty() {
         state_rc.borrow_mut().set_search_results(Vec::new());
         refresh_search_results(&state_rc, &ui_context);
-        status_label.set_text("");
+        status_ui.label.set_text("");
         return;
     }
 
-    search_button.set_sensitive(false);
-    spinner.start();
-    status_label.set_text(&format!("Searching YouTube for \"{query}\"..."));
+    status_ui.button.set_sensitive(false);
+    status_ui.spinner.start();
+    status_ui
+        .label
+        .set_text(&format!("Searching YouTube for \"{query}\"..."));
 
     let (results_tx, results_rx) = async_channel::bounded(1);
     let client = ui_context.http_client.clone();
@@ -663,57 +818,61 @@ fn start_youtube_search(
                 };
 
                 refresh_search_results(&state_rc, &ui_context);
-                status_label.set_text(&format!("{result_count} search results"));
+                status_ui
+                    .label
+                    .set_text(&format!("{result_count} search results"));
                 spawn_thumbnail_refreshes(&state_rc, &ui_context, thumbnail_completion);
             }
             Ok(Err(error)) => {
-                status_label.set_text(&format!("Search failed: {error}"));
+                status_ui.label.set_text(&format!("Search failed: {error}"));
                 error!("YouTube search failed: {error}");
             }
             Err(error) => {
-                status_label.set_text("Search failed");
+                status_ui.label.set_text("Search failed");
                 error!("YouTube search result channel closed: {error}");
             }
         }
 
-        spinner.stop();
-        search_button.set_sensitive(true);
+        status_ui.spinner.stop();
+        status_ui.button.set_sensitive(true);
     });
 }
 
 fn start_feed_refresh(
     state: Rc<RefCell<AppState>>,
     ui_context: AppContext,
-    spinner: Spinner,
-    status_label: Label,
-    refresh_button: Button,
+    status_ui: StatusUi,
     subs_file: &Path,
 ) {
-    refresh_button.set_sensitive(false);
-    spinner.start();
-    status_label.set_text("Refreshing...");
+    status_ui.button.set_sensitive(false);
+    status_ui.spinner.start();
+    status_ui.label.set_text("Refreshing...");
 
-    match frogpoints::debit_refresh_frogpoints() {
-        Ok(remaining) => {
-            status_label.set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
-        }
-        Err(error) => {
-            spinner.stop();
-            status_label.set_text(&format!("Refresh blocked: {error}"));
-            refresh_button.set_sensitive(true);
-            return;
-        }
-    }
-
+    // Validate every cheap precondition before charging frogpoints, so a
+    // refresh that cannot possibly succeed never costs anything.
     let channel_ids = match load_channel_ids(subs_file) {
         Ok(ids) => ids,
         Err(error) => {
-            spinner.stop();
-            status_label.set_text(&format!("Error: {error}"));
-            refresh_button.set_sensitive(true);
+            status_ui.finish(&format!("Error: {error}"));
             return;
         }
     };
+    if !crate::feed::has_google_api_key() {
+        status_ui.finish("Refresh blocked: GOOGLE_API_KEY is not set.");
+        return;
+    }
+
+    match frogpoints::debit_refresh_frogpoints() {
+        Ok(remaining) => {
+            status_ui
+                .label
+                .set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
+        }
+        Err(error) => {
+            status_ui.finish(&format!("Refresh blocked: {error}"));
+            return;
+        }
+    }
 
     let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
     let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
@@ -735,7 +894,7 @@ fn start_feed_refresh(
         }
     });
 
-    spawn_refresh_progress_updates(progress_rx, spinner, status_label, refresh_button);
+    spawn_refresh_progress_updates(progress_rx, status_ui);
     spawn_refreshed_videos_apply(videos_rx, state, ui_context);
 }
 
@@ -898,10 +1057,8 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
 
     window.set_content(Some(&toolbar_view));
 
-    let feed_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
-    let search_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
-    let watch_later_cards = Rc::new(RefCell::new(HashMap::<String, VideoCardWidgets>::new()));
     let context_menu = Popover::new();
+    let subscription_removals = spawn_subscription_remover(&runtime, subs_file.clone());
 
     let ui_context = AppContext {
         summary_generator: SummaryGenerator::new(runtime.clone(), http_client.clone()),
@@ -915,11 +1072,12 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         search_flow,
         watch_later_flow,
         selected_video,
-        feed_cards,
-        search_cards,
-        watch_later_cards,
-        subs_file: subs_file.clone(),
+        feed_cards: CardMap::default(),
+        search_cards: CardMap::default(),
+        watch_later_cards: CardMap::default(),
         watch_later_saves,
+        subscription_removals,
+        downloads_in_progress: Rc::new(RefCell::new(HashSet::new())),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
@@ -935,19 +1093,20 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
 
     refresh_video_lists(&state, &ui_context);
 
+    let search_status_ui = StatusUi {
+        spinner: spinner.clone(),
+        label: status_label.clone(),
+        button: search_button.clone(),
+    };
     {
         let state = state.clone();
         let ui_context = ui_context.clone();
-        let spinner = spinner.clone();
-        let status_label = status_label.clone();
-        let search_button = search_button.clone();
+        let search_status_ui = search_status_ui.clone();
         search_entry.connect_activate(move |entry| {
             start_youtube_search(
                 state.clone(),
                 ui_context.clone(),
-                spinner.clone(),
-                status_label.clone(),
-                search_button.clone(),
+                search_status_ui.clone(),
                 &entry.text(),
             );
         });
@@ -955,15 +1114,11 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     {
         let state = state.clone();
         let ui_context = ui_context.clone();
-        let spinner = spinner.clone();
-        let status_label = status_label.clone();
-        search_button.connect_clicked(move |button| {
+        search_button.connect_clicked(move |_| {
             start_youtube_search(
                 state.clone(),
                 ui_context.clone(),
-                spinner.clone(),
-                status_label.clone(),
-                button.clone(),
+                search_status_ui.clone(),
                 &search_entry.text(),
             );
         });
@@ -972,14 +1127,16 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
     {
         let state = state.clone();
         let ui_context = ui_context.clone();
-        let refresh_button_for_handler = refresh_button.clone();
+        let refresh_status_ui = StatusUi {
+            spinner,
+            label: status_label,
+            button: refresh_button.clone(),
+        };
         refresh_button.connect_clicked(move |_| {
             start_feed_refresh(
                 state.clone(),
                 ui_context.clone(),
-                spinner.clone(),
-                status_label.clone(),
-                refresh_button_for_handler.clone(),
+                refresh_status_ui.clone(),
                 &subs_file,
             );
         });
@@ -1011,38 +1168,24 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+    use tempfile::TempDir;
 
     struct TestDirs {
-        root: PathBuf,
+        root: TempDir,
     }
 
     impl TestDirs {
         fn new() -> Self {
-            let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "yt-gtk-app-state-tests-{}-{}",
-                std::process::id(),
-                unique_id
-            ));
-            std::fs::create_dir_all(&root).expect("test directory must be creatable");
+            let root = tempfile::tempdir().expect("test directory must be creatable");
             Self { root }
         }
 
         fn data_dir(&self) -> PathBuf {
-            self.root.join("data")
+            self.root.path().join("data")
         }
 
         fn cache_dir(&self) -> PathBuf {
-            self.root.join("cache")
-        }
-    }
-
-    impl Drop for TestDirs {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
+            self.root.path().join("cache")
         }
     }
 

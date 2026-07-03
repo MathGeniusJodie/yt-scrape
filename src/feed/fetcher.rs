@@ -274,7 +274,7 @@ struct PlaylistItem {
 
 #[derive(Debug, Deserialize)]
 struct SearchItem {
-    id: Option<SearchResourceId>,
+    id: Option<VideoResourceId>,
     snippet: Option<SearchSnippet>,
 }
 
@@ -285,7 +285,7 @@ struct PlaylistItemSnippet {
     title: Option<String>,
     channel_id: Option<String>,
     channel_title: Option<String>,
-    resource_id: Option<PlaylistResourceId>,
+    resource_id: Option<VideoResourceId>,
     thumbnails: Option<PlaylistThumbnails>,
 }
 
@@ -299,15 +299,10 @@ struct SearchSnippet {
     thumbnails: Option<PlaylistThumbnails>,
 }
 
+/// Video reference shared by playlist-item `snippet.resourceId` and search `id` payloads.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PlaylistResourceId {
-    video_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchResourceId {
+struct VideoResourceId {
     video_id: Option<String>,
 }
 
@@ -377,6 +372,14 @@ async fn send_retry_progress(
 enum ChannelFetchResult {
     Success { videos: Vec<Video> },
     Failed,
+}
+
+/// Returns `true` when a non-empty `GOOGLE_API_KEY` is present in the environment.
+///
+/// Lets the UI reject a refresh before charging for it; the fetch functions
+/// still perform their own authoritative check.
+pub fn has_google_api_key() -> bool {
+    std::env::var("GOOGLE_API_KEY").is_ok_and(|key| !key.trim().is_empty())
 }
 
 /// Fetch all feeds from the given channel IDs
@@ -711,7 +714,8 @@ fn format_comment_threads(items: &[CommentThreadItem]) -> String {
     }
 
     let mut output = String::new();
-    for (index, item) in items.iter().enumerate() {
+    let mut thread_number = 0usize;
+    for item in items {
         let Some(snippet) = item.snippet.as_ref() else {
             continue;
         };
@@ -722,7 +726,8 @@ fn format_comment_threads(items: &[CommentThreadItem]) -> String {
         if !output.is_empty() {
             output.push('\n');
         }
-        push_formatted_comment(&mut output, index + 1, top_level_comment, "");
+        thread_number += 1;
+        push_formatted_comment(&mut output, thread_number, top_level_comment, "");
 
         let replies = item
             .replies
@@ -1004,6 +1009,10 @@ mod tests {
     #[test]
     fn rejects_invalid_iso_durations() {
         assert_eq!(parse_iso8601_duration_seconds("15M"), None);
+    }
+
+    #[test]
+    fn parses_empty_duration_as_zero_seconds() {
         assert_eq!(parse_iso8601_duration_seconds("PT"), Some(0));
     }
 

@@ -44,6 +44,7 @@ adw = { version = "0.9.1", package = "libadwaita", features = ["v1_5"] }
 [dev-dependencies]
 # `test-util` enables tokio::time::pause / start_paused in tests; not in `full`.
 tokio = { version = "1", features = ["test-util"] }
+tempfile = "3"
 
 [profile.release]
 lto = true

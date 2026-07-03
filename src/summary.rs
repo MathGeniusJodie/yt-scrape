@@ -1,6 +1,6 @@
-use crate::cache::fetch_transcript;
+use crate::cache::{fetch_transcript, transcript_from_vtt_file};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 
 const GEMINI_FLASH_MODEL: &str = "gemini-3.5-flash";
@@ -283,36 +283,68 @@ fn configured_openrouter_models() -> Vec<String> {
     OPENROUTER_MODELS.map(str::to_string).into()
 }
 
+/// Inputs for [`summarize_video`].
+#[derive(Debug, Clone)]
+pub struct SummarizeRequest {
+    /// `YouTube` video identifier.
+    pub video_id: String,
+    /// Full watch URL used by providers.
+    pub video_url: String,
+    /// Human-readable video title for prompt context.
+    pub video_title: String,
+    /// Channel display name for prompt context.
+    pub channel_name: String,
+    /// Temporary directory for transcript extraction artifacts.
+    pub transcripts_work_dir: PathBuf,
+    /// Already-downloaded `.vtt` subtitle file, reused before shelling out
+    /// another yt-dlp subtitle request.
+    pub local_subtitle_path: Option<PathBuf>,
+}
+
+/// Resolves a transcript, preferring a local subtitle file over a fresh yt-dlp fetch.
+async fn resolve_transcript(request: &SummarizeRequest) -> Result<String, String> {
+    if let Some(subtitle_path) = request.local_subtitle_path.as_deref()
+        && let Some(transcript) = transcript_from_vtt_file(subtitle_path).await
+    {
+        return Ok(transcript);
+    }
+
+    match fetch_transcript(&request.video_id, &request.transcripts_work_dir).await {
+        Ok(transcript) if !transcript.trim().is_empty() => Ok(transcript),
+        Ok(_) => Err(ProviderCallError::EmptyTranscript.to_string()),
+        Err(transcript_error) => Err(transcript_error.to_string()),
+    }
+}
+
 /// Generates an AI summary for a video.
 ///
-/// Tries Gemini first. If Gemini is unavailable or fails, fetches the transcript
-/// and tries `OpenRouter`. If `OpenRouter` also fails, returns the transcript itself
-/// as [`SummaryOutcome::TranscriptOnly`] so callers can still show something useful
-/// without mistaking it for an AI summary.
+/// Tries Gemini first. If Gemini is unavailable or fails, resolves the transcript
+/// (preferring a local subtitle file) and tries `OpenRouter`. If `OpenRouter` also
+/// fails, returns the transcript itself as [`SummaryOutcome::TranscriptOnly`] so
+/// callers can still show something useful without mistaking it for an AI summary.
 ///
 /// # Arguments
 ///
 /// * `client` - HTTP client used for provider requests.
-/// * `video_id` - `YouTube` video identifier.
-/// * `video_url` - Full watch URL used by providers.
-/// * `video_title` - Human-readable video title for prompt context.
-/// * `channel_name` - Channel display name for prompt context.
-/// * `transcripts_work_dir` - Temporary directory for transcript extraction artifacts.
+/// * `request` - Video metadata and transcript sources (see [`SummarizeRequest`]).
 ///
 /// # Errors
 ///
 /// Returns [`SummaryError`] when every provider and the transcript fallback fail.
 pub async fn summarize_video(
     client: &reqwest::Client,
-    video_id: &str,
-    video_url: &str,
-    video_title: &str,
-    channel_name: &str,
-    transcripts_work_dir: &Path,
+    request: &SummarizeRequest,
 ) -> Result<SummaryOutcome, SummaryError> {
     let gemini_result = match std::env::var("GEMINI_API_KEY") {
         Ok(api_key) => {
-            call_gemini(client, &api_key, &gemini_model(), video_url, SUMMARY_PROMPT).await
+            call_gemini(
+                client,
+                &api_key,
+                &gemini_model(),
+                &request.video_url,
+                SUMMARY_PROMPT,
+            )
+            .await
         }
         Err(_) => Err(ProviderCallError::MissingEnvVar {
             variable: "GEMINI_API_KEY",
@@ -324,37 +356,23 @@ pub async fn summarize_video(
         Err(gemini_error) => gemini_error,
     };
 
-    let transcript = match fetch_transcript(video_id, transcripts_work_dir).await {
-        Ok(transcript) if !transcript.trim().is_empty() => transcript,
-        Ok(_) => {
-            return Err(SummaryError::NoSummaryOrTranscript {
-                gemini: gemini_error.to_string(),
-                transcript: ProviderCallError::EmptyTranscript.to_string(),
-            });
-        }
+    let transcript = match resolve_transcript(request).await {
+        Ok(transcript) => transcript,
         Err(transcript_error) => {
             return Err(SummaryError::NoSummaryOrTranscript {
                 gemini: gemini_error.to_string(),
-                transcript: transcript_error.to_string(),
+                transcript: transcript_error,
             });
         }
     };
 
-    match call_openrouter_with_transcript(
-        client,
-        video_url,
-        video_title,
-        channel_name,
-        SUMMARY_PROMPT,
-        &transcript,
-    )
-    .await
-    {
+    match call_openrouter_with_transcript(client, request, SUMMARY_PROMPT, &transcript).await {
         Ok(summary) => Ok(SummaryOutcome::Summary(summary)),
         Err(openrouter_error) => {
             log::warn!(
-                "OpenRouter summary failed for {video_id} (falling back to transcript): \
-                 {openrouter_error}"
+                "OpenRouter summary failed for {} (falling back to transcript): \
+                 {openrouter_error}",
+                request.video_id
             );
             Ok(SummaryOutcome::TranscriptOnly(
                 transcript.trim().to_string(),
@@ -420,9 +438,7 @@ async fn call_gemini(
 
 async fn call_openrouter_with_transcript(
     client: &reqwest::Client,
-    video_url: &str,
-    video_title: &str,
-    channel_name: &str,
+    request: &SummarizeRequest,
     prompt: &str,
     transcript: &str,
 ) -> Result<String, ProviderCallError> {
@@ -450,7 +466,8 @@ async fn call_openrouter_with_transcript(
         messages: vec![OpenRouterMessage {
             role: "user".to_string(),
             content: format!(
-                "{prompt}\n\nVideo title: {video_title}\nChannel: {channel_name}\nVideo URL: {video_url}\n\nTranscript:\n{transcript}"
+                "{prompt}\n\nVideo title: {}\nChannel: {}\nVideo URL: {}\n\nTranscript:\n{transcript}",
+                request.video_title, request.channel_name, request.video_url
             ),
         }],
     };

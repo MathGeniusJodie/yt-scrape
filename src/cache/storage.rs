@@ -329,13 +329,13 @@ impl Storage {
         Ok(())
     }
 
-    fn remove_path(path: &Path) -> StorageResult<usize> {
+    fn remove_path(path: &Path) -> StorageResult<()> {
         if path.is_dir() {
             std::fs::remove_dir_all(path)?;
         } else {
             std::fs::remove_file(path)?;
         }
-        Ok(1)
+        Ok(())
     }
 
     #[allow(clippy::unused_self)]
@@ -349,7 +349,8 @@ impl Storage {
             if keep_entry(&path) {
                 continue;
             }
-            removed_count += Self::remove_path(&path)?;
+            Self::remove_path(&path)?;
+            removed_count += 1;
         }
         Ok(removed_count)
     }
@@ -469,6 +470,24 @@ impl Storage {
         entries.filter_map(Result::ok).find_map(|entry| {
             let path = entry.path();
             (cached_video_id_for_path(&path) == Some(video_id)).then_some(path)
+        })
+    }
+
+    /// Finds a downloaded subtitle file (`.vtt`) for a given video ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `video_id` - `YouTube` video identifier.
+    ///
+    /// # Returns
+    ///
+    /// Matched local subtitle path, if present.
+    pub fn find_subtitle_path(&self, video_id: &str) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(&self.videos_dir).ok()?;
+
+        entries.filter_map(Result::ok).find_map(|entry| {
+            let path = entry.path();
+            (video_id_from_subtitle_path(&path) == Some(video_id)).then_some(path)
         })
     }
 
@@ -789,24 +808,14 @@ mod tests {
     use std::collections::HashSet;
     use std::fs::File;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     fn touch(path: &Path) {
         File::create(path).expect("test file must be creatable");
     }
 
-    fn create_unique_temp_dir() -> std::path::PathBuf {
-        let unique_suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System clock should be after UNIX epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "yt_gtk_storage_tests_{}_{}",
-            std::process::id(),
-            unique_suffix
-        ));
-        std::fs::create_dir_all(&path).expect("Failed to create temp directory");
-        path
+    fn create_unique_temp_dir() -> TempDir {
+        tempfile::tempdir().expect("Failed to create temp directory")
     }
 
     fn create_test_storage(root: &Path) -> Storage {
@@ -864,23 +873,21 @@ mod tests {
     fn collect_cached_video_ids_from_dir_only_keeps_supported_video_files() {
         let temp_dir = create_unique_temp_dir();
 
-        touch(&temp_dir.join("my_title_C9ww_8cg_5g.mkv"));
-        touch(&temp_dir.join("another_title_abc123DEF45.mp4"));
-        touch(&temp_dir.join("skip_me.txt"));
-        touch(&temp_dir.join("missing_suffix_.webm"));
+        touch(&temp_dir.path().join("my_title_C9ww_8cg_5g.mkv"));
+        touch(&temp_dir.path().join("another_title_abc123DEF45.mp4"));
+        touch(&temp_dir.path().join("skip_me.txt"));
+        touch(&temp_dir.path().join("missing_suffix_.webm"));
 
-        let ids = collect_cached_video_ids_from_dir(&temp_dir);
+        let ids = collect_cached_video_ids_from_dir(temp_dir.path());
         assert!(ids.contains("C9ww_8cg_5g"));
         assert!(ids.contains("abc123DEF45"));
         assert_eq!(ids.len(), 2);
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn remove_cached_video_files_removes_all_matching_extensions() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
 
         touch(&storage.videos_dir.join("title_C9ww_8cg_5g.mkv"));
         touch(&storage.videos_dir.join("title_C9ww_8cg_5g.mp4"));
@@ -892,14 +899,12 @@ mod tests {
         assert_eq!(removed_count, 2);
         assert!(storage.find_video_path("C9ww_8cg_5g").is_none());
         assert!(storage.find_video_path("abc123DEF45").is_some());
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn cleanup_unreferenced_cache_files_keeps_only_state_referenced_cache_artifacts() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
 
         let valid_video_id = "C9ww_8cg_5g";
         let stale_video_id = "abc123DEF45";
@@ -965,14 +970,12 @@ mod tests {
         }
         assert!(!storage.cache_dir.join("unknown_dir").exists());
         assert!(storage.transcripts_work_dir.exists());
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn save_videos_recreates_missing_cache_directories() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
         std::fs::remove_dir_all(&storage.cache_dir).expect("cache dir should be removable");
 
         storage
@@ -984,14 +987,12 @@ mod tests {
         assert!(storage.videos_dir.exists());
         assert!(storage.video_sidecars_dir.exists());
         assert!(storage.transcripts_work_dir.exists());
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn saving_sidecar_fields_does_not_rewrite_videos_cache_file() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
         let video = sample_video("abc123");
         storage
             .save_videos(&[video])
@@ -1014,14 +1015,12 @@ mod tests {
             .expect("Expected sidecar to be written");
         assert_eq!(sidecar.transcript.as_deref(), Some("Transcript body"));
         assert_eq!(sidecar.ai_summary.as_deref(), Some("Summary body"));
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn feed_video_ids_round_trip_in_display_order() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
         let ids = vec!["b".to_string(), "a".to_string(), "c".to_string()];
 
         storage
@@ -1029,13 +1028,12 @@ mod tests {
             .expect("feed IDs should save");
 
         assert_eq!(storage.load_feed_video_ids(), Some(ids));
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn missing_watch_later_videos_are_rebuilt_from_info_json() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
         let video_id = "C9ww_8cg_5g";
         std::fs::write(
             storage
@@ -1064,13 +1062,12 @@ mod tests {
         assert_eq!(repaired[0].channel_id(), "UC123");
         assert_eq!(repaired[0].channel_name(), "Local Channel");
         assert_eq!(repaired[0].duration_seconds(), Some(91));
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn missing_watch_later_repair_skips_known_or_unlisted_ids() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
         let video_id = "C9ww_8cg_5g";
         std::fs::write(
             storage
@@ -1093,13 +1090,12 @@ mod tests {
                 .load_missing_watch_later_videos_from_info_json(&HashSet::new(), &HashSet::new())
                 .is_empty()
         );
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn load_videos_applies_sidecar_fields() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
 
         storage
             .save_videos(&[sample_video("mixed456")])
@@ -1125,14 +1121,12 @@ mod tests {
             .expect("Video should be present");
         assert_eq!(mixed_loaded.transcript(), Some("sidecar transcript"));
         assert_eq!(mixed_loaded.ai_summary(), Some("sidecar summary"));
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 
     #[test]
     fn hydrate_videos_from_sidecars_applies_metadata_for_existing_ids() {
         let temp_dir = create_unique_temp_dir();
-        let storage = create_test_storage(&temp_dir);
+        let storage = create_test_storage(temp_dir.path());
 
         storage
             .write_video_sidecar(
@@ -1161,7 +1155,5 @@ mod tests {
             .expect("Untouched video should be present");
         assert_eq!(untouched.transcript(), None);
         assert_eq!(untouched.ai_summary(), None);
-
-        std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 }
