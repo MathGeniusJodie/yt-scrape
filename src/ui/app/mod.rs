@@ -231,36 +231,44 @@ impl AppState {
         }
     }
 
+    /// Queues `save` on the sidecar persister and mirrors the same mutation
+    /// onto the in-memory video via `update`.
+    fn apply_sidecar_mutation(
+        &mut self,
+        video_id: &str,
+        save: SidecarSave,
+        update: impl FnOnce(&mut Video),
+    ) -> Result<(), CacheVideoError> {
+        self.queue_sidecar_save(save);
+        let video =
+            self.video_by_id_mut(video_id)
+                .ok_or_else(|| CacheVideoError::MissingVideo {
+                    video_id: video_id.to_string(),
+                })?;
+        update(video);
+        Ok(())
+    }
+
     fn cache_video_transcript(
         &mut self,
         video_id: &str,
         transcript: String,
     ) -> Result<(), CacheVideoError> {
-        self.queue_sidecar_save(SidecarSave::Transcript {
+        let save = SidecarSave::Transcript {
             video_id: video_id.to_string(),
             text: transcript.clone(),
-        });
-        let video =
-            self.video_by_id_mut(video_id)
-                .ok_or_else(|| CacheVideoError::MissingVideo {
-                    video_id: video_id.to_string(),
-                })?;
-        video.set_transcript(Some(transcript));
-        Ok(())
+        };
+        self.apply_sidecar_mutation(video_id, save, |video| {
+            video.set_transcript(Some(transcript));
+        })
     }
 
     fn set_video_watched(&mut self, video_id: &str, watched: bool) -> Result<(), CacheVideoError> {
-        self.queue_sidecar_save(SidecarSave::Watched {
+        let save = SidecarSave::Watched {
             video_id: video_id.to_string(),
             watched,
-        });
-        let video =
-            self.video_by_id_mut(video_id)
-                .ok_or_else(|| CacheVideoError::MissingVideo {
-                    video_id: video_id.to_string(),
-                })?;
-        video.set_watched(watched);
-        Ok(())
+        };
+        self.apply_sidecar_mutation(video_id, save, |video| video.set_watched(watched))
     }
 
     fn cache_video_ai_summary(
@@ -268,17 +276,13 @@ impl AppState {
         video_id: &str,
         ai_summary: String,
     ) -> Result<(), CacheVideoError> {
-        self.queue_sidecar_save(SidecarSave::Summary {
+        let save = SidecarSave::Summary {
             video_id: video_id.to_string(),
             text: ai_summary.clone(),
-        });
-        let video =
-            self.video_by_id_mut(video_id)
-                .ok_or_else(|| CacheVideoError::MissingVideo {
-                    video_id: video_id.to_string(),
-                })?;
-        video.set_ai_summary(Some(ai_summary));
-        Ok(())
+        };
+        self.apply_sidecar_mutation(video_id, save, |video| {
+            video.set_ai_summary(Some(ai_summary));
+        })
     }
 
     /// Videos worth persisting to `videos.json`: current feed and Watch Later
@@ -488,64 +492,64 @@ where
     });
 }
 
-/// Starts the single consumer task that persists watch-later snapshots strictly
-/// in the order they were produced, so rapid toggles can never be clobbered by
-/// an older snapshot finishing last.
-fn spawn_watch_later_persister(
+/// Starts a single consumer that applies queued items strictly in send order on
+/// the blocking pool, logging failures under `description`. Ordered consumption
+/// keeps read-modify-write persistence cycles from interleaving. When
+/// `coalesce` is set, queued items are drained so only the newest hits disk.
+fn spawn_ordered_persister<T, E, F>(
     runtime: &Arc<Runtime>,
-    storage: Storage,
-) -> async_channel::Sender<HashSet<String>> {
-    let (tx, rx) = async_channel::unbounded::<HashSet<String>>();
+    description: &'static str,
+    coalesce: bool,
+    apply: F,
+) -> async_channel::Sender<T>
+where
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: Fn(T) -> Result<(), E> + Clone + Send + Sync + 'static,
+{
+    let (tx, rx) = async_channel::unbounded::<T>();
     runtime.spawn(async move {
-        while let Ok(mut snapshot) = rx.recv().await {
-            // Coalesce queued snapshots; only the newest needs to hit disk.
-            while let Ok(newer_snapshot) = rx.try_recv() {
-                snapshot = newer_snapshot;
+        while let Ok(mut item) = rx.recv().await {
+            if coalesce {
+                while let Ok(newer_item) = rx.try_recv() {
+                    item = newer_item;
+                }
             }
-            let storage = storage.clone();
-            let save_result =
-                tokio::task::spawn_blocking(move || storage.save_watch_later(&snapshot)).await;
-            match save_result {
+            let apply = apply.clone();
+            match tokio::task::spawn_blocking(move || apply(item)).await {
                 Ok(Ok(())) => {}
-                Ok(Err(save_error)) => error!("Failed to persist watch-later list: {save_error}"),
-                Err(join_error) => error!("Watch-later persistence task failed: {join_error}"),
+                Ok(Err(save_error)) => error!("Failed to persist {description}: {save_error}"),
+                Err(join_error) => error!("{description} persistence task failed: {join_error}"),
             }
         }
     });
     tx
 }
 
-/// Starts the single consumer that applies sidecar mutations strictly in the
-/// order they were produced, keeping per-video read-modify-write cycles off
-/// the main thread without letting them interleave.
+/// Starts the ordered persister for watch-later snapshots; rapid toggles can
+/// never be clobbered by an older snapshot finishing last.
+fn spawn_watch_later_persister(
+    runtime: &Arc<Runtime>,
+    storage: Storage,
+) -> async_channel::Sender<HashSet<String>> {
+    spawn_ordered_persister(runtime, "watch-later list", true, move |snapshot| {
+        storage.save_watch_later(&snapshot)
+    })
+}
+
+/// Starts the ordered persister that applies sidecar mutations, keeping
+/// per-video read-modify-write cycles off the main thread.
 fn spawn_sidecar_persister(
     runtime: &Arc<Runtime>,
     storage: Storage,
 ) -> async_channel::Sender<SidecarSave> {
-    let (tx, rx) = async_channel::unbounded::<SidecarSave>();
-    runtime.spawn(async move {
-        while let Ok(save) = rx.recv().await {
-            let storage = storage.clone();
-            let save_result = tokio::task::spawn_blocking(move || match save {
-                SidecarSave::Watched { video_id, watched } => {
-                    storage.save_video_watched(&video_id, watched)
-                }
-                SidecarSave::Transcript { video_id, text } => {
-                    storage.save_transcript(&video_id, &text)
-                }
-                SidecarSave::Summary { video_id, text } => {
-                    storage.save_video_summary(&video_id, &text)
-                }
-            })
-            .await;
-            match save_result {
-                Ok(Ok(())) => {}
-                Ok(Err(save_error)) => error!("Failed to persist video sidecar: {save_error}"),
-                Err(join_error) => error!("Sidecar persistence task failed: {join_error}"),
-            }
+    spawn_ordered_persister(runtime, "video sidecar", false, move |save| match save {
+        SidecarSave::Watched { video_id, watched } => {
+            storage.save_video_watched(&video_id, watched)
         }
-    });
-    tx
+        SidecarSave::Transcript { video_id, text } => storage.save_transcript(&video_id, &text),
+        SidecarSave::Summary { video_id, text } => storage.save_video_summary(&video_id, &text),
+    })
 }
 
 fn remove_channel_from_subs_file(subs_file: &Path, channel_id: &str) -> std::io::Result<()> {
@@ -567,31 +571,16 @@ fn remove_channel_from_subs_file(subs_file: &Path, channel_id: &str) -> std::io:
     crate::cache::write_text_atomic(subs_file, &output)
 }
 
-/// Starts the single consumer that rewrites the subscriptions file strictly in
-/// request order, so rapid unsubscribes can never interleave their
-/// read-modify-write cycles and resurrect a removed channel.
+/// Starts the ordered persister that rewrites the subscriptions file, so rapid
+/// unsubscribes can never interleave their read-modify-write cycles and
+/// resurrect a removed channel.
 fn spawn_subscription_remover(
     runtime: &Arc<Runtime>,
     subs_file: PathBuf,
 ) -> async_channel::Sender<String> {
-    let (tx, rx) = async_channel::unbounded::<String>();
-    runtime.spawn(async move {
-        while let Ok(channel_id) = rx.recv().await {
-            let subs_file = subs_file.clone();
-            let remove_result = tokio::task::spawn_blocking(move || {
-                remove_channel_from_subs_file(&subs_file, &channel_id)
-            })
-            .await;
-            match remove_result {
-                Ok(Ok(())) => {}
-                Ok(Err(save_error)) => {
-                    error!("Failed to persist subscription removal: {save_error}");
-                }
-                Err(join_error) => error!("Subscription removal task failed: {join_error}"),
-            }
-        }
-    });
-    tx
+    spawn_ordered_persister(runtime, "subscription removal", false, move |channel_id: String| {
+        remove_channel_from_subs_file(&subs_file, &channel_id)
+    })
 }
 
 fn persist_videos(runtime: &Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
@@ -625,19 +614,14 @@ fn resolve_playback_path(
     video_title: &str,
     local_path: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    match local_path {
-        Some(path) if is_legacy_download(&path) => {
-            // Legacy downloads lack embedded chapter/caption metadata. Upgrade in
-            // background — but only for Watch Later videos, since the cache policy
-            // deletes downloads of anything else — and still play the local file.
-            if state_rc.borrow().watch_later.contains(video_id) {
-                start_tracked_download(state_rc, ui_context, video_id, video_title);
-            }
-            Some(path)
-        }
-        Some(path) => Some(path),
-        None => None,
+    let path = local_path?;
+    // Legacy downloads lack embedded chapter/caption metadata. Upgrade in
+    // background — but only for Watch Later videos, since the cache policy
+    // deletes downloads of anything else — and still play the local file.
+    if is_legacy_download(&path) && state_rc.borrow().watch_later.contains(video_id) {
+        start_tracked_download(state_rc, ui_context, video_id, video_title);
     }
+    Some(path)
 }
 
 fn perform_watch_later_toggle(

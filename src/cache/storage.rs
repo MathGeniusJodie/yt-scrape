@@ -616,9 +616,19 @@ impl Storage {
     ///
     /// Returns an error if directory scanning or file deletion fails.
     pub fn remove_cached_video_files(&self, video_id: &str) -> StorageResult<usize> {
+        self.remove_video_files_matching(video_id, |_| true)
+    }
+
+    /// Deletes cached files for `video_id` whose path satisfies `should_remove`,
+    /// returning the number of files removed.
+    fn remove_video_files_matching(
+        &self,
+        video_id: &str,
+        should_remove: impl Fn(&Path) -> bool,
+    ) -> StorageResult<usize> {
         let mut removed_count = 0usize;
         for (path, id) in self.scan_video_files()? {
-            if id == video_id {
+            if id == video_id && should_remove(&path) {
                 std::fs::remove_file(path)?;
                 removed_count += 1;
             }
@@ -641,14 +651,9 @@ impl Storage {
     ///
     /// Returns an error if directory scanning or file deletion fails.
     pub fn remove_legacy_video_files(&self, video_id: &str) -> StorageResult<usize> {
-        let mut removed_count = 0usize;
-        for (path, id) in self.scan_video_files()? {
-            if id == video_id && path.extension().and_then(OsStr::to_str) != Some("mkv") {
-                std::fs::remove_file(path)?;
-                removed_count += 1;
-            }
-        }
-        Ok(removed_count)
+        self.remove_video_files_matching(video_id, |path| {
+            path.extension().and_then(OsStr::to_str) != Some("mkv")
+        })
     }
 
     fn video_sidecar_path(&self, video_id: &str) -> PathBuf {
