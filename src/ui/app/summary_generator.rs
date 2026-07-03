@@ -2,26 +2,30 @@ use super::cards::refresh_video_summary_badges;
 use super::{AppContext, AppState, CacheVideoError};
 use crate::cache::fetch_transcript;
 use crate::data::Video;
-use crate::summary::{summarize_video_streaming, StreamingMessage};
+use crate::summary::{SummaryOutcome, summarize_video};
 use crate::ui::dialogs::{create_text_dialog, show_text_dialog};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Orientation};
-use log::error;
+use log::{error, info};
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::runtime::Runtime;
+
+const TRANSCRIPT_FALLBACK_NOTICE: &str =
+    "No AI provider was available; showing the raw transcript instead.\n\n";
 
 /// Configures request guards for starting summary generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SummaryGenerationMode {
     /// Skip generation if a summary exists or one is already running.
     Prefetch,
-    /// Always start a new generation for explicit user actions.
+    /// Start a new generation for explicit user actions (still refuses to run
+    /// concurrently with another generation for the same video).
     Interactive,
 }
 
@@ -36,21 +40,15 @@ pub(super) enum StartSummaryGenerationError {
     AlreadyInProgress,
 }
 
-/// Stream-consumption errors for summary generation.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub(super) enum SummaryGenerationError {
-    #[error("{0}")]
-    Stream(String),
-    #[error("Summary was empty")]
-    EmptySummary,
-}
-
 /// Service responsible for summary generation orchestration.
+///
+/// Main-thread only: generation results are delivered back to the GLib main
+/// context, so the in-progress guard needs no cross-thread synchronization.
 #[derive(Clone)]
 pub(super) struct SummaryGenerator {
     runtime: Arc<Runtime>,
     http_client: reqwest::Client,
-    summaries_in_progress: Arc<RwLock<HashSet<String>>>,
+    summaries_in_progress: Rc<RefCell<HashSet<String>>>,
 }
 
 impl SummaryGenerator {
@@ -59,11 +57,11 @@ impl SummaryGenerator {
         Self {
             runtime,
             http_client,
-            summaries_in_progress: Arc::new(RwLock::new(HashSet::new())),
+            summaries_in_progress: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
-    /// Validates inputs and starts a background summary stream.
+    /// Validates inputs and starts a background summarization task.
     ///
     /// # Errors
     ///
@@ -74,45 +72,33 @@ impl SummaryGenerator {
         video_id: &str,
         mode: SummaryGenerationMode,
     ) -> Result<SummaryGenerationTask, StartSummaryGenerationError> {
-        if matches!(mode, SummaryGenerationMode::Prefetch)
-            && self
-                .summaries_in_progress
-                .read()
-                .expect("summary in-progress rwlock must not be poisoned")
-                .contains(video_id)
-        {
-            return Err(StartSummaryGenerationError::AlreadyInProgress);
-        }
-
-        let video = {
+        let (video, transcripts_work_dir) = {
             let state = state_rc.borrow();
-            let mut summaries_in_progress = self
-                .summaries_in_progress
-                .write()
-                .expect("summary in-progress rwlock must not be poisoned");
-            prepare_summary_generation_video(&state, &mut summaries_in_progress, video_id, mode)?
-        };
-
-        let transcripts_work_dir = {
-            let state = state_rc.borrow();
-            state.storage.transcripts_work_dir().to_path_buf()
+            let video = prepare_summary_generation_video(
+                &state,
+                &mut self.summaries_in_progress.borrow_mut(),
+                video_id,
+                mode,
+            )?;
+            (video, state.storage.transcripts_work_dir().to_path_buf())
         };
 
         let task_video_id = video.video_id().to_string();
-        let (tx, result_rx) = async_channel::unbounded::<StreamingMessage>();
+        let (tx, result_rx) = async_channel::bounded::<Result<SummaryOutcome, String>>(1);
         let http_client = self.http_client.clone();
         self.runtime.spawn(async move {
             let video_url = video.watch_url();
-            summarize_video_streaming(
-                http_client,
+            let result = summarize_video(
+                &http_client,
                 video.video_id(),
                 &video_url,
                 video.title(),
                 video.channel_name(),
                 &transcripts_work_dir,
-                tx,
             )
-            .await;
+            .await
+            .map_err(|summary_error| summary_error.to_string());
+            let _ = tx.send(result).await;
         });
 
         Ok(SummaryGenerationTask {
@@ -121,31 +107,12 @@ impl SummaryGenerator {
         })
     }
 
-    /// Removes a video's in-progress marker after a failed or cancelled generation.
+    /// Removes a video's in-progress marker after a completed or failed generation.
     pub(super) fn clear_in_progress(&self, video_id: &str) {
-        self.summaries_in_progress
-            .write()
-            .expect("summary in-progress rwlock must not be poisoned")
-            .remove(video_id);
+        self.summaries_in_progress.borrow_mut().remove(video_id);
     }
 
-    /// Persists the final summary and clears the in-progress marker.
-    pub(super) fn persist_summary(
-        &self,
-        state_rc: &Rc<RefCell<AppState>>,
-        video_id: &str,
-        summary: String,
-    ) -> Result<(), CacheVideoError> {
-        self.summaries_in_progress
-            .write()
-            .expect("summary in-progress rwlock must not be poisoned")
-            .remove(video_id);
-        state_rc
-            .borrow_mut()
-            .cache_video_ai_summary(video_id, summary)
-    }
-
-    /// Persists a summary and refreshes the UI badge for the given video.
+    /// Persists a summary, clears the in-progress marker, and refreshes the UI badge.
     ///
     /// # Errors
     ///
@@ -157,7 +124,10 @@ impl SummaryGenerator {
         video_id: &str,
         summary: String,
     ) -> Result<(), CacheVideoError> {
-        self.persist_summary(state_rc, video_id, summary)?;
+        self.clear_in_progress(video_id);
+        state_rc
+            .borrow_mut()
+            .cache_video_ai_summary(video_id, summary)?;
         let has_summary = state_rc
             .borrow()
             .video_by_id(video_id)
@@ -165,12 +135,28 @@ impl SummaryGenerator {
         refresh_video_summary_badges(ui_context, video_id, has_summary);
         Ok(())
     }
+
+    /// Clears the in-progress marker and caches a fallback transcript (never as a summary).
+    fn cache_transcript_fallback(
+        &self,
+        state_rc: &Rc<RefCell<AppState>>,
+        video_id: &str,
+        transcript: String,
+    ) {
+        self.clear_in_progress(video_id);
+        if let Err(cache_error) = state_rc
+            .borrow_mut()
+            .cache_video_transcript(video_id, transcript)
+        {
+            error!("Failed to cache fallback transcript for {video_id}: {cache_error}");
+        }
+    }
 }
 
-/// In-flight summary stream handle.
+/// In-flight summarization handle.
 pub(super) struct SummaryGenerationTask {
     video_id: String,
-    result_rx: async_channel::Receiver<StreamingMessage>,
+    result_rx: async_channel::Receiver<Result<SummaryOutcome, String>>,
 }
 
 impl SummaryGenerationTask {
@@ -179,48 +165,17 @@ impl SummaryGenerationTask {
         &self.video_id
     }
 
-    /// Collects the full summary body.
+    /// Waits for the summarization result.
     ///
     /// # Errors
     ///
-    /// Returns [`SummaryGenerationError`] if streaming fails or produces empty output.
-    pub(super) async fn collect(self) -> Result<String, SummaryGenerationError> {
-        self.collect_with_chunks(|_| {}).await
-    }
-
-    /// Collects a full summary while forwarding each chunk to `on_chunk`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SummaryGenerationError`] if streaming fails or produces empty output.
-    pub(super) async fn collect_with_chunks<F>(
-        self,
-        mut on_chunk: F,
-    ) -> Result<String, SummaryGenerationError>
-    where
-        F: FnMut(&str),
-    {
-        let mut summary = String::new();
-
-        while let Ok(message) = self.result_rx.recv().await {
-            match message {
-                StreamingMessage::Chunk(text) => {
-                    on_chunk(&text);
-                    summary.push_str(&text);
-                }
-                StreamingMessage::Done => break,
-                StreamingMessage::Error(error_text) => {
-                    return Err(SummaryGenerationError::Stream(error_text));
-                }
-            }
-        }
-
-        let summary = summary.trim().to_string();
-        if summary.is_empty() {
-            Err(SummaryGenerationError::EmptySummary)
-        } else {
-            Ok(summary)
-        }
+    /// Returns the provider failure description when summarization fails or the
+    /// background task is dropped before producing a result.
+    pub(super) async fn wait(self) -> Result<SummaryOutcome, String> {
+        self.result_rx
+            .recv()
+            .await
+            .unwrap_or_else(|_| Err("summary task ended without a result".to_string()))
     }
 }
 
@@ -234,12 +189,10 @@ fn prepare_summary_generation_video(
         return Err(StartSummaryGenerationError::MissingVideo);
     };
 
-    let has_cached_summary = video.has_ai_summary();
-
-    if matches!(mode, SummaryGenerationMode::Prefetch) && has_cached_summary {
+    if matches!(mode, SummaryGenerationMode::Prefetch) && video.has_ai_summary() {
         return Err(StartSummaryGenerationError::AlreadyCached);
     }
-    if matches!(mode, SummaryGenerationMode::Prefetch) && summaries_in_progress.contains(video_id) {
+    if summaries_in_progress.contains(video_id) {
         return Err(StartSummaryGenerationError::AlreadyInProgress);
     }
 
@@ -272,12 +225,8 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
     let ui_context = ui_context.clone();
     glib::MainContext::default().spawn_local(async move {
         let video_id = generation_task.video_id().to_string();
-        match generation_task.collect().await {
-            Err(generation_error) => {
-                summary_generator.clear_in_progress(&video_id);
-                error!("Failed to prefetch summary for {video_id}: {generation_error}");
-            }
-            Ok(summary) => {
+        match generation_task.wait().await {
+            Ok(SummaryOutcome::Summary(summary)) => {
                 if let Err(cache_error) = summary_generator.persist_and_refresh(
                     &state_rc,
                     &ui_context,
@@ -287,13 +236,16 @@ pub(super) fn maybe_prefetch_summary_for_watch_later(
                     error!("Failed to cache prefetched summary for {video_id}: {cache_error}");
                 }
             }
+            Ok(SummaryOutcome::TranscriptOnly(transcript)) => {
+                info!("Prefetch for {video_id} produced only a transcript; not cached as summary");
+                summary_generator.cache_transcript_fallback(&state_rc, &video_id, transcript);
+            }
+            Err(generation_error) => {
+                summary_generator.clear_in_progress(&video_id);
+                error!("Failed to prefetch summary for {video_id}: {generation_error}");
+            }
         }
     });
-}
-
-fn insert_stream_chunk(buffer: &gtk::TextBuffer, text: &str) {
-    let mut end = buffer.end_iter();
-    buffer.insert(&mut end, text);
 }
 
 fn start_summary_generation_for_dialog(
@@ -311,15 +263,10 @@ fn start_summary_generation_for_dialog(
     let generation_task =
         match summary_generator.start(state_rc, video_id, SummaryGenerationMode::Interactive) {
             Ok(task) => task,
-            Err(StartSummaryGenerationError::MissingVideo) => {
-                buffer.set_text("Error: Video is no longer available.");
-                regenerate_button.set_sensitive(true);
-                error!("Cannot generate summary for missing video {video_id}");
-                return;
-            }
             Err(start_error) => {
                 buffer.set_text(&format!("Error: {start_error}"));
                 regenerate_button.set_sensitive(true);
+                error!("Cannot generate summary for {video_id}: {start_error}");
                 return;
             }
         };
@@ -330,34 +277,29 @@ fn start_summary_generation_for_dialog(
     let regenerate_button = regenerate_button.clone();
     glib::MainContext::default().spawn_local(async move {
         let video_id = generation_task.video_id().to_string();
-        let mut received_chunk = false;
-        let generation_result = generation_task
-            .collect_with_chunks(|text| {
-                if !received_chunk {
-                    buffer.set_text("");
-                    received_chunk = true;
-                }
-                insert_stream_chunk(&buffer, text);
-            })
-            .await;
-
+        let generation_result = generation_task.wait().await;
         regenerate_button.set_sensitive(true);
 
         match generation_result {
-            Err(generation_error) => {
-                summary_generator.clear_in_progress(&video_id);
-                buffer.set_text(&format!("Error: {generation_error}"));
-            }
-            Ok(summary) => {
+            Ok(SummaryOutcome::Summary(summary)) => {
+                buffer.set_text(&summary);
                 if let Err(cache_error) = summary_generator.persist_and_refresh(
                     &state_rc,
                     &ui_context,
                     &video_id,
-                    summary,
+                    summary.clone(),
                 ) {
                     buffer.set_text(&format!("Error: {cache_error}"));
                     error!("Failed to cache interactive summary for {video_id}: {cache_error}");
                 }
+            }
+            Ok(SummaryOutcome::TranscriptOnly(transcript)) => {
+                buffer.set_text(&format!("{TRANSCRIPT_FALLBACK_NOTICE}{transcript}"));
+                summary_generator.cache_transcript_fallback(&state_rc, &video_id, transcript);
+            }
+            Err(generation_error) => {
+                summary_generator.clear_in_progress(&video_id);
+                buffer.set_text(&format!("Error: {generation_error}"));
             }
         }
     });
@@ -510,12 +452,12 @@ pub(super) fn show_transcript_dialog(
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_summary_generation_video, StartSummaryGenerationError, SummaryGenerationError,
-        SummaryGenerationMode, SummaryGenerationTask,
+        StartSummaryGenerationError, SummaryGenerationMode, SummaryGenerationTask,
+        prepare_summary_generation_video,
     };
     use crate::cache::Storage;
-    use crate::data::Video;
-    use crate::summary::StreamingMessage;
+    use crate::data::{NewVideo, Video};
+    use crate::summary::SummaryOutcome;
     use crate::ui::app::AppState;
 
     use chrono::Utc;
@@ -557,15 +499,15 @@ mod tests {
     }
 
     fn test_video(video_id: &str) -> Video {
-        Video::new(
-            video_id.to_string(),
-            "channel-id".to_string(),
-            "Channel".to_string(),
-            "Video Title",
-            Utc::now(),
-            "https://example.com/thumb.jpg".to_string(),
-            None,
-        )
+        Video::new(NewVideo {
+            video_id: video_id.to_string(),
+            channel_id: "channel-id".to_string(),
+            channel_name: "Channel".to_string(),
+            title: "Video Title".to_string(),
+            published: Utc::now(),
+            thumbnail_url: "https://example.com/thumb.jpg".to_string(),
+            duration_seconds: None,
+        })
     }
 
     fn test_state(videos: Vec<Video>) -> (AppState, TestDirs) {
@@ -662,7 +604,7 @@ mod tests {
         let mut video = test_video(video_id);
         video.set_ai_summary(Some("cached summary".to_string()));
         let (state, _dirs) = test_state(vec![video]);
-        let mut summaries_in_progress = HashSet::from([video_id.to_string()]);
+        let mut summaries_in_progress = HashSet::new();
 
         let result = prepare_summary_generation_video(
             &state,
@@ -676,36 +618,47 @@ mod tests {
         assert!(summaries_in_progress.contains(video_id));
     }
 
-    #[tokio::test]
-    async fn collect_with_chunks_returns_trimmed_summary() {
-        let (tx, rx) = async_channel::unbounded();
-        tx.send(StreamingMessage::Chunk(" hello".to_string()))
-            .await
-            .expect("chunk send should succeed");
-        tx.send(StreamingMessage::Chunk(" world ".to_string()))
-            .await
-            .expect("chunk send should succeed");
-        tx.send(StreamingMessage::Done)
-            .await
-            .expect("done send should succeed");
+    #[test]
+    fn prepare_request_refuses_concurrent_interactive_generation() {
+        let video_id = "video-id";
+        let (state, _dirs) = test_state(vec![test_video(video_id)]);
+        let mut summaries_in_progress = HashSet::from([video_id.to_string()]);
 
-        let mut rendered = String::new();
-        let summary = SummaryGenerationTask {
-            video_id: "video-id".to_string(),
-            result_rx: rx,
-        }
-        .collect_with_chunks(|chunk| rendered.push_str(chunk))
-        .await
-        .expect("summary should be collected");
+        let result = prepare_summary_generation_video(
+            &state,
+            &mut summaries_in_progress,
+            video_id,
+            SummaryGenerationMode::Interactive,
+        );
 
-        assert_eq!(summary, "hello world");
-        assert_eq!(rendered, " hello world ");
+        assert!(matches!(
+            result,
+            Err(StartSummaryGenerationError::AlreadyInProgress)
+        ));
     }
 
     #[tokio::test]
-    async fn collect_returns_stream_error() {
-        let (tx, rx) = async_channel::unbounded();
-        tx.send(StreamingMessage::Error("provider failed".to_string()))
+    async fn wait_returns_summary_outcome() {
+        let (tx, rx) = async_channel::bounded(1);
+        tx.send(Ok(SummaryOutcome::Summary("hello world".to_string())))
+            .await
+            .expect("result send should succeed");
+
+        let outcome = SummaryGenerationTask {
+            video_id: "video-id".to_string(),
+            result_rx: rx,
+        }
+        .wait()
+        .await
+        .expect("summary should be produced");
+
+        assert_eq!(outcome, SummaryOutcome::Summary("hello world".to_string()));
+    }
+
+    #[tokio::test]
+    async fn wait_returns_stream_error() {
+        let (tx, rx) = async_channel::bounded(1);
+        tx.send(Err("provider failed".to_string()))
             .await
             .expect("error send should succeed");
 
@@ -713,34 +666,24 @@ mod tests {
             video_id: "video-id".to_string(),
             result_rx: rx,
         }
-        .collect()
+        .wait()
         .await;
 
-        assert_eq!(
-            result,
-            Err(SummaryGenerationError::Stream(
-                "provider failed".to_string()
-            ))
-        );
+        assert_eq!(result, Err("provider failed".to_string()));
     }
 
     #[tokio::test]
-    async fn collect_returns_empty_summary_error() {
-        let (tx, rx) = async_channel::unbounded();
-        tx.send(StreamingMessage::Chunk("   ".to_string()))
-            .await
-            .expect("chunk send should succeed");
-        tx.send(StreamingMessage::Done)
-            .await
-            .expect("done send should succeed");
+    async fn wait_reports_dropped_task() {
+        let (tx, rx) = async_channel::bounded::<Result<SummaryOutcome, String>>(1);
+        drop(tx);
 
         let result = SummaryGenerationTask {
             video_id: "video-id".to_string(),
             result_rx: rx,
         }
-        .collect()
+        .wait()
         .await;
 
-        assert_eq!(result, Err(SummaryGenerationError::EmptySummary));
+        assert!(result.is_err());
     }
 }

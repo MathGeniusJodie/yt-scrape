@@ -2,34 +2,31 @@ mod cards;
 mod comments;
 mod summary_generator;
 
-use crate::cache::{download_video, Storage, StorageError};
+use crate::cache::{Storage, StorageError, download_video};
 use crate::data::{Tab, Video};
-use crate::feed::{fetch_all_feeds, fetch_youtube_search, load_channel_ids, FetchProgress};
+use crate::feed::{FetchProgress, fetch_all_feeds, fetch_youtube_search, load_channel_ids};
+use crate::frogpoints;
 use cards::VideoCardWidgets;
 
 use adw::prelude::*;
-use gtk::{gdk, glib};
 use gtk::{Button, FlowBox, Label, Popover, Spinner};
+use gtk::{gdk, glib};
 use indexmap::IndexMap;
 use log::{error, info, warn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::runtime::Runtime;
 
 use cards::{
     create_context_menu, download_missing_thumbnails, populate_flow_box,
-    refresh_video_downloaded_badge, refresh_video_downloading_badge, sync_watch_later_card,
-    update_watch_later_toggles,
+    refresh_video_download_failed_badge, refresh_video_downloaded_badge,
+    refresh_video_downloading_badge, sync_watch_later_card, update_watch_later_toggles,
 };
-use summary_generator::{maybe_prefetch_summary_for_watch_later, SummaryGenerator};
+use summary_generator::{SummaryGenerator, maybe_prefetch_summary_for_watch_later};
 
 struct AppState {
     videos: IndexMap<String, Video>,
@@ -222,29 +219,8 @@ struct AppContext {
     search_cards: CardMap,
     watch_later_cards: CardMap,
     subs_file: PathBuf,
-}
-
-const FROGPOINTS_REFRESH_COST: i64 = 10;
-const FROGPOINTS_LEISURE_COST: i64 = 1;
-const FROGPOINTS_LEISURE_IDLE_SECONDS: u64 = 120;
-const FROGPOINTS_LEISURE_INTERVAL_SECONDS: u32 = 60;
-const FROGPOINTS_RELATIVE_PATH: &[&str] = &["Desktop", "RemoteVault", "frogpoints.md"];
-const SVG_TEMPLATE_RELATIVE_PATH: &[&str] = &["Desktop", "allfiles", "templates"];
-const INKSCAPE_CACHE_RELATIVE_PATH: &[&str] = &[".cache", "inkscape"];
-static FROGPOINTS_LEISURE_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
-
-#[derive(Debug, Error)]
-enum FrogpointsError {
-    #[error("HOME is not set")]
-    MissingHome,
-    #[error("Failed to read frogpoints: {0}")]
-    Read(#[source] std::io::Error),
-    #[error("frogpoints.md must contain a whole number")]
-    InvalidNumber(#[source] std::num::ParseIntError),
-    #[error("Need {cost} frogpoints to refresh, but only {available} remain")]
-    Insufficient { available: i64, cost: i64 },
-    #[error("Failed to save frogpoints: {0}")]
-    Write(#[source] std::io::Error),
+    /// Ordered queue for watch-later persistence (see [`spawn_watch_later_persister`]).
+    watch_later_saves: async_channel::Sender<HashSet<String>>,
 }
 
 fn is_legacy_download(path: &Path) -> bool {
@@ -255,182 +231,23 @@ fn needs_download_upgrade(local_path: Option<&Path>) -> bool {
     local_path.is_none_or(is_legacy_download)
 }
 
-fn frogpoints_path() -> Result<PathBuf, FrogpointsError> {
-    home_relative_path(FROGPOINTS_RELATIVE_PATH)
-}
-
-fn home_relative_path(relative: &[&str]) -> Result<PathBuf, FrogpointsError> {
-    let mut path = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(FrogpointsError::MissingHome)?;
-    path.extend(relative);
-    Ok(path)
-}
-
-/// Directories scanned for recent SVG edits that mark active (non-leisure) work.
-fn svg_watch_dirs() -> Result<[PathBuf; 2], FrogpointsError> {
-    Ok([
-        home_relative_path(SVG_TEMPLATE_RELATIVE_PATH)?,
-        home_relative_path(INKSCAPE_CACHE_RELATIVE_PATH)?,
-    ])
-}
-
-fn read_frogpoints(path: &Path) -> Result<i64, FrogpointsError> {
-    fs::read_to_string(path)
-        .map_err(FrogpointsError::Read)?
-        .trim()
-        .parse::<i64>()
-        .map_err(FrogpointsError::InvalidNumber)
-}
-
-fn debit_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
-    let current = read_frogpoints(path)?;
-
-    if current < cost {
-        return Err(FrogpointsError::Insufficient {
-            available: current,
-            cost,
-        });
-    }
-
-    let remaining = current - cost;
-    fs::write(path, format!("{remaining}\n")).map_err(FrogpointsError::Write)?;
-    Ok(remaining)
-}
-
-fn decrement_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
-    let remaining = read_frogpoints(path)? - cost;
-    fs::write(path, format!("{remaining}\n")).map_err(FrogpointsError::Write)?;
-    Ok(remaining)
-}
-
-fn debit_refresh_frogpoints() -> Result<i64, FrogpointsError> {
-    let path = frogpoints_path()?;
-    debit_frogpoints(&path, FROGPOINTS_REFRESH_COST)
-}
-
-fn has_recent_svg_modification(
-    template_dir: &Path,
-    idle_duration: Duration,
-) -> Result<bool, std::io::Error> {
-    let cutoff = SystemTime::now()
-        .checked_sub(idle_duration)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut pending_dirs = vec![template_dir.to_path_buf()];
-
-    while let Some(dir) = pending_dirs.pop() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                pending_dirs.push(entry.path());
-                continue;
-            }
-
-            let is_svg = entry
-                .path()
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
-            if is_svg && entry.metadata()?.modified()? > cutoff {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-fn mpv_window_exists() -> bool {
-    match Command::new("xdotool")
-        .args(["search", "--class", "mpv"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) => status.success(),
-        Err(error) => {
-            warn!("Failed to query mpv windows with xdotool: {error}");
-            false
-        }
-    }
-}
-
-fn charge_leisure_frogpoint_if_needed() {
-    let watch_dirs = match svg_watch_dirs() {
-        Ok(dirs) => dirs,
-        Err(error) => {
-            warn!("Failed to locate SVG watch directories: {error}");
-            return;
-        }
-    };
-    let idle_duration = Duration::from_secs(FROGPOINTS_LEISURE_IDLE_SECONDS);
-    let recent_svg_modification = watch_dirs.iter().any(|dir| {
-        match has_recent_svg_modification(dir, idle_duration) {
-            Ok(recent) => recent,
-            // A missing directory simply means no recent edits there.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                warn!(
-                    "Failed to inspect SVG directory {}: {}",
-                    dir.display(),
-                    error
-                );
-                false
-            }
-        }
-    });
-
-    if !mpv_window_exists() {
-        return;
-    }
-
-    if recent_svg_modification {
-        info!("Recent SVG modification detected; no leisure mpv minute charged");
-        return;
-    }
-
-    let path = match frogpoints_path() {
-        Ok(path) => path,
-        Err(error) => {
-            warn!("Failed to locate frogpoints file: {error}");
-            return;
-        }
-    };
-
-    match decrement_frogpoints(&path, FROGPOINTS_LEISURE_COST) {
-        Ok(remaining) => info!("Leisure mpv minute charged; {remaining} frogpoints remaining"),
-        Err(error) => warn!("Failed to charge leisure frogpoint: {error}"),
-    }
-}
-
-fn start_frogpoints_leisure_monitor() {
-    if FROGPOINTS_LEISURE_MONITOR_STARTED
-        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-
-    glib::timeout_add_seconds_local(FROGPOINTS_LEISURE_INTERVAL_SECONDS, || {
-        charge_leisure_frogpoint_if_needed();
-        glib::ControlFlow::Continue
-    });
-}
-
+/// Spawns a background video download, reporting completion (`true`) or failure
+/// (`false`) so the UI can always clear the downloading spinner.
 fn spawn_video_download(
     runtime: &Arc<Runtime>,
     video_id: String,
     video_path: PathBuf,
-) -> async_channel::Receiver<String> {
+) -> async_channel::Receiver<bool> {
     let (tx, rx) = async_channel::bounded(1);
     runtime.spawn(async move {
-        if let Err(download_error) = download_video(&video_id, &video_path).await {
-            error!("Failed to download video {video_id}: {download_error}");
-        } else {
-            let _ = tx.send(video_id.clone()).await;
-        }
+        let succeeded = match download_video(&video_id, &video_path).await {
+            Ok(()) => true,
+            Err(download_error) => {
+                error!("Failed to download video {video_id}: {download_error}");
+                false
+            }
+        };
+        let _ = tx.send(succeeded).await;
     });
     rx
 }
@@ -450,10 +267,31 @@ where
     });
 }
 
-fn persist_watch_later(runtime: &Arc<Runtime>, storage: Storage, watch_later: HashSet<String>) {
-    persist_in_background(runtime, "watch-later list", move || {
-        storage.save_watch_later(&watch_later)
+/// Starts the single consumer task that persists watch-later snapshots strictly
+/// in the order they were produced, so rapid toggles can never be clobbered by
+/// an older snapshot finishing last.
+fn spawn_watch_later_persister(
+    runtime: &Arc<Runtime>,
+    storage: Storage,
+) -> async_channel::Sender<HashSet<String>> {
+    let (tx, rx) = async_channel::unbounded::<HashSet<String>>();
+    runtime.spawn(async move {
+        while let Ok(mut snapshot) = rx.recv().await {
+            // Coalesce queued snapshots; only the newest needs to hit disk.
+            while let Ok(newer_snapshot) = rx.try_recv() {
+                snapshot = newer_snapshot;
+            }
+            let storage = storage.clone();
+            let save_result =
+                tokio::task::spawn_blocking(move || storage.save_watch_later(&snapshot)).await;
+            match save_result {
+                Ok(Ok(())) => {}
+                Ok(Err(save_error)) => error!("Failed to persist watch-later list: {save_error}"),
+                Err(join_error) => error!("Watch-later persistence task failed: {join_error}"),
+            }
+        }
     });
+    tx
 }
 
 fn persist_unsubscribe(runtime: &Arc<Runtime>, subs_file: PathBuf, channel_id: String) {
@@ -508,11 +346,11 @@ fn resolve_playback_path(
 
 fn toggle_watch_later_and_download(
     state_rc: &Rc<RefCell<AppState>>,
-    runtime: &Arc<Runtime>,
+    ui_context: &AppContext,
     video_id: &str,
     video_title: &str,
-) -> (bool, Option<async_channel::Receiver<String>>) {
-    let (added, download_rx, storage, watch_later_snapshot) = {
+) -> (bool, Option<async_channel::Receiver<bool>>) {
+    let (added, download_rx, watch_later_snapshot) = {
         let mut state = state_rc.borrow_mut();
         let added = !state.watch_later.remove(video_id);
         if added {
@@ -523,7 +361,7 @@ fn toggle_watch_later_and_download(
         let download_rx = if added && needs_download_upgrade(local_path.as_deref()) {
             let video_path = state.storage.video_path(video_id, video_title);
             Some(spawn_video_download(
-                runtime,
+                &ui_context.runtime,
                 video_id.to_string(),
                 video_path,
             ))
@@ -531,21 +369,20 @@ fn toggle_watch_later_and_download(
             None
         };
 
-        if !added {
-            if let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
-                error!("Failed to remove cached video {video_id}: {remove_error}");
-            }
+        if !added && let Err(remove_error) = state.storage.remove_cached_video_files(video_id) {
+            error!("Failed to remove cached video {video_id}: {remove_error}");
         }
 
-        (
-            added,
-            download_rx,
-            state.storage.clone(),
-            state.watch_later.clone(),
-        )
+        (added, download_rx, state.watch_later.clone())
     };
 
-    persist_watch_later(runtime, storage, watch_later_snapshot);
+    if ui_context
+        .watch_later_saves
+        .send_blocking(watch_later_snapshot)
+        .is_err()
+    {
+        error!("Watch-later persister is gone; changes will not be saved");
+    }
     (added, download_rx)
 }
 
@@ -566,7 +403,7 @@ fn apply_watch_later_action(
     };
 
     let (added, download_rx) =
-        toggle_watch_later_and_download(state_rc, &ui_context.runtime, video_id, &video_title);
+        toggle_watch_later_and_download(state_rc, ui_context, video_id, &video_title);
     update_watch_later_toggles(ui_context, video_id, added);
     update_watch_later_badge(
         &ui_context.watch_later_page,
@@ -578,9 +415,14 @@ fn apply_watch_later_action(
         if let Some(rx) = download_rx {
             refresh_video_downloading_badge(ui_context, video_id);
             let ui_ctx = ui_context.clone();
+            let video_id = video_id.to_string();
             glib::MainContext::default().spawn_local(async move {
-                if let Ok(completed_video_id) = rx.recv().await {
-                    refresh_video_downloaded_badge(&ui_ctx, &completed_video_id);
+                // A closed channel means the download task died; treat as failure
+                // so the spinner never spins forever.
+                if rx.recv().await == Ok(true) {
+                    refresh_video_downloaded_badge(&ui_ctx, &video_id);
+                } else {
+                    refresh_video_download_failed_badge(&ui_ctx, &video_id);
                 }
             });
         }
@@ -851,7 +693,7 @@ fn start_feed_refresh(
     spinner.start();
     status_label.set_text("Refreshing...");
 
-    match debit_refresh_frogpoints() {
+    match frogpoints::debit_refresh_frogpoints() {
         Ok(remaining) => {
             status_label.set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
         }
@@ -947,21 +789,37 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
             warn!("Failed to persist repaired watch-later video metadata: {save_error}");
         }
     }
-    if should_seed_feed_video_ids {
-        if let Err(save_error) = storage.save_feed_video_ids(&feed_video_ids) {
-            warn!("Failed to persist initial feed video IDs: {save_error}");
-        }
+    feed_video_ids.retain(|video_id| known_video_ids.contains(video_id));
+    if should_seed_feed_video_ids
+        && let Err(save_error) = storage.save_feed_video_ids(&feed_video_ids)
+    {
+        warn!("Failed to persist initial feed video IDs: {save_error}");
     }
     let feed_video_id_set = feed_video_ids.iter().cloned().collect::<HashSet<_>>();
 
-    match storage.cleanup_unreferenced_cache_files(&watch_later, &feed_video_id_set) {
-        Ok(removed_count) if removed_count > 0 => {
-            info!("Removed {removed_count} unreferenced cache artifacts");
-        }
-        Ok(_) => {}
-        Err(cleanup_error) => {
-            warn!("Failed to clean up unreferenced cache artifacts: {cleanup_error}");
-        }
+    // Cache pruning walks several directories; keep it off the main thread so
+    // startup stays responsive.
+    {
+        let storage = storage.clone();
+        let watch_later = watch_later.clone();
+        runtime.spawn(async move {
+            let cleanup_result = tokio::task::spawn_blocking(move || {
+                storage.cleanup_unreferenced_cache_files(&watch_later, &feed_video_id_set)
+            })
+            .await;
+            match cleanup_result {
+                Ok(Ok(removed_count)) if removed_count > 0 => {
+                    info!("Removed {removed_count} unreferenced cache artifacts");
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(cleanup_error)) => {
+                    warn!("Failed to clean up unreferenced cache artifacts: {cleanup_error}");
+                }
+                Err(join_error) => {
+                    warn!("Cache cleanup task failed: {join_error}");
+                }
+            }
+        });
     }
 
     let http_client = match reqwest::Client::builder()
@@ -975,7 +833,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         }
     };
 
-    feed_video_ids.retain(|video_id| known_video_ids.contains(video_id));
+    let watch_later_saves = spawn_watch_later_persister(&runtime, storage.clone());
     let state = Rc::new(RefCell::new(AppState::new(
         videos,
         feed_video_ids,
@@ -990,7 +848,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         .default_width(1200)
         .default_height(800)
         .build();
-    start_frogpoints_leisure_monitor();
+    frogpoints::start_leisure_monitor();
 
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_string(include_str!("../style.css"));
@@ -1061,6 +919,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         search_cards,
         watch_later_cards,
         subs_file: subs_file.clone(),
+        watch_later_saves,
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 
@@ -1146,26 +1005,15 @@ fn update_watch_later_badge(page: &adw::ViewStackPage, count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        debit_frogpoints, decrement_frogpoints, has_recent_svg_modification, AppState,
-        FrogpointsError, FROGPOINTS_REFRESH_COST,
-    };
+    use super::AppState;
     use crate::cache::Storage;
-    use crate::data::Video;
+    use crate::data::{NewVideo, Video};
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn temporary_frogpoints_path(test_name: &str) -> PathBuf {
-        let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "yt-gtk-{test_name}-{}-{unique_id}.md",
-            std::process::id()
-        ))
-    }
 
     struct TestDirs {
         root: PathBuf,
@@ -1202,88 +1050,6 @@ mod tests {
         Storage::new_at(dirs.data_dir(), dirs.cache_dir()).expect("test storage must initialize")
     }
 
-    #[test]
-    fn debit_frogpoints_subtracts_cost_and_returns_remaining_balance() {
-        let path = temporary_frogpoints_path("debit");
-        std::fs::write(&path, "18").expect("write test frogpoints file");
-
-        let remaining =
-            debit_frogpoints(&path, FROGPOINTS_REFRESH_COST).expect("debit enough frogpoints");
-
-        assert_eq!(remaining, 8);
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
-            "8\n"
-        );
-
-        std::fs::remove_file(path).expect("remove test frogpoints file");
-    }
-
-    #[test]
-    fn debit_frogpoints_blocks_when_balance_is_too_small() {
-        let path = temporary_frogpoints_path("block");
-        std::fs::write(&path, "9").expect("write test frogpoints file");
-
-        let error = debit_frogpoints(&path, FROGPOINTS_REFRESH_COST)
-            .expect_err("block insufficient frogpoints");
-
-        assert!(matches!(
-            error,
-            FrogpointsError::Insufficient {
-                available: 9,
-                cost: FROGPOINTS_REFRESH_COST
-            }
-        ));
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read unchanged frogpoints file"),
-            "9"
-        );
-
-        std::fs::remove_file(path).expect("remove test frogpoints file");
-    }
-
-    #[test]
-    fn decrement_frogpoints_allows_negative_balances() {
-        let path = temporary_frogpoints_path("decrement");
-        std::fs::write(&path, "0").expect("write test frogpoints file");
-
-        let remaining = decrement_frogpoints(&path, 1).expect("decrement frogpoints");
-
-        assert_eq!(remaining, -1);
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read updated frogpoints file"),
-            "-1\n"
-        );
-
-        std::fs::remove_file(path).expect("remove test frogpoints file");
-    }
-
-    #[test]
-    fn has_recent_svg_modification_ignores_non_svg_files() {
-        let dirs = TestDirs::new();
-        std::fs::write(dirs.root.join("not-svg.txt"), "fresh").expect("write non-svg file");
-
-        let has_recent_svg =
-            has_recent_svg_modification(&dirs.root, std::time::Duration::from_secs(120))
-                .expect("scan temp directory");
-
-        assert!(!has_recent_svg);
-    }
-
-    #[test]
-    fn has_recent_svg_modification_finds_nested_svg_files_case_insensitively() {
-        let dirs = TestDirs::new();
-        let nested_dir = dirs.root.join("nested");
-        std::fs::create_dir_all(&nested_dir).expect("create nested test directory");
-        std::fs::write(nested_dir.join("work.SVG"), "<svg />").expect("write svg file");
-
-        let has_recent_svg =
-            has_recent_svg_modification(&dirs.root, std::time::Duration::from_secs(120))
-                .expect("scan temp directory");
-
-        assert!(has_recent_svg);
-    }
-
     fn test_video(video_id: &str) -> Video {
         test_video_with_metadata(video_id, "channel-name", &format!("title-{video_id}"))
     }
@@ -1294,15 +1060,15 @@ mod tests {
             .single()
             .expect("valid fixed test timestamp");
 
-        Video::new(
-            video_id.to_string(),
-            "channel-id".to_string(),
-            channel_name.to_string(),
-            title,
+        Video::new(NewVideo {
+            video_id: video_id.to_string(),
+            channel_id: "channel-id".to_string(),
+            channel_name: channel_name.to_string(),
+            title: title.to_string(),
             published,
-            "https://example.com/thumb.jpg".to_string(),
-            None,
-        )
+            thumbnail_url: "https://example.com/thumb.jpg".to_string(),
+            duration_seconds: None,
+        })
     }
 
     fn test_state(videos: Vec<Video>, watch_later: HashSet<String>, dirs: &TestDirs) -> AppState {

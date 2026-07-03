@@ -1,4 +1,4 @@
-use crate::data::Video;
+use crate::data::{NewVideo, Video};
 use crate::urls;
 use async_channel::Sender;
 use chrono::{DateTime, Utc};
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 
 const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
@@ -50,7 +50,7 @@ pub enum SearchError {
     MissingApiKey,
     /// `YouTube` search or metadata request failed.
     #[error("YouTube search request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(#[from] ApiRequestError),
 }
 
 /// Errors that can occur while fetching `YouTube` comments.
@@ -61,7 +61,85 @@ pub enum CommentError {
     MissingApiKey,
     /// `YouTube` comments request failed.
     #[error("YouTube comments request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(#[from] ApiRequestError),
+}
+
+/// A failed `YouTube` Data API request with the server's explanation preserved.
+#[derive(Debug, Error)]
+pub enum ApiRequestError {
+    /// Network-level failure (connect, timeout, TLS, ...). The URL is stripped
+    /// so the API key in the query string never reaches logs or the UI.
+    #[error("request failed: {0}")]
+    Transport(reqwest::Error),
+    /// The API returned a non-success status; `message` carries the error body's
+    /// explanation (quota exceeded, invalid key, ...).
+    #[error("HTTP {status}: {message}")]
+    Status {
+        /// HTTP status code returned by the API.
+        status: reqwest::StatusCode,
+        /// Human-readable error message extracted from the response body.
+        message: String,
+    },
+    /// The response body could not be parsed as the expected JSON shape.
+    #[error("failed to parse API response: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
+impl ApiRequestError {
+    fn status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            Self::Transport(error) => error.status(),
+            Self::Status { status, .. } => Some(*status),
+            Self::Parse(_) => None,
+        }
+    }
+
+    fn is_flaky_transport(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.is_timeout() || error.is_connect())
+    }
+}
+
+impl From<reqwest::Error> for ApiRequestError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error.without_url())
+    }
+}
+
+/// Extracts `error.message` from a `YouTube` API error body, falling back to a
+/// truncated raw body.
+fn api_error_message(body: &str) -> String {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: ErrorDetail,
+    }
+    #[derive(Deserialize)]
+    struct ErrorDetail {
+        message: String,
+    }
+
+    serde_json::from_str::<ErrorBody>(body).map_or_else(
+        |_| body.trim().chars().take(300).collect(),
+        |parsed| parsed.error.message,
+    )
+}
+
+/// Performs a GET request against the `YouTube` Data API and decodes the JSON body,
+/// preserving the API's own error message on failure.
+async fn get_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    query: &[(&str, &str)],
+) -> Result<T, ApiRequestError> {
+    let response = client.get(url).query(query).send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(ApiRequestError::Status {
+            status,
+            message: api_error_message(&body),
+        });
+    }
+    Ok(serde_json::from_str(&body)?)
 }
 
 /// Progress updates during feed fetching
@@ -120,10 +198,10 @@ struct VideosResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CommentThreadsResponse {
     #[serde(default)]
     items: Vec<CommentThreadItem>,
-    #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
 }
 
@@ -134,10 +212,9 @@ struct CommentThreadItem {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CommentThreadSnippet {
-    #[serde(rename = "topLevelComment")]
     top_level_comment: Option<CommentItem>,
-    #[serde(rename = "totalReplyCount")]
     total_reply_count: Option<u32>,
 }
 
@@ -153,21 +230,18 @@ struct CommentItem {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CommentSnippet {
-    #[serde(rename = "authorDisplayName")]
     author_display_name: Option<String>,
-    #[serde(rename = "textDisplay")]
     text_display: Option<String>,
-    #[serde(rename = "publishedAt")]
     published_at: Option<DateTime<Utc>>,
-    #[serde(rename = "likeCount")]
     like_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct YoutubeVideoItem {
     id: Option<String>,
-    #[serde(rename = "contentDetails")]
     content_details: Option<YoutubeVideoContentDetails>,
 }
 
@@ -177,14 +251,14 @@ struct YoutubeVideoContentDetails {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChannelItem {
-    #[serde(rename = "contentDetails")]
     content_details: Option<ChannelContentDetails>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChannelContentDetails {
-    #[serde(rename = "relatedPlaylists")]
     related_playlists: Option<RelatedPlaylists>,
 }
 
@@ -205,44 +279,40 @@ struct SearchItem {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaylistItemSnippet {
-    #[serde(rename = "publishedAt")]
     published_at: Option<DateTime<Utc>>,
     title: Option<String>,
-    #[serde(rename = "channelId")]
     channel_id: Option<String>,
-    #[serde(rename = "channelTitle")]
     channel_title: Option<String>,
-    #[serde(rename = "resourceId")]
     resource_id: Option<PlaylistResourceId>,
     thumbnails: Option<PlaylistThumbnails>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchSnippet {
-    #[serde(rename = "publishedAt")]
     published_at: Option<DateTime<Utc>>,
     title: Option<String>,
-    #[serde(rename = "channelId")]
     channel_id: Option<String>,
-    #[serde(rename = "channelTitle")]
     channel_title: Option<String>,
     thumbnails: Option<PlaylistThumbnails>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaylistResourceId {
-    #[serde(rename = "videoId")]
     video_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchResourceId {
-    #[serde(rename = "videoId")]
     video_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaylistThumbnails {
     maxres: Option<Thumbnail>,
     standard: Option<Thumbnail>,
@@ -404,20 +474,18 @@ pub async fn fetch_youtube_search(
 ) -> Result<Vec<Video>, SearchError> {
     let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| SearchError::MissingApiKey)?;
     let max_results = SEARCH_MAX_RESULTS.to_string();
-    let response = client
-        .get(YOUTUBE_SEARCH_API_URL)
-        .query(&[
+    let payload: SearchResponse = get_json(
+        client,
+        YOUTUBE_SEARCH_API_URL,
+        &[
             ("part", "snippet"),
             ("type", "video"),
             ("maxResults", max_results.as_str()),
             ("q", query),
             ("key", api_key.as_str()),
-        ])
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let payload = response.json::<SearchResponse>().await?;
+        ],
+    )
+    .await?;
     let video_ids = video_ids_from_search_items(&payload);
     let durations_by_video_id = fetch_video_durations(client, &api_key, &video_ids).await?;
 
@@ -452,21 +520,20 @@ pub async fn fetch_youtube_comments(
             .min((MAX_COMMENT_THREADS - comments.len()) as u32)
             .to_string();
 
-        let mut request = client.get(YOUTUBE_COMMENT_THREADS_API_URL).query(&[
+        let mut query = vec![
             ("part", "snippet,replies"),
             ("videoId", video_id),
             ("maxResults", page_size.as_str()),
             ("order", "relevance"),
             ("textFormat", "plainText"),
             ("key", api_key.as_str()),
-        ]);
-
+        ];
         if let Some(page_token) = next_page_token.as_deref() {
-            request = request.query(&[("pageToken", page_token)]);
+            query.push(("pageToken", page_token));
         }
 
-        let response = request.send().await?.error_for_status()?;
-        let payload = response.json::<CommentThreadsResponse>().await?;
+        let payload: CommentThreadsResponse =
+            get_json(client, YOUTUBE_COMMENT_THREADS_API_URL, &query).await?;
 
         if payload.items.is_empty() {
             break;
@@ -587,21 +654,19 @@ async fn fetch_channel_once(
     api_key: &str,
     uploads_playlist_id: &str,
     channel_id: &str,
-) -> Result<Vec<Video>, reqwest::Error> {
+) -> Result<Vec<Video>, ApiRequestError> {
     let max_results = PLAYLIST_ITEMS_MAX_RESULTS.to_string();
-    let response = client
-        .get(YOUTUBE_PLAYLIST_ITEMS_API_URL)
-        .query(&[
+    let payload: PlaylistItemsResponse = get_json(
+        client,
+        YOUTUBE_PLAYLIST_ITEMS_API_URL,
+        &[
             ("part", "snippet"),
             ("playlistId", uploads_playlist_id),
             ("maxResults", max_results.as_str()),
             ("key", api_key),
-        ])
-        .send()
-        .await?;
-
-    let response = response.error_for_status()?;
-    let payload = response.json::<PlaylistItemsResponse>().await?;
+        ],
+    )
+    .await?;
     let video_ids = video_ids_from_playlist_items(&payload);
     let durations_by_video_id = match fetch_video_durations(client, api_key, &video_ids).await {
         Ok(durations) => durations,
@@ -622,19 +687,17 @@ async fn resolve_uploads_playlist_id(
     client: &reqwest::Client,
     api_key: &str,
     channel_id: &str,
-) -> Result<Option<String>, reqwest::Error> {
-    let response = client
-        .get(YOUTUBE_CHANNELS_API_URL)
-        .query(&[
+) -> Result<Option<String>, ApiRequestError> {
+    let payload: ChannelsResponse = get_json(
+        client,
+        YOUTUBE_CHANNELS_API_URL,
+        &[
             ("part", "contentDetails"),
             ("id", channel_id),
             ("key", api_key),
-        ])
-        .send()
-        .await?;
-
-    let response = response.error_for_status()?;
-    let payload = response.json::<ChannelsResponse>().await?;
+        ],
+    )
+    .await?;
 
     Ok(payload
         .items
@@ -740,15 +803,15 @@ fn videos_from_playlist_items(
                 .unwrap_or_else(|| urls::thumbnail_url(&video_id));
             let duration_seconds = durations_by_video_id.get(&video_id).copied();
 
-            Some(Video::new(
+            Some(Video::new(NewVideo {
                 video_id,
                 channel_id,
                 channel_name,
-                &title,
+                title,
                 published,
                 thumbnail_url,
                 duration_seconds,
-            ))
+            }))
         })
         .collect()
 }
@@ -792,15 +855,15 @@ fn videos_from_search_items(
                 .unwrap_or_else(|| urls::thumbnail_url(&video_id));
             let duration_seconds = durations_by_video_id.get(&video_id).copied();
 
-            Some(Video::new(
+            Some(Video::new(NewVideo {
                 video_id,
                 channel_id,
                 channel_name,
-                &title,
+                title,
                 published,
                 thumbnail_url,
                 duration_seconds,
-            ))
+            }))
         })
         .collect()
 }
@@ -817,24 +880,22 @@ async fn fetch_video_durations(
     client: &reqwest::Client,
     api_key: &str,
     video_ids: &[String],
-) -> Result<HashMap<String, u32>, reqwest::Error> {
+) -> Result<HashMap<String, u32>, ApiRequestError> {
     if video_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
     let video_ids_csv = video_ids.join(",");
-    let response = client
-        .get(YOUTUBE_VIDEOS_API_URL)
-        .query(&[
+    let payload: VideosResponse = get_json(
+        client,
+        YOUTUBE_VIDEOS_API_URL,
+        &[
             ("part", "contentDetails"),
             ("id", video_ids_csv.as_str()),
             ("key", api_key),
-        ])
-        .send()
-        .await?;
-
-    let response = response.error_for_status()?;
-    let payload = response.json::<VideosResponse>().await?;
+        ],
+    )
+    .await?;
     Ok(payload
         .items
         .into_iter()
@@ -861,8 +922,8 @@ fn uploads_playlist_id_for_channel(channel_id: &str) -> Option<String> {
         .map(|suffix| format!("UU{suffix}"))
 }
 
-fn should_retry(error: &reqwest::Error) -> bool {
-    if error.is_timeout() || error.is_connect() {
+fn should_retry(error: &ApiRequestError) -> bool {
+    if error.is_flaky_transport() {
         return true;
     }
 
@@ -874,8 +935,8 @@ fn should_retry(error: &reqwest::Error) -> bool {
     })
 }
 
-fn backoff_ms_for_attempt(attempt: usize, error: &reqwest::Error) -> u64 {
-    let base_ms = if error.is_timeout() || error.is_connect() {
+fn backoff_ms_for_attempt(attempt: usize, error: &ApiRequestError) -> u64 {
+    let base_ms = if error.is_flaky_transport() {
         3_000
     } else {
         match error.status() {
@@ -924,9 +985,9 @@ pub fn load_channel_ids(path: &Path) -> Result<Vec<String>, FeedError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        backoff_ms_with_base, format_comment_threads, parse_iso8601_duration_seconds, CommentItem,
-        CommentSnippet, CommentThreadItem, CommentThreadReplies, CommentThreadSnippet,
-        INITIAL_BACKOFF_MS,
+        CommentItem, CommentSnippet, CommentThreadItem, CommentThreadReplies, CommentThreadSnippet,
+        INITIAL_BACKOFF_MS, backoff_ms_with_base, format_comment_threads,
+        parse_iso8601_duration_seconds,
     };
     use chrono::{TimeZone, Utc};
 

@@ -7,7 +7,9 @@ fn decode_html_entities(input: &str) -> String {
     unescape(input).map_or_else(|_| input.to_string(), std::borrow::Cow::into_owned)
 }
 
-/// A single video entry from a `YouTube` RSS feed
+/// A single video entry sourced from the `YouTube` Data API.
+///
+/// Titles are HTML-entity decoded because the search API returns HTML-escaped titles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_field_names)]
 pub struct Video {
@@ -30,25 +32,40 @@ pub struct Video {
     watched: bool,
 }
 
+/// Parameters for constructing a new [`Video`].
+///
+/// Grouped into a struct because [`Video::new`] otherwise exceeds the 5-parameter limit.
+#[derive(Debug, Clone)]
+pub struct NewVideo {
+    /// `YouTube` video ID.
+    pub video_id: String,
+    /// `YouTube` channel ID.
+    pub channel_id: String,
+    /// Channel display name.
+    pub channel_name: String,
+    /// Raw video title (HTML entities are decoded by [`Video::new`]).
+    pub title: String,
+    /// Publication timestamp in UTC.
+    pub published: DateTime<Utc>,
+    /// Thumbnail image URL.
+    pub thumbnail_url: String,
+    /// Video duration in seconds, when known.
+    pub duration_seconds: Option<u32>,
+}
+
 impl Video {
     /// Constructs a new [`Video`] without transcript/summary sidecar fields.
-    pub fn new(
-        video_id: String,
-        channel_id: String,
-        channel_name: String,
-        title: &str,
-        published: DateTime<Utc>,
-        thumbnail_url: String,
-        duration_seconds: Option<u32>,
-    ) -> Self {
+    ///
+    /// `meta.title` is HTML-entity decoded, since the search API returns escaped titles.
+    pub fn new(meta: NewVideo) -> Self {
         Self {
-            video_id,
-            channel_id,
-            channel_name,
-            title: decode_html_entities(title),
-            published,
-            thumbnail_url,
-            duration_seconds,
+            video_id: meta.video_id,
+            channel_id: meta.channel_id,
+            channel_name: meta.channel_name,
+            title: decode_html_entities(&meta.title),
+            published: meta.published,
+            thumbnail_url: meta.thumbnail_url,
+            duration_seconds: meta.duration_seconds,
             transcript: None,
             ai_summary: None,
             watched: false,
@@ -164,22 +181,23 @@ pub struct WatchLaterData {
 
 #[cfg(test)]
 mod tests {
-    use super::Video;
+    use super::{NewVideo, Video};
     use chrono::{TimeZone, Utc};
 
     #[test]
     fn video_new_decodes_html_entities_in_titles() {
-        let video = Video::new(
-            "video-id".to_string(),
-            "channel-id".to_string(),
-            "channel-name".to_string(),
-            "Tom &amp; Jerry &quot;Best Of&quot; &#x27;24",
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+        let video = Video::new(NewVideo {
+            video_id: "video-id".to_string(),
+            channel_id: "channel-id".to_string(),
+            channel_name: "channel-name".to_string(),
+            title: "Tom &amp; Jerry &quot;Best Of&quot; &#x27;24".to_string(),
+            published: Utc
+                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid fixed test timestamp"),
-            "https://example.com/thumb.jpg".to_string(),
-            None,
-        );
+            thumbnail_url: "https://example.com/thumb.jpg".to_string(),
+            duration_seconds: None,
+        });
 
         assert_eq!(video.title(), "Tom & Jerry \"Best Of\" '24");
     }

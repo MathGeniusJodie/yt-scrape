@@ -1,5 +1,4 @@
 use crate::cache::fetch_transcript;
-use async_channel::Sender;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -15,28 +14,28 @@ const SUMMARY_PROMPT: &str = concat!(
 );
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiRequest {
     contents: Vec<Content>,
-    #[serde(rename = "generationConfig")]
     generation_config: GenerationConfig,
     tools: Vec<Tool>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GenerationConfig {
-    #[serde(rename = "thinkingConfig")]
     thinking_config: ThinkingConfig,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ThinkingConfig {
-    #[serde(rename = "thinkingLevel")]
     thinking_level: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Tool {
-    #[serde(rename = "urlContext")]
     url_context: UrlContext,
 }
 
@@ -62,10 +61,9 @@ enum Part {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct FileData {
-    #[serde(rename = "mimeType")]
     mime_type: String,
-    #[serde(rename = "fileUri")]
     file_uri: String,
 }
 
@@ -142,7 +140,7 @@ enum ProviderCallError {
     #[error("missing environment variable {variable}")]
     MissingEnvVar { variable: &'static str },
     #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error("failed to parse {provider} response: {source}")]
     ParseResponse {
         provider: &'static str,
@@ -161,12 +159,40 @@ enum ProviderCallError {
         status: reqwest::StatusCode,
         message: String,
     },
-    #[error("failed to fetch transcript: {0}")]
-    Transcript(String),
     #[error("transcript is empty")]
     EmptyTranscript,
     #[error("no OpenRouter models configured")]
     NoOpenRouterModels,
+}
+
+impl From<reqwest::Error> for ProviderCallError {
+    // Strip the URL so API keys in query strings never reach logs or the UI.
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error.without_url())
+    }
+}
+
+/// Result of a successful summarization attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryOutcome {
+    /// An AI-generated summary. Safe to cache as the video's summary.
+    Summary(String),
+    /// All AI providers failed but a transcript was fetched. Must NOT be cached
+    /// as a summary; callers may cache it as the transcript and display it.
+    TranscriptOnly(String),
+}
+
+/// Errors from a failed summarization attempt (all providers and fallbacks exhausted).
+#[derive(Debug, Error)]
+pub enum SummaryError {
+    /// Gemini failed and the transcript fallback also failed.
+    #[error("Gemini failed: {gemini}. Transcript fallback failed: {transcript}")]
+    NoSummaryOrTranscript {
+        /// Gemini failure description.
+        gemini: String,
+        /// Transcript failure description.
+        transcript: String,
+    },
 }
 
 fn visit_openrouter_content_parts(content: &serde_json::Value, emit: &mut dyn FnMut(&str)) {
@@ -237,15 +263,8 @@ fn extract_openrouter_text(body: &str) -> Result<String, ProviderCallError> {
         })
 }
 
-/// Message sent through the streaming channel
-#[derive(Debug)]
-pub enum StreamingMessage {
-    /// Partial text chunk received
-    Chunk(String),
-    /// Stream completed successfully
-    Done,
-    /// Error occurred
-    Error(String),
+fn gemini_model() -> String {
+    std::env::var("GEMINI_MODEL").unwrap_or_else(|_| GEMINI_FLASH_MODEL.to_string())
 }
 
 fn configured_openrouter_models() -> Vec<String> {
@@ -264,107 +283,93 @@ fn configured_openrouter_models() -> Vec<String> {
     OPENROUTER_MODELS.map(str::to_string).into()
 }
 
-/// Generates an AI summary for a video and streams partial results through a channel.
+/// Generates an AI summary for a video.
 ///
-/// The function first attempts Gemini streaming. If Gemini is unavailable or fails,
-/// it falls back to `OpenRouter` using a fetched transcript. If both providers fail,
-/// it emits the transcript text when captions are available.
+/// Tries Gemini first. If Gemini is unavailable or fails, fetches the transcript
+/// and tries `OpenRouter`. If `OpenRouter` also fails, returns the transcript itself
+/// as [`SummaryOutcome::TranscriptOnly`] so callers can still show something useful
+/// without mistaking it for an AI summary.
 ///
 /// # Arguments
 ///
+/// * `client` - HTTP client used for provider requests.
 /// * `video_id` - `YouTube` video identifier.
 /// * `video_url` - Full watch URL used by providers.
 /// * `video_title` - Human-readable video title for prompt context.
 /// * `channel_name` - Channel display name for prompt context.
 /// * `transcripts_work_dir` - Temporary directory for transcript extraction artifacts.
-/// * `tx` - Channel used to stream [`StreamingMessage`] updates.
-pub async fn summarize_video_streaming(
-    client: reqwest::Client,
+///
+/// # Errors
+///
+/// Returns [`SummaryError`] when every provider and the transcript fallback fail.
+pub async fn summarize_video(
+    client: &reqwest::Client,
     video_id: &str,
     video_url: &str,
     video_title: &str,
     channel_name: &str,
     transcripts_work_dir: &Path,
-    tx: Sender<StreamingMessage>,
-) {
-    // Try Gemini flash first, then OpenRouter with transcript fallback.
+) -> Result<SummaryOutcome, SummaryError> {
     let gemini_result = match std::env::var("GEMINI_API_KEY") {
         Ok(api_key) => {
-            call_gemini_streaming(
-                &client,
-                &api_key,
-                GEMINI_FLASH_MODEL,
-                video_url,
-                SUMMARY_PROMPT,
-                tx.clone(),
-            )
-            .await
+            call_gemini(client, &api_key, &gemini_model(), video_url, SUMMARY_PROMPT).await
         }
         Err(_) => Err(ProviderCallError::MissingEnvVar {
             variable: "GEMINI_API_KEY",
         }),
     };
 
-    if let Err(gemini_error) = gemini_result {
-        let transcript = match fetch_transcript(video_id, transcripts_work_dir).await {
-            Ok(transcript) if !transcript.trim().is_empty() => transcript,
-            Ok(_) => {
-                let _ = tx
-                    .send(StreamingMessage::Error(format!(
-                        "Gemini failed: {}. Transcript fallback failed: {}",
-                        gemini_error,
-                        ProviderCallError::EmptyTranscript
-                    )))
-                    .await;
-                return;
-            }
-            Err(transcript_error) => {
-                let _ = tx
-                    .send(StreamingMessage::Error(format!(
-                        "Gemini failed: {}. Transcript fallback failed: {}",
-                        gemini_error,
-                        ProviderCallError::Transcript(transcript_error.to_string())
-                    )))
-                    .await;
-                return;
-            }
-        };
+    let gemini_error = match gemini_result {
+        Ok(summary) => return Ok(SummaryOutcome::Summary(summary)),
+        Err(gemini_error) => gemini_error,
+    };
 
-        if call_openrouter_with_transcript(
-            &client,
-            video_url,
-            video_title,
-            channel_name,
-            SUMMARY_PROMPT,
-            &transcript,
-            tx.clone(),
-        )
-        .await
-        .is_ok()
-        {
-            return;
+    let transcript = match fetch_transcript(video_id, transcripts_work_dir).await {
+        Ok(transcript) if !transcript.trim().is_empty() => transcript,
+        Ok(_) => {
+            return Err(SummaryError::NoSummaryOrTranscript {
+                gemini: gemini_error.to_string(),
+                transcript: ProviderCallError::EmptyTranscript.to_string(),
+            });
         }
-
-        if tx
-            .send(StreamingMessage::Chunk(transcript.trim().to_string()))
-            .await
-            .is_err()
-        {
-            return;
+        Err(transcript_error) => {
+            return Err(SummaryError::NoSummaryOrTranscript {
+                gemini: gemini_error.to_string(),
+                transcript: transcript_error.to_string(),
+            });
         }
+    };
 
-        let _ = tx.send(StreamingMessage::Done).await;
+    match call_openrouter_with_transcript(
+        client,
+        video_url,
+        video_title,
+        channel_name,
+        SUMMARY_PROMPT,
+        &transcript,
+    )
+    .await
+    {
+        Ok(summary) => Ok(SummaryOutcome::Summary(summary)),
+        Err(openrouter_error) => {
+            log::warn!(
+                "OpenRouter summary failed for {video_id} (falling back to transcript): \
+                 {openrouter_error}"
+            );
+            Ok(SummaryOutcome::TranscriptOnly(
+                transcript.trim().to_string(),
+            ))
+        }
     }
 }
 
-async fn call_gemini_streaming(
+async fn call_gemini(
     client: &reqwest::Client,
     api_key: &str,
     model: &str,
     video_url: &str,
     prompt: &str,
-    tx: Sender<StreamingMessage>,
-) -> Result<(), ProviderCallError> {
+) -> Result<String, ProviderCallError> {
     let url =
         format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
 
@@ -410,17 +415,9 @@ async fn call_gemini_streaming(
             .unwrap_or(body);
         return Err(ProviderCallError::HttpStatus { status, message });
     }
-    let summary = extract_gemini_text(&body)?.trim().to_string();
-
-    if tx.send(StreamingMessage::Chunk(summary)).await.is_err() {
-        return Ok(());
-    }
-
-    let _ = tx.send(StreamingMessage::Done).await;
-    Ok(())
+    Ok(extract_gemini_text(&body)?.trim().to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn call_openrouter_with_transcript(
     client: &reqwest::Client,
     video_url: &str,
@@ -428,8 +425,7 @@ async fn call_openrouter_with_transcript(
     channel_name: &str,
     prompt: &str,
     transcript: &str,
-    tx: Sender<StreamingMessage>,
-) -> Result<(), ProviderCallError> {
+) -> Result<String, ProviderCallError> {
     let api_key =
         std::env::var("OPENROUTER_API_KEY").map_err(|_| ProviderCallError::MissingEnvVar {
             variable: "OPENROUTER_API_KEY",
@@ -476,14 +472,7 @@ async fn call_openrouter_with_transcript(
             .unwrap_or(body);
         return Err(ProviderCallError::HttpStatus { status, message });
     }
-    let content = extract_openrouter_text(&body)?;
-
-    let summary = content.trim().to_string();
-    if !summary.is_empty() && tx.send(StreamingMessage::Chunk(summary)).await.is_err() {
-        return Ok(());
-    }
-    let _ = tx.send(StreamingMessage::Done).await;
-    Ok(())
+    Ok(extract_openrouter_text(&body)?.trim().to_string())
 }
 
 #[cfg(test)]
@@ -500,7 +489,7 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let payload = serde_json::to_value(request).unwrap();
+        let payload = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(
             payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
@@ -520,7 +509,7 @@ mod tests {
             messages: Vec::new(),
         };
 
-        let payload = serde_json::to_value(request).unwrap();
+        let payload = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(payload["reasoning"]["effort"], serde_json::json!("none"));
         assert_eq!(payload["reasoning"]["exclude"], serde_json::json!(true));
@@ -531,8 +520,8 @@ mod tests {
         let payload = serde_json::json!({
             "choices": [{"message": {"content": "summary text"}}]
         });
-        let result = super::extract_openrouter_text(&serde_json::to_string(&payload).unwrap());
-        assert_eq!(result.unwrap(), "summary text");
+        let result = super::extract_openrouter_text(&payload.to_string());
+        assert_eq!(result.expect("payload should parse"), "summary text");
     }
 
     #[test]
@@ -543,8 +532,8 @@ mod tests {
                 {"type": "text", "text": "world"}
             ]}}]
         });
-        let result = super::extract_openrouter_text(&serde_json::to_string(&payload).unwrap());
-        assert_eq!(result.unwrap(), "Hello world");
+        let result = super::extract_openrouter_text(&payload.to_string());
+        assert_eq!(result.expect("payload should parse"), "Hello world");
     }
 
     #[test]
@@ -552,7 +541,7 @@ mod tests {
         let payload = serde_json::json!({
             "choices": [{"message": {"content": [{"type": "text", "text": "   "}]}}]
         });
-        let result = super::extract_openrouter_text(&serde_json::to_string(&payload).unwrap());
+        let result = super::extract_openrouter_text(&payload.to_string());
         assert!(result.is_err());
     }
 
@@ -561,8 +550,8 @@ mod tests {
         let payload = serde_json::json!({
             "candidates": [{"content": {"parts": [{"text": "A "}, {"text": "B"}]}}]
         });
-        let result = super::extract_gemini_text(&serde_json::to_string(&payload).unwrap());
-        assert_eq!(result.unwrap(), "A B");
+        let result = super::extract_gemini_text(&payload.to_string());
+        assert_eq!(result.expect("payload should parse"), "A B");
     }
 
     #[test]
@@ -570,7 +559,7 @@ mod tests {
         let payload = serde_json::json!({
             "candidates": [{"content": {"parts": [{"text": "   "}]}}]
         });
-        let result = super::extract_gemini_text(&serde_json::to_string(&payload).unwrap());
+        let result = super::extract_gemini_text(&payload.to_string());
         assert!(result.is_err());
     }
 }

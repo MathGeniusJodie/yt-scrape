@@ -1,8 +1,8 @@
-use crate::data::{Video, WatchLaterData};
+use crate::data::{NewVideo, Video, WatchLaterData};
 use crate::urls;
 use chrono::{DateTime, NaiveDate, Utc};
 use log::warn;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -92,18 +92,20 @@ impl YtDlpInfoJson {
             .or_else(|| published_from_upload_date(self.upload_date.as_deref()))?;
         let duration_seconds = self.duration.and_then(duration_to_seconds);
 
-        Some(Video::new(
-            video_id.to_string(),
-            self.channel_id.unwrap_or_default(),
-            self.channel
+        Some(Video::new(NewVideo {
+            video_id: video_id.to_string(),
+            channel_id: self.channel_id.unwrap_or_default(),
+            channel_name: self
+                .channel
                 .or(self.uploader)
                 .unwrap_or_else(|| "Unknown channel".to_string()),
-            self.title.as_deref().unwrap_or("Untitled"),
+            title: self.title.unwrap_or_else(|| "Untitled".to_string()),
             published,
-            self.thumbnail
+            thumbnail_url: self
+                .thumbnail
                 .unwrap_or_else(|| urls::thumbnail_url(video_id)),
             duration_seconds,
-        ))
+        }))
     }
 }
 
@@ -779,10 +781,10 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem, Storage,
-        VideoMetadataSidecar, MAX_TITLE_LENGTH, VIDEOS_CACHE_FILE,
+        MAX_TITLE_LENGTH, Storage, VIDEOS_CACHE_FILE, VideoMetadataSidecar,
+        collect_cached_video_ids_from_dir, sanitize_filename, video_id_from_stem,
     };
-    use crate::data::Video;
+    use crate::data::{NewVideo, Video};
     use chrono::{DateTime, Utc};
     use std::collections::HashSet;
     use std::fs::File;
@@ -816,15 +818,15 @@ mod tests {
     fn sample_video(video_id: &str) -> Video {
         let published =
             DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("timestamp should parse");
-        Video::new(
-            video_id.to_string(),
-            "UC123".to_string(),
-            "Channel".to_string(),
-            &format!("Title {video_id}"),
-            published.with_timezone(&Utc),
-            "https://example.com/thumb.jpg".to_string(),
-            Some(120),
-        )
+        Video::new(NewVideo {
+            video_id: video_id.to_string(),
+            channel_id: "UC123".to_string(),
+            channel_name: "Channel".to_string(),
+            title: format!("Title {video_id}"),
+            published: published.with_timezone(&Utc),
+            thumbnail_url: "https://example.com/thumb.jpg".to_string(),
+            duration_seconds: Some(120),
+        })
     }
 
     #[test]
@@ -1078,15 +1080,19 @@ mod tests {
         )
         .expect("info JSON should be writable");
 
-        assert!(storage
-            .load_missing_watch_later_videos_from_info_json(
-                &HashSet::from([video_id.to_string()]),
-                &HashSet::from([video_id.to_string()]),
-            )
-            .is_empty());
-        assert!(storage
-            .load_missing_watch_later_videos_from_info_json(&HashSet::new(), &HashSet::new())
-            .is_empty());
+        assert!(
+            storage
+                .load_missing_watch_later_videos_from_info_json(
+                    &HashSet::from([video_id.to_string()]),
+                    &HashSet::from([video_id.to_string()]),
+                )
+                .is_empty()
+        );
+        assert!(
+            storage
+                .load_missing_watch_later_videos_from_info_json(&HashSet::new(), &HashSet::new())
+                .is_empty()
+        );
         std::fs::remove_dir_all(temp_dir).expect("Failed to cleanup temp directory");
     }
 

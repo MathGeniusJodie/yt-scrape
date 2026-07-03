@@ -1,10 +1,16 @@
-use super::subtitle_requests::{run_yt_dlp_subtitle_command, SubtitleRateLimiter};
+use super::subtitle_requests::{SubtitleRateLimiter, run_yt_dlp_subtitle_command};
 use crate::urls;
 use serde::Deserialize;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+
+/// Monotonic counter that keeps concurrent fetches for the same video in
+/// separate scratch directories, so one task never reads or deletes another's
+/// half-written subtitle file.
+static NEXT_FETCH_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 struct Json3Subtitle {
@@ -57,15 +63,33 @@ pub enum TranscriptError {
 /// Returns [`TranscriptError`] when subtitle download, discovery, or parsing fails.
 pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String, TranscriptError> {
     let url = urls::watch_url(video_id);
-    tokio::fs::create_dir_all(work_dir).await?;
-    let output_template = work_dir.join(format!("{video_id}.%(ext)s"));
+    // Per-fetch scratch subdirectory: concurrent fetches (e.g. summary prefetch
+    // and the transcript dialog for the same video) must not share files.
+    let fetch_dir = unique_fetch_dir(work_dir, video_id);
+    tokio::fs::create_dir_all(&fetch_dir).await?;
+    let result = fetch_transcript_in(video_id, &url, &fetch_dir).await;
+    let _ = tokio::fs::remove_dir_all(&fetch_dir).await;
+    result
+}
+
+fn unique_fetch_dir(work_dir: &Path, video_id: &str) -> PathBuf {
+    let fetch_id = NEXT_FETCH_ID.fetch_add(1, Ordering::Relaxed);
+    work_dir.join(format!("{video_id}.{}.{fetch_id}", std::process::id()))
+}
+
+async fn fetch_transcript_in(
+    video_id: &str,
+    url: &str,
+    fetch_dir: &Path,
+) -> Result<String, TranscriptError> {
+    let output_template = fetch_dir.join(format!("{video_id}.%(ext)s"));
 
     // Run yt-dlp to download auto-generated subtitles in json3 format.
     let output = run_yt_dlp_subtitle_command(SubtitleRateLimiter::global(), video_id, || {
         let mut command = super::nice_command("yt-dlp");
         command
             .arg("--cookies-from-browser")
-            .arg("chromium")
+            .arg(super::cookies_browser())
             .arg("--write-auto-sub")
             .arg("--sub-format")
             .arg("json3")
@@ -74,7 +98,7 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String,
             .arg(&output_template)
             .arg("--no-playlist")
             .arg("--no-warnings")
-            .arg(&url)
+            .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -87,16 +111,10 @@ pub async fn fetch_transcript(video_id: &str, work_dir: &Path) -> Result<String,
     }
 
     // Find the downloaded subtitle file (could be .en.json3, .en-US.json3, etc.).
-    let subtitle_path = find_subtitle_path(work_dir, video_id)?;
+    let subtitle_path = find_subtitle_path(fetch_dir, video_id)?;
 
-    // Read and parse the JSON3 file
     let json_content = tokio::fs::read_to_string(&subtitle_path).await?;
-    let transcript = parse_json3(&json_content)?;
-
-    // Clean up the subtitle file
-    let _ = tokio::fs::remove_file(&subtitle_path).await;
-
-    Ok(transcript)
+    parse_json3(&json_content)
 }
 
 fn find_subtitle_path(
@@ -160,7 +178,7 @@ fn clean_transcript(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_transcript, find_subtitle_path, parse_json3, TranscriptError};
+    use super::{TranscriptError, clean_transcript, find_subtitle_path, parse_json3};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

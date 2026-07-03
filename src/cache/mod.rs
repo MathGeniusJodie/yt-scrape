@@ -13,3 +13,10 @@ pub fn nice_command(program: &str) -> tokio::process::Command {
     cmd.arg("-n").arg("19").arg(program);
     cmd
 }
+
+/// Browser to pass to `yt-dlp --cookies-from-browser`.
+///
+/// Reads `YT_DLP_COOKIES_BROWSER` from the environment, defaulting to `"chromium"`.
+pub fn cookies_browser() -> String {
+    std::env::var("YT_DLP_COOKIES_BROWSER").unwrap_or_else(|_| "chromium".to_string())
+}

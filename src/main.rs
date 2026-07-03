@@ -1,6 +1,7 @@
 mod cache;
 mod data;
 mod feed;
+mod frogpoints;
 mod player;
 mod summary;
 mod ui;
@@ -9,36 +10,26 @@ mod urls;
 use adw::prelude::*;
 use anyhow::Context;
 use gtk::glib;
-use log::{error, Level, LevelFilter, Metadata, Record};
-use std::io::Write;
+use log::{error, warn};
 use std::path::PathBuf;
 
-struct StderrLogger;
-
-impl log::Log for StderrLogger {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() <= Level::Info
-    }
-
-    fn log(&self, record: &Record<'_>) {
-        if self.enabled(record.metadata()) {
-            let _ = writeln!(std::io::stderr(), "[{}] {}", record.level(), record.args());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-static STDERR_LOGGER: StderrLogger = StderrLogger;
-
-fn init_logger() {
-    if log::set_logger(&STDERR_LOGGER).is_ok() {
-        log::set_max_level(LevelFilter::Info);
-    }
-}
+/// External binaries the app shells out to, paired with what degrades if missing.
+const EXTERNAL_DEPENDENCIES: [(&str, &str); 4] = [
+    (
+        "yt-dlp",
+        "video downloads and transcript extraction will fail",
+    ),
+    ("mpv", "video playback will fail"),
+    ("pgrep", "frogpoints leisure detection will be unavailable"),
+    (
+        "nice",
+        "downloads/encodes will run at normal priority instead of nice -n 19",
+    ),
+];
 
 fn main() {
-    init_logger();
+    // Info by default; override with RUST_LOG (e.g. RUST_LOG=debug for mpv output).
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     if let Err(error) = run() {
         error!("{error:#}");
@@ -47,6 +38,8 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    warn_about_missing_dependencies();
+
     glib::set_prgname(Some("yt-gtk"));
     glib::set_application_name("yt-gtk");
 
@@ -57,6 +50,12 @@ fn run() -> anyhow::Result<()> {
         .build();
 
     app.connect_activate(move |app| {
+        // Re-activation of a running single-instance app must present the
+        // existing window, not build a second UI with duplicated state.
+        if let Some(window) = app.active_window() {
+            window.present();
+            return;
+        }
         ui::build_ui(app, subs_file.clone());
     });
 
@@ -73,12 +72,18 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
         )
     })?;
 
-    let candidates = [
-        exe_dir.join("youtube-subs.txt"),
-        exe_dir.join("../youtube-subs.txt"),
-        exe_dir.join("../../youtube-subs.txt"),
-        exe_dir.join("../../../youtube-subs.txt"),
-    ];
+    let xdg_config_candidate = directories::ProjectDirs::from("", "", "yt-gtk")
+        .map(|dirs| dirs.config_dir().join("youtube-subs.txt"));
+
+    let candidates = xdg_config_candidate
+        .into_iter()
+        .chain([
+            exe_dir.join("youtube-subs.txt"),
+            exe_dir.join("../youtube-subs.txt"),
+            exe_dir.join("../../youtube-subs.txt"),
+            exe_dir.join("../../../youtube-subs.txt"),
+        ])
+        .collect::<Vec<_>>();
 
     for candidate in &candidates {
         if candidate.exists() {
@@ -97,4 +102,37 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
         exe_path.display(),
         searched
     )
+}
+
+/// Checks whether `program` is on `PATH`.
+fn is_on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path_var| {
+        std::env::split_paths(&path_var).any(|dir| dir.join(program).is_file())
+    })
+}
+
+/// Logs a warning for each external dependency in [`EXTERNAL_DEPENDENCIES`] that is missing
+/// from `PATH`, explaining which feature degrades without it.
+fn warn_about_missing_dependencies() {
+    for (program, degraded_feature) in EXTERNAL_DEPENDENCIES {
+        if !is_on_path(program) {
+            warn!("`{program}` not found on PATH: {degraded_feature}.");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_on_path;
+
+    #[test]
+    fn is_on_path_finds_a_binary_known_to_exist() {
+        // `sh` is a POSIX baseline requirement, so it must be present in any test environment.
+        assert!(is_on_path("sh"));
+    }
+
+    #[test]
+    fn is_on_path_rejects_a_nonexistent_binary() {
+        assert!(!is_on_path("definitely-not-a-real-binary-xyz123"));
+    }
 }

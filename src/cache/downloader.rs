@@ -1,4 +1,4 @@
-use super::subtitle_requests::{run_yt_dlp_subtitle_command, SubtitleRateLimiter};
+use super::subtitle_requests::{SubtitleRateLimiter, run_yt_dlp_subtitle_command};
 use crate::urls;
 use log::warn;
 use std::path::Path;
@@ -41,7 +41,7 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
     // Keep this independent from subtitle fetching so subtitle rate limits don't fail downloads.
     let output = super::nice_command("yt-dlp")
         .arg("--cookies-from-browser")
-        .arg("chromium")
+        .arg(super::cookies_browser())
         .arg("-f")
         .arg("bestvideo[height<=720]+bestaudio/best[height<=720]")
         .arg("--add-metadata")
@@ -79,7 +79,7 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
         let mut command = super::nice_command("yt-dlp");
         command
             .arg("--cookies-from-browser")
-            .arg("chromium")
+            .arg(super::cookies_browser())
             .arg("--write-subs")
             .arg("--write-auto-subs")
             .arg("--sub-langs")

@@ -111,11 +111,11 @@ fn is_rate_limited(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_rate_limited, run_yt_dlp_subtitle_command, SubtitleRateLimiter, MAX_429_RETRIES,
+        MAX_429_RETRIES, SubtitleRateLimiter, is_rate_limited, run_yt_dlp_subtitle_command,
     };
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::time::{Duration, Instant};
     use tokio::process::Command;

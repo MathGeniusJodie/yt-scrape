@@ -1,16 +1,17 @@
 use super::comments::show_comments_dialog;
 use super::summary_generator::{show_summary_dialog, show_transcript_dialog};
-use super::{apply_watch_later_action, resolve_playback_path, AppContext, AppState};
+use super::{AppContext, AppState, apply_watch_later_action, resolve_playback_path};
 use crate::cache::Storage;
 use crate::data::{Tab, Video};
-use crate::player::play_video;
+use crate::player::{PlaybackEnd, play_video};
 
 use chrono::Utc;
 use chrono_humanize::{Accuracy, HumanTime, Tense};
 use futures::stream::{self, StreamExt};
+use gtk::glib;
 use gtk::prelude::*;
-use gtk::{gdk, graphene, pango};
 use gtk::{Align, Box as GtkBox, Button, FlowBox, Label, Orientation, Picture, Popover, Spinner};
+use gtk::{gdk, graphene, pango};
 use log::{error, warn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -35,19 +36,40 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
         })
     };
 
-    if let Some((video_title, local_path)) = playback {
-        if let Err(play_error) = play_video(video_id, &video_title, local_path.as_deref()) {
+    let Some((video_title, local_path)) = playback else {
+        error!("Cannot play missing video {video_id}");
+        return;
+    };
+
+    let playback_end_rx = match play_video(video_id, &video_title, local_path.as_deref()) {
+        Ok(playback_end_rx) => playback_end_rx,
+        Err(play_error) => {
             error!("Failed to play video {video_id}: {play_error}");
             return;
         }
-        if let Err(e) = state_rc.borrow_mut().set_video_watched(video_id, true) {
-            error!("Failed to mark video {video_id} as watched: {e}");
-        } else {
-            refresh_video_watched_badge(ui_context, video_id, true);
-        }
+    };
+
+    // Mark watched optimistically for a responsive badge; revert if mpv fails
+    // to actually start playback.
+    if let Err(e) = state_rc.borrow_mut().set_video_watched(video_id, true) {
+        error!("Failed to mark video {video_id} as watched: {e}");
     } else {
-        error!("Cannot play missing video {video_id}");
+        refresh_video_watched_badge(ui_context, video_id, true);
     }
+
+    let state_rc = state_rc.clone();
+    let ui_context = ui_context.clone();
+    let video_id = video_id.to_string();
+    glib::MainContext::default().spawn_local(async move {
+        if playback_end_rx.recv().await == Ok(PlaybackEnd::FailedImmediately) {
+            error!("mpv failed to play {video_id}; reverting watched state");
+            if let Err(e) = state_rc.borrow_mut().set_video_watched(&video_id, false) {
+                error!("Failed to unmark video {video_id} as watched: {e}");
+            } else {
+                refresh_video_watched_badge(&ui_context, &video_id, false);
+            }
+        }
+    });
 }
 
 /// Handler invoked with the selected video when a context-menu entry is clicked.
@@ -325,10 +347,10 @@ pub(super) fn sync_watch_later_card(
 
     let mut watch_later_cards = ui_context.watch_later_cards.borrow_mut();
     if !in_watch_later {
-        if let Some(card) = watch_later_cards.remove(video_id) {
-            if let Some(flow_child) = card.root().parent() {
-                ui_context.watch_later_flow.remove(&flow_child);
-            }
+        if let Some(card) = watch_later_cards.remove(video_id)
+            && let Some(flow_child) = card.root().parent()
+        {
+            ui_context.watch_later_flow.remove(&flow_child);
         }
         return;
     }
@@ -380,6 +402,12 @@ pub(super) fn refresh_video_downloading_badge(ui_context: &AppContext, video_id:
 pub(super) fn refresh_video_downloaded_badge(ui_context: &AppContext, video_id: &str) {
     for_each_card_matching(ui_context, video_id, |card| {
         card.set_downloaded();
+    });
+}
+
+pub(super) fn refresh_video_download_failed_badge(ui_context: &AppContext, video_id: &str) {
+    for_each_card_matching(ui_context, video_id, |card| {
+        card.set_download_failed();
     });
 }
 
@@ -474,15 +502,15 @@ pub(super) fn download_missing_thumbnails<'a>(
 
                         match response.bytes().await {
                             Ok(bytes) => {
-                                if let Some(parent) = path.parent() {
-                                    if let Err(error) = tokio::fs::create_dir_all(parent).await {
-                                        warn!(
-                                            "Failed creating thumbnail directory {}: {}",
-                                            parent.display(),
-                                            error
-                                        );
-                                        return;
-                                    }
+                                if let Some(parent) = path.parent()
+                                    && let Err(error) = tokio::fs::create_dir_all(parent).await
+                                {
+                                    warn!(
+                                        "Failed creating thumbnail directory {}: {}",
+                                        parent.display(),
+                                        error
+                                    );
+                                    return;
                                 }
 
                                 if let Err(error) = tokio::fs::write(&path, &bytes).await {
@@ -571,6 +599,13 @@ impl VideoCardWidgets {
         self.download_spinner.stop();
         self.download_spinner.set_visible(false);
         self.downloaded_badge.set_visible(true);
+    }
+
+    /// Stops the spinner without showing the floppy badge (failed download).
+    pub fn set_download_failed(&self) {
+        self.download_spinner.stop();
+        self.download_spinner.set_visible(false);
+        self.downloaded_badge.set_visible(false);
     }
 
     /// Reloads the thumbnail image from disk.
@@ -761,7 +796,7 @@ fn format_video_duration(total_seconds: u32) -> String {
 mod tests {
     use super::{format_video_duration, watch_later_insert_position};
     use crate::cache::Storage;
-    use crate::data::Video;
+    use crate::data::{NewVideo, Video};
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -788,15 +823,15 @@ mod tests {
             .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
             .single()
             .expect("valid fixed test timestamp");
-        Video::new(
-            video_id.to_string(),
-            "channel-id".to_string(),
-            "channel-name".to_string(),
-            &format!("title-{video_id}"),
+        Video::new(NewVideo {
+            video_id: video_id.to_string(),
+            channel_id: "channel-id".to_string(),
+            channel_name: "channel-name".to_string(),
+            title: format!("title-{video_id}"),
             published,
-            "https://example.com/thumb.jpg".to_string(),
-            None,
-        )
+            thumbnail_url: "https://example.com/thumb.jpg".to_string(),
+            duration_seconds: None,
+        })
     }
 
     fn test_state(video_ids: &[&str], watch_later: &[&str]) -> super::AppState {
