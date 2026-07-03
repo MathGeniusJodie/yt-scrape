@@ -114,8 +114,10 @@ fn debit_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
     })
 }
 
-fn decrement_frogpoints(path: &Path, cost: i64) -> Result<i64, FrogpointsError> {
-    update_frogpoints_locked(path, |current| Ok(current - cost))
+/// Applies a signed delta to the balance: positive credits, negative charges.
+/// Unlike [`debit_frogpoints`], the balance may go negative.
+fn adjust_frogpoints(path: &Path, delta: i64) -> Result<i64, FrogpointsError> {
+    update_frogpoints_locked(path, |current| Ok(current + delta))
 }
 
 /// Debits the feed-refresh cost, failing without charging when the balance is too low.
@@ -137,7 +139,7 @@ pub fn debit_refresh_frogpoints() -> Result<i64, FrogpointsError> {
 /// Returns [`FrogpointsError`] when the file is missing/invalid or cannot be written.
 pub fn refund_refresh_frogpoints() -> Result<i64, FrogpointsError> {
     let path = frogpoints_path()?;
-    decrement_frogpoints(&path, -REFRESH_COST)
+    adjust_frogpoints(&path, REFRESH_COST)
 }
 
 fn has_recent_svg_modification(
@@ -232,7 +234,7 @@ fn charge_leisure_frogpoint_if_needed() {
         }
     };
 
-    match decrement_frogpoints(&path, LEISURE_COST) {
+    match adjust_frogpoints(&path, -LEISURE_COST) {
         Ok(remaining) => info!("Leisure mpv minute charged; {remaining} frogpoints remaining"),
         Err(error) => warn!("Failed to charge leisure frogpoint: {error}"),
     }
@@ -265,7 +267,7 @@ pub fn start_leisure_monitor() {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrogpointsError, REFRESH_COST, debit_frogpoints, decrement_frogpoints,
+        FrogpointsError, REFRESH_COST, adjust_frogpoints, debit_frogpoints,
         has_recent_svg_modification,
     };
     use tempfile::NamedTempFile;
@@ -311,12 +313,12 @@ mod tests {
     }
 
     #[test]
-    fn decrement_frogpoints_with_negative_cost_credits_the_balance() {
+    fn adjust_frogpoints_with_positive_delta_credits_the_balance() {
         let file = temporary_frogpoints_file();
         let path = file.path();
         std::fs::write(path, "3").expect("write test frogpoints file");
 
-        let remaining = decrement_frogpoints(path, -REFRESH_COST).expect("credit frogpoints");
+        let remaining = adjust_frogpoints(path, REFRESH_COST).expect("credit frogpoints");
 
         assert_eq!(remaining, 13);
         assert_eq!(
@@ -326,12 +328,12 @@ mod tests {
     }
 
     #[test]
-    fn decrement_frogpoints_allows_negative_balances() {
+    fn adjust_frogpoints_allows_negative_balances() {
         let file = temporary_frogpoints_file();
         let path = file.path();
         std::fs::write(path, "0").expect("write test frogpoints file");
 
-        let remaining = decrement_frogpoints(path, 1).expect("decrement frogpoints");
+        let remaining = adjust_frogpoints(path, -1).expect("adjust frogpoints");
 
         assert_eq!(remaining, -1);
         assert_eq!(
@@ -341,12 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn decrement_frogpoints_writes_shorter_balance_without_stale_bytes() {
+    fn adjust_frogpoints_writes_shorter_balance_without_stale_bytes() {
         let file = temporary_frogpoints_file();
         let path = file.path();
         std::fs::write(path, "1000").expect("write test frogpoints file");
 
-        let remaining = decrement_frogpoints(path, 995).expect("decrement frogpoints");
+        let remaining = adjust_frogpoints(path, -995).expect("adjust frogpoints");
 
         assert_eq!(remaining, 5);
         assert_eq!(

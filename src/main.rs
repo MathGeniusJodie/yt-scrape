@@ -9,6 +9,7 @@ mod urls;
 
 use adw::prelude::*;
 use anyhow::Context;
+use cache::is_on_path;
 use gtk::glib;
 use log::{error, warn};
 use std::path::PathBuf;
@@ -75,6 +76,8 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
     let xdg_config_candidate = directories::ProjectDirs::from("", "", "yt-gtk")
         .map(|dirs| dirs.config_dir().join("youtube-subs.txt"));
 
+    // The ancestor walk covers cargo layouts where the repo root holds the subs
+    // file: target/debug (../..) and target/<triple>/debug (../../..).
     let candidates = xdg_config_candidate
         .into_iter()
         .chain([
@@ -103,8 +106,6 @@ fn find_subs_file() -> anyhow::Result<PathBuf> {
         searched
     )
 }
-
-use cache::is_on_path;
 
 /// Logs a warning for each external dependency in [`EXTERNAL_DEPENDENCIES`] that is missing
 /// from `PATH`, explaining which feature degrades without it.

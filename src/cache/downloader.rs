@@ -3,7 +3,12 @@ use crate::urls;
 use log::warn;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 use thiserror::Error;
+
+/// Generous upper bound for a single video download; a hung yt-dlp must not
+/// leave the UI's downloading spinner (and deferred file deletion) stuck forever.
+const VIDEO_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Errors that can occur while downloading a video with `yt-dlp`.
 #[derive(Debug, Error)]
@@ -17,6 +22,9 @@ pub enum DownloadError {
         exit_code: Option<i32>,
         stderr: String,
     },
+    /// `yt-dlp` did not finish within [`VIDEO_DOWNLOAD_TIMEOUT`].
+    #[error("yt-dlp timed out after {0:?}")]
+    TimedOut(Duration),
 }
 
 /// Download a video using yt-dlp
@@ -39,7 +47,8 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
 
     // Phase 1: Always download video + chapter/info metadata.
     // Keep this independent from subtitle fetching so subtitle rate limits don't fail downloads.
-    let output = super::nice_command("yt-dlp")
+    let mut media_command = super::nice_command("yt-dlp");
+    media_command
         .arg("--cookies-from-browser")
         .arg(super::cookies_browser())
         .arg("-f")
@@ -62,9 +71,10 @@ pub async fn download_video(video_id: &str, output_path: &Path) -> Result<(), Do
         .arg(&url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+        .stderr(Stdio::piped());
+    let output = tokio::time::timeout(VIDEO_DOWNLOAD_TIMEOUT, media_command.output())
+        .await
+        .map_err(|_| DownloadError::TimedOut(VIDEO_DOWNLOAD_TIMEOUT))??;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

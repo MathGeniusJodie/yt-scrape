@@ -10,6 +10,8 @@ const MAX_429_RETRIES: usize = 3;
 const MIN_SUBTITLE_REQUEST_GAP: Duration = Duration::from_millis(300);
 // Exponential back-off: 1s → 2s → 4s across the three retries.
 const BASE_429_BACKOFF: Duration = Duration::from_millis(1_000);
+/// Per-attempt cap: a hung yt-dlp must not stall the shared subtitle pipeline.
+const SUBTITLE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// A pacing mechanism that serializes subtitle requests and enforces a minimum
 /// gap between them to avoid triggering `YouTube` rate limits.
@@ -49,7 +51,7 @@ impl SubtitleRateLimiter {
         let mut last = self.last_request_at.lock().await;
         let elapsed = last.elapsed();
         if elapsed < self.min_gap {
-            let wait = self.min_gap.checked_sub(elapsed).unwrap();
+            let wait = self.min_gap.saturating_sub(elapsed);
             debug!("Subtitle slot throttled; waiting {wait:?} before next request.");
             sleep(wait).await;
         }
@@ -74,19 +76,47 @@ impl SubtitleRateLimiter {
 pub async fn run_yt_dlp_subtitle_command(
     limiter: &SubtitleRateLimiter,
     video_id: &str,
+    build_command: impl FnMut() -> Command,
+) -> std::io::Result<Output> {
+    run_yt_dlp_subtitle_command_with(
+        limiter,
+        video_id,
+        SUBTITLE_ATTEMPT_TIMEOUT,
+        BASE_429_BACKOFF,
+        build_command,
+    )
+    .await
+}
+
+/// Implementation with injectable timing so tests can run with real (tiny)
+/// durations: `tokio::time::timeout` under a paused clock auto-advances past
+/// the deadline before a real subprocess can complete.
+async fn run_yt_dlp_subtitle_command_with(
+    limiter: &SubtitleRateLimiter,
+    video_id: &str,
+    attempt_timeout: Duration,
+    base_backoff: Duration,
     mut build_command: impl FnMut() -> Command,
 ) -> std::io::Result<Output> {
     let mut retry_count = 0usize;
     loop {
         limiter.wait_for_slot().await;
-        let output = build_command().output().await?;
+        let mut command = build_command();
+        let output = tokio::time::timeout(attempt_timeout, command.output())
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("yt-dlp subtitle request timed out after {attempt_timeout:?}"),
+                )
+            })??;
         let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() || !is_rate_limited(&stderr) || retry_count >= MAX_429_RETRIES {
             return Ok(output);
         }
         retry_count += 1;
         // 2^(retry_count-1) doubling, capped at exponent 3 (i.e. 16 s max).
-        let delay = BASE_429_BACKOFF * (1u32 << (retry_count - 1).min(3));
+        let delay = base_backoff * (1u32 << (retry_count - 1).min(3));
         warn!(
             "Subtitle request for {video_id} was rate-limited \
              (retry {retry_count}/{MAX_429_RETRIES}). Waiting {delay:?} before retry."
@@ -111,7 +141,7 @@ fn is_rate_limited(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_429_RETRIES, SubtitleRateLimiter, is_rate_limited, run_yt_dlp_subtitle_command,
+        MAX_429_RETRIES, SubtitleRateLimiter, is_rate_limited, run_yt_dlp_subtitle_command_with,
     };
     use std::sync::{
         Arc,
@@ -175,19 +205,29 @@ mod tests {
     }
 
     // ── run_yt_dlp_subtitle_command ──────────────────────────────────────────
-    // These tests use `start_paused = true` so that tokio::time::sleep calls
-    // complete instantly via auto-advance.
+    // These tests run with real time (paused clocks auto-advance past attempt
+    // timeouts before real subprocesses complete) but inject a tiny back-off
+    // so retry tests stay fast.
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    const TEST_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_BACKOFF: Duration = Duration::from_millis(1);
+
+    #[tokio::test]
     async fn run_command_returns_immediately_on_success() {
         let limiter = SubtitleRateLimiter::new(Duration::ZERO);
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&call_count);
 
-        let result = run_yt_dlp_subtitle_command(&limiter, "vid1", move || {
-            cc.fetch_add(1, Ordering::Relaxed);
-            Command::new("true")
-        })
+        let result = run_yt_dlp_subtitle_command_with(
+            &limiter,
+            "vid1",
+            TEST_ATTEMPT_TIMEOUT,
+            TEST_BACKOFF,
+            move || {
+                cc.fetch_add(1, Ordering::Relaxed);
+                Command::new("true")
+            },
+        )
         .await
         .expect("io should not fail");
 
@@ -199,17 +239,23 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test]
     async fn run_command_returns_immediately_on_non_429_failure() {
         let limiter = SubtitleRateLimiter::new(Duration::ZERO);
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&call_count);
 
         // `false` exits with code 1 and empty stderr — not a 429.
-        let result = run_yt_dlp_subtitle_command(&limiter, "vid2", move || {
-            cc.fetch_add(1, Ordering::Relaxed);
-            Command::new("false")
-        })
+        let result = run_yt_dlp_subtitle_command_with(
+            &limiter,
+            "vid2",
+            TEST_ATTEMPT_TIMEOUT,
+            TEST_BACKOFF,
+            move || {
+                cc.fetch_add(1, Ordering::Relaxed);
+                Command::new("false")
+            },
+        )
         .await
         .expect("io should not fail");
 
@@ -221,23 +267,29 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test]
     async fn run_command_retries_on_429_then_succeeds() {
         let limiter = SubtitleRateLimiter::new(Duration::ZERO);
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&call_count);
 
-        let result = run_yt_dlp_subtitle_command(&limiter, "vid3", move || {
-            let n = cc.fetch_add(1, Ordering::Relaxed);
-            if n == 0 {
-                // First attempt: simulate a 429 response.
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c").arg("printf 'HTTP Error 429' >&2; exit 1");
-                cmd
-            } else {
-                Command::new("true")
-            }
-        })
+        let result = run_yt_dlp_subtitle_command_with(
+            &limiter,
+            "vid3",
+            TEST_ATTEMPT_TIMEOUT,
+            TEST_BACKOFF,
+            move || {
+                let n = cc.fetch_add(1, Ordering::Relaxed);
+                if n == 0 {
+                    // First attempt: simulate a 429 response.
+                    let mut cmd = Command::new("sh");
+                    cmd.arg("-c").arg("printf 'HTTP Error 429' >&2; exit 1");
+                    cmd
+                } else {
+                    Command::new("true")
+                }
+            },
+        )
         .await
         .expect("io should not fail");
 
@@ -245,19 +297,25 @@ mod tests {
         assert_eq!(call_count.load(Ordering::Relaxed), 2);
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test]
     async fn run_command_gives_up_after_max_retries() {
         let limiter = SubtitleRateLimiter::new(Duration::ZERO);
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&call_count);
 
         // Always return a 429 — the function should give up after MAX_429_RETRIES.
-        let result = run_yt_dlp_subtitle_command(&limiter, "vid4", move || {
-            cc.fetch_add(1, Ordering::Relaxed);
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg("printf 'HTTP Error 429' >&2; exit 1");
-            cmd
-        })
+        let result = run_yt_dlp_subtitle_command_with(
+            &limiter,
+            "vid4",
+            TEST_ATTEMPT_TIMEOUT,
+            TEST_BACKOFF,
+            move || {
+                cc.fetch_add(1, Ordering::Relaxed);
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg("printf 'HTTP Error 429' >&2; exit 1");
+                cmd
+            },
+        )
         .await
         .expect("io should not fail");
 
@@ -267,5 +325,26 @@ mod tests {
             MAX_429_RETRIES + 1,
             "should attempt exactly MAX_429_RETRIES + 1 times total"
         );
+    }
+
+    #[tokio::test]
+    async fn run_command_times_out_hung_process() {
+        let limiter = SubtitleRateLimiter::new(Duration::ZERO);
+
+        let error = run_yt_dlp_subtitle_command_with(
+            &limiter,
+            "vid5",
+            Duration::from_millis(50),
+            TEST_BACKOFF,
+            || {
+                let mut cmd = Command::new("sleep");
+                cmd.arg("30").kill_on_drop(true);
+                cmd
+            },
+        )
+        .await
+        .expect_err("hung process should time out");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 }

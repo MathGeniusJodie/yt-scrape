@@ -387,7 +387,12 @@ pub(super) fn show_transcript_dialog(
         };
         (
             video.title().to_string(),
-            video.transcript().map(ToString::to_string),
+            // Transcripts are not hydrated into memory at startup; fall back
+            // to the sidecar file before fetching a fresh one.
+            video
+                .transcript()
+                .map(ToString::to_string)
+                .or_else(|| state.storage.load_transcript(video_id)),
         )
     };
 

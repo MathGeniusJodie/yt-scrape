@@ -20,6 +20,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, video_id: &str) {
+    if !ui_context
+        .videos_playing
+        .borrow_mut()
+        .insert(video_id.to_string())
+    {
+        return;
+    }
+
     let video_title = {
         let state = state_rc.borrow();
         state
@@ -28,6 +36,7 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     };
     let Some(video_title) = video_title else {
         error!("Cannot play missing video {video_id}");
+        ui_context.videos_playing.borrow_mut().remove(video_id);
         return;
     };
     let local_path = resolve_playback_path(state_rc, ui_context, video_id, &video_title);
@@ -36,6 +45,7 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
         Ok(playback_end_rx) => playback_end_rx,
         Err(play_error) => {
             error!("Failed to play video {video_id}: {play_error}");
+            ui_context.videos_playing.borrow_mut().remove(video_id);
             return;
         }
     };
@@ -52,7 +62,9 @@ fn play_selected_video(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     let ui_context = ui_context.clone();
     let video_id = video_id.to_string();
     glib::MainContext::default().spawn_local(async move {
-        if playback_end_rx.recv().await == Ok(PlaybackEnd::FailedImmediately) {
+        let playback_end = playback_end_rx.recv().await;
+        ui_context.videos_playing.borrow_mut().remove(&video_id);
+        if playback_end == Ok(PlaybackEnd::FailedImmediately) {
             error!("mpv failed to play {video_id}; reverting watched state");
             if let Err(e) = state_rc.borrow_mut().set_video_watched(&video_id, false) {
                 error!("Failed to unmark video {video_id} as watched: {e}");
@@ -142,8 +154,8 @@ const fn card_map_for_tab(ui_context: &AppContext, tab: Tab) -> &Rc<RefCell<TabC
 
 fn video_ids_for_tab(state: &AppState, tab: Tab) -> Vec<String> {
     match tab {
-        Tab::Feed => state.feed_video_ids(),
-        Tab::Search => state.search_video_ids(),
+        Tab::Feed => state.feed_video_ids().to_vec(),
+        Tab::Search => state.search_video_ids().to_vec(),
         Tab::WatchLater => state
             .videos
             .keys()
@@ -441,7 +453,7 @@ pub(super) fn refresh_video_downloaded_badge(ui_context: &AppContext, video_id: 
 
 pub(super) fn refresh_video_download_failed_badge(ui_context: &AppContext, video_id: &str) {
     for_each_card_matching(ui_context, video_id, |card| {
-        card.set_download_failed();
+        card.clear_download_badges();
     });
 }
 
@@ -635,8 +647,9 @@ impl VideoCardWidgets {
         self.downloaded_badge.set_visible(true);
     }
 
-    /// Stops the spinner without showing the floppy badge (failed download).
-    pub fn set_download_failed(&self) {
+    /// Stops the spinner and hides the floppy badge: the "no local download"
+    /// state, shown after a failed download or for never-downloaded videos.
+    pub fn clear_download_badges(&self) {
         self.download_spinner.stop();
         self.download_spinner.set_visible(false);
         self.downloaded_badge.set_visible(false);
@@ -657,7 +670,7 @@ impl VideoCardWidgets {
         } else if flags.is_downloaded {
             self.set_downloaded();
         } else {
-            self.set_download_failed();
+            self.clear_download_badges();
         }
     }
 }

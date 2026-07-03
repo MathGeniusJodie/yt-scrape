@@ -20,13 +20,17 @@ pub fn is_on_path(program: &str) -> bool {
 /// missing `nice` degrades priority instead of breaking downloads entirely.
 pub fn nice_command(program: &str) -> tokio::process::Command {
     static NICE_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *NICE_AVAILABLE.get_or_init(|| is_on_path("nice")) {
+    let mut cmd = if *NICE_AVAILABLE.get_or_init(|| is_on_path("nice")) {
         let mut cmd = tokio::process::Command::new("nice");
         cmd.arg("-n").arg("19").arg(program);
         cmd
     } else {
         tokio::process::Command::new(program)
-    }
+    };
+    // Timed-out/cancelled callers drop the output future; without this the
+    // orphaned yt-dlp would keep downloading (and writing files) forever.
+    cmd.kill_on_drop(true);
+    cmd
 }
 
 /// Browser to pass to `yt-dlp --cookies-from-browser`.

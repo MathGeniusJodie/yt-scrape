@@ -135,12 +135,12 @@ impl AppState {
         self.videos.get_mut(video_id)
     }
 
-    fn feed_video_ids(&self) -> Vec<String> {
-        self.feed_video_ids.clone()
+    fn feed_video_ids(&self) -> &[String] {
+        &self.feed_video_ids
     }
 
-    fn search_video_ids(&self) -> Vec<String> {
-        self.search_result_ids.clone()
+    fn search_video_ids(&self) -> &[String] {
+        &self.search_result_ids
     }
 
     fn cache_video_transcript(
@@ -230,6 +230,9 @@ struct AppContext {
     /// Video IDs with an in-flight yt-dlp download, so duplicate downloads are
     /// never spawned and file deletion is deferred until the download finishes.
     downloads_in_progress: Rc<RefCell<HashSet<String>>>,
+    /// Video IDs with a running mpv session, so accidental double-plays never
+    /// spawn a second player racing the watched-state heuristic.
+    videos_playing: Rc<RefCell<HashSet<String>>>,
 }
 
 /// Toolbar widgets that report long-running feed/search activity.
@@ -317,6 +320,11 @@ fn start_tracked_download(
             let mut state = state_rc.borrow_mut();
             if succeeded {
                 state.downloaded_video_ids.insert(video_id.clone());
+                // A legacy-format upgrade leaves the old .mp4/.webm behind;
+                // delete it so it can never shadow the fresh .mkv.
+                if let Err(remove_error) = state.storage.remove_legacy_video_files(&video_id) {
+                    error!("Failed to remove legacy video files for {video_id}: {remove_error}");
+                }
             }
             let still_wanted = state.watch_later.contains(&video_id);
             // Removed from Watch Later mid-download: honor the removal now
@@ -537,6 +545,12 @@ fn confirm_watch_later_removal(
     let video_id = video_id.to_string();
     let video_title = video_title.to_string();
     dialog.connect_response(Some("remove"), move |_, _| {
+        // Re-check before acting: the toggle below is a blind toggle, and the
+        // video may already have been removed (e.g. via another card's button)
+        // while this dialog was open — confirming would otherwise re-ADD it.
+        if !state_rc.borrow().watch_later.contains(&video_id) {
+            return;
+        }
         perform_watch_later_toggle(&state_rc, &ui_context_for_response, &video_id, &video_title);
     });
     dialog.present(Some(&ui_context.window));
@@ -1078,6 +1092,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         watch_later_saves,
         subscription_removals,
         downloads_in_progress: Rc::new(RefCell::new(HashSet::new())),
+        videos_playing: Rc::new(RefCell::new(HashSet::new())),
     };
     create_context_menu(&context_menu, state.clone(), &ui_context);
 

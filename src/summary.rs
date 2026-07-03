@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+// Summarizing a long video can far exceed the app-wide 120s HTTP timeout, so
+// provider requests override it per-request.
+const SUMMARY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const GEMINI_FLASH_MODEL: &str = "gemini-3.5-flash";
 const GEMINI_THINKING_LEVEL: &str = "minimal";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -418,6 +421,7 @@ async fn call_gemini(
 
     let response = client
         .post(&url)
+        .timeout(SUMMARY_REQUEST_TIMEOUT)
         .query(&[("key", api_key)])
         .header("Content-Type", "application/json")
         .json(&request)
@@ -474,6 +478,7 @@ async fn call_openrouter_with_transcript(
 
     let response = client
         .post(OPENROUTER_URL)
+        .timeout(SUMMARY_REQUEST_TIMEOUT)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)

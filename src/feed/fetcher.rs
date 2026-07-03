@@ -40,6 +40,13 @@ pub enum FeedError {
         #[source]
         source: std::io::Error,
     },
+    /// Every subscribed channel failed to fetch, so the existing feed is kept
+    /// rather than replaced with an empty one.
+    #[error("all {failed} channels failed to fetch; keeping the existing feed")]
+    AllChannelsFailed {
+        /// Number of channels that failed.
+        failed: usize,
+    },
 }
 
 /// Errors that can occur while fetching `YouTube` search results.
@@ -436,6 +443,14 @@ pub async fn fetch_all_feeds(
                 failed_channels += 1;
             }
         }
+    }
+
+    // A total failure (e.g. network outage) must not be applied as an empty
+    // feed: that would wipe cached videos and their artifacts permanently.
+    if successful_channels == 0 && total > 0 {
+        return Err(FeedError::AllChannelsFailed {
+            failed: failed_channels,
+        });
     }
 
     // Sort by published date (newest first)
