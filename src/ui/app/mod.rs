@@ -578,9 +578,12 @@ fn spawn_subscription_remover(
     runtime: &Arc<Runtime>,
     subs_file: PathBuf,
 ) -> async_channel::Sender<String> {
-    spawn_ordered_persister(runtime, "subscription removal", false, move |channel_id: String| {
-        remove_channel_from_subs_file(&subs_file, &channel_id)
-    })
+    spawn_ordered_persister(
+        runtime,
+        "subscription removal",
+        false,
+        move |channel_id: String| remove_channel_from_subs_file(&subs_file, &channel_id),
+    )
 }
 
 fn persist_videos(runtime: &Arc<Runtime>, storage: Storage, videos: Vec<Video>) {
@@ -1270,9 +1273,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
 
     // Cache pruning walks several directories; keep it off the main thread so
     // startup stays responsive.
-    if !state_files_healthy {
-        warn!("Skipping cache cleanup: a state file is damaged and cleanup would over-delete");
-    } else {
+    if state_files_healthy {
         let storage = storage.clone();
         let watch_later = watch_later.clone();
         runtime.spawn(async move {
@@ -1293,6 +1294,8 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
                 }
             }
         });
+    } else {
+        warn!("Skipping cache cleanup: a state file is damaged and cleanup would over-delete");
     }
 
     let http_client = match reqwest::Client::builder()
@@ -1407,7 +1410,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
             activity_in_progress: std::cell::Cell::new(false),
         }),
     };
-    create_context_menu(&context_menu, state.clone(), &ui_context);
+    create_context_menu(&context_menu, &state, &ui_context);
 
     // Focus the search entry whenever the Search page becomes visible.
     {

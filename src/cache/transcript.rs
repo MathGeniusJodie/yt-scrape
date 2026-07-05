@@ -70,7 +70,7 @@ pub async fn transcript_from_vtt_file(subtitle_path: &Path) -> Option<String> {
 /// is emitted verbatim, so caption text like "x < y" survives unmangled.
 fn strip_vtt_tags(line: &str) -> String {
     let mut stripped = String::with_capacity(line.len());
-    let mut chars = line.char_indices().peekable();
+    let mut chars = line.char_indices();
     while let Some((start, character)) = chars.next() {
         if character != '<' {
             stripped.push(character);

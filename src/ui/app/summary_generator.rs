@@ -45,7 +45,7 @@ pub(super) enum StartSummaryGenerationError {
 
 /// Service responsible for summary generation orchestration.
 ///
-/// Main-thread only: generation results are delivered back to the GLib main
+/// Main-thread only: generation results are delivered back to the `GLib` main
 /// context, so the in-progress guard needs no cross-thread synchronization.
 #[derive(Clone)]
 pub(super) struct SummaryGenerator {
@@ -318,7 +318,7 @@ fn start_summary_generation_for_dialog(
                     &state_rc,
                     &ui_context,
                     &video_id,
-                    summary.clone(),
+                    summary,
                 ) {
                     buffer.set_text(&format!("Error: {cache_error}"));
                     error!("Failed to cache interactive summary for {video_id}: {cache_error}");

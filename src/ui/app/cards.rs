@@ -111,7 +111,7 @@ fn copy_watch_url(_state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext, vi
 
 pub(super) fn create_context_menu(
     popover: &Popover,
-    state_rc: Rc<RefCell<AppState>>,
+    state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
 ) {
     const MENU_ACTIONS: [(&str, MenuAction); 7] = [

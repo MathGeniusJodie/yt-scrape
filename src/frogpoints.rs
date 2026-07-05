@@ -258,7 +258,7 @@ fn charge_leisure_frogpoint_if_needed() {
 }
 
 /// Starts the once-per-minute leisure monitor. Each tick runs on a detached
-/// background thread; the GLib timeout only dispatches it.
+/// background thread; the `GLib` timeout only dispatches it.
 pub fn start_leisure_monitor() {
     if LEISURE_MONITOR_STARTED
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)

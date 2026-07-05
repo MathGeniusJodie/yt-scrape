@@ -104,8 +104,8 @@ fn observe_max_playback_time(socket_path: &Path) -> Option<f64> {
         loop {
             line.clear();
             match reader.read_line(&mut line) {
-                // EOF: mpv exited.
-                Ok(0) => return Some(max_playback_time),
+                // EOF or socket error: mpv exited.
+                Ok(0) | Err(_) => return Some(max_playback_time),
                 Ok(_) => {
                     if let Some(playback_time) = playback_time_from_ipc_line(&line) {
                         max_playback_time = max_playback_time.max(playback_time);
@@ -113,7 +113,6 @@ fn observe_max_playback_time(socket_path: &Path) -> Option<f64> {
                     }
                     // Unrelated event line (pause, seek, ...): keep reading.
                 }
-                Err(_) => return Some(max_playback_time),
             }
         }
         std::thread::sleep(IPC_POLL_INTERVAL);

@@ -26,9 +26,8 @@ fn non_empty_env(variable: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn parse_openrouter_models(raw: Option<String>) -> Vec<String> {
+fn parse_openrouter_models(raw: Option<&str>) -> Vec<String> {
     let models = raw
-        .as_deref()
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -51,7 +50,9 @@ impl Config {
             gemini_model: non_empty_env("GEMINI_MODEL")
                 .unwrap_or_else(|| GEMINI_FLASH_MODEL.to_string()),
             openrouter_api_key: non_empty_env("OPENROUTER_API_KEY"),
-            openrouter_models: parse_openrouter_models(non_empty_env("OPENROUTER_MODELS")),
+            openrouter_models: parse_openrouter_models(
+                non_empty_env("OPENROUTER_MODELS").as_deref(),
+            ),
         }
     }
 }
@@ -63,7 +64,7 @@ mod tests {
     #[test]
     fn parse_openrouter_models_splits_and_trims() {
         assert_eq!(
-            parse_openrouter_models(Some("a, b ,,c".to_string())),
+            parse_openrouter_models(Some("a, b ,,c")),
             vec!["a", "b", "c"]
         );
     }
@@ -71,9 +72,6 @@ mod tests {
     #[test]
     fn parse_openrouter_models_falls_back_to_default() {
         assert_eq!(parse_openrouter_models(None), vec!["@preset/cheap"]);
-        assert_eq!(
-            parse_openrouter_models(Some(" , ".to_string())),
-            vec!["@preset/cheap"]
-        );
+        assert_eq!(parse_openrouter_models(Some(" , ")), vec!["@preset/cheap"]);
     }
 }
