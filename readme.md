@@ -1,13 +1,8 @@
 # WIP youtube client
 
-Originally written in JS and not interractive, then rewriten as a tui in rust. Now being rewritten as a gtk app. Designed to make you spend less time on youtube by having no recommendations, no autoplay and a builtin ai video summarizer.
+Originally written in JS and not interractive, then rewriten as a tui in rust, then as a gtk3 app, now ported to gtk4/libadwaita. Designed to make you spend less time on youtube by having no recommendations, no autoplay and a builtin ai video summarizer.
 
 ## Todos:
-* interface to add channels to subscriptions list
-* search functionality?
-* background downloading
-* actual gui with framebuffer support
+* interface to add channels to subscriptions list (currently: edit `youtube-subs.txt` by hand)
 * settings page and command line args
-* hide videos? log watched/ignored/hidden videos and collect stats so you know which channels you might want to unsubscribe from
-* support for playlists, channel pages and playing urls
-* add video descriptions to transcript and/or summary
+* hide/ignore videos and collect watch stats so you know which channels to unsubscribe from
