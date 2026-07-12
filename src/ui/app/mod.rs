@@ -685,61 +685,21 @@ fn perform_watch_later_toggle(
     }
 }
 
-/// Asks for confirmation before a Watch Later removal that would delete
-/// downloaded media, then performs the toggle on confirmation.
-fn confirm_watch_later_removal(
-    state_rc: &Rc<RefCell<AppState>>,
-    ui_context: &AppContext,
-    video_id: &str,
-    video_title: &str,
-) {
-    let dialog = adw::AlertDialog::new(
-        Some(&format!("Remove \"{video_title}\" from Watch Later?")),
-        Some("The downloaded video and subtitles will be deleted."),
-    );
-    dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove and Delete")]);
-    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
-
-    let state_rc = state_rc.clone();
-    let ui_context_for_response = ui_context.clone();
-    let video_id = video_id.to_string();
-    let video_title = video_title.to_string();
-    dialog.connect_response(Some("remove"), move |_, _| {
-        // Re-check before acting: the toggle below is a blind toggle, and the
-        // video may already have been removed (e.g. via another card's button)
-        // while this dialog was open — confirming would otherwise re-ADD it.
-        if !state_rc.borrow().watch_later.contains(&video_id) {
-            return;
-        }
-        perform_watch_later_toggle(&state_rc, &ui_context_for_response, &video_id, &video_title);
-    });
-    dialog.present(Some(&ui_context.window));
-}
-
 fn apply_watch_later_action(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
     video_id: &str,
 ) {
-    let (video_title, removal_deletes_files) = {
+    let video_title = {
         let state = state_rc.borrow();
         let Some(video) = state.video_by_id(video_id) else {
             error!("Cannot toggle watch-later for missing video {video_id}");
             return;
         };
-        let removing = state.watch_later.contains(video_id);
-        let has_local_files = state.downloaded_video_ids.contains(video_id)
-            || ui_context.downloads_in_progress.contains(video_id);
-        (video.title().to_string(), removing && has_local_files)
+        video.title().to_string()
     };
 
-    if removal_deletes_files {
-        confirm_watch_later_removal(state_rc, ui_context, video_id, &video_title);
-    } else {
-        perform_watch_later_toggle(state_rc, ui_context, video_id, &video_title);
-    }
+    perform_watch_later_toggle(state_rc, ui_context, video_id, &video_title);
 }
 
 /// Unsubscribes from the channel of the given video after a confirmation dialog.
