@@ -769,6 +769,10 @@ fn build_status_row(flags: &CardFlags) -> StatusRowWidgets {
     let status_box = GtkBox::new(Orientation::Horizontal, 4);
 
     let watch_later_toggle = Button::new();
+    // A focused toggle would drag the viewport back to the top when its card
+    // is removed from Watch Later (focus falls back to the flow box and the
+    // viewport scrolls to it), so keep it unfocusable like its siblings.
+    watch_later_toggle.set_can_focus(false);
     set_watch_later_toggle_state(&watch_later_toggle, flags.is_watch_later);
     status_box.append(&watch_later_toggle);
 
