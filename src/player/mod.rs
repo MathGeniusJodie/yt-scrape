@@ -22,6 +22,10 @@ const IPC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1)
 /// Distinguishes concurrent mpv sessions' IPC socket paths.
 static NEXT_PLAYER_ID: AtomicU64 = AtomicU64::new(0);
 
+/// yt-dlp format selector capping streamed video at 720p. The muxed-stream
+/// fallback is capped too, so no branch can silently pull a larger rendition.
+const YTDL_FORMAT_MAX_720P: &str = "bv*[height<=720]+ba/b[height<=720]";
+
 /// Errors produced while launching media playback.
 #[derive(Debug, Error)]
 pub enum PlayerError {
@@ -177,10 +181,19 @@ fn spawn_mpv_watched(
     Ok(end_rx)
 }
 
+/// Builds the mpv command for streaming `url`, resolution-capped at 720p.
+fn stream_command(url: &str, title: &str) -> Command {
+    let mut command = mpv_base_command(title);
+    command
+        .arg(format!("--ytdl-format={YTDL_FORMAT_MAX_720P}"))
+        .arg(url);
+    command
+}
+
 /// Plays a video using `mpv` as a detached process.
 ///
 /// Playback prefers a local file when available. If no local file exists, playback
-/// falls back to streaming directly from `YouTube`.
+/// falls back to streaming directly from `YouTube` at no more than 720p.
 ///
 /// # Arguments
 ///
@@ -226,15 +239,13 @@ pub fn play_video(
     }
 
     // Fallback: stream from YouTube
-    let url = urls::watch_url(video_id);
-    let mut command = mpv_base_command(title);
-    command.arg(&url);
+    let mut command = stream_command(&urls::watch_url(video_id), title);
     spawn_mpv_watched(&mut command)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_fatal_open_failure, mpv_base_command};
+    use super::{is_fatal_open_failure, mpv_base_command, stream_command};
 
     #[test]
     fn is_fatal_open_failure_detects_known_failure_lines() {
@@ -287,5 +298,20 @@ mod tests {
         assert!(args.contains(&"--force-media-title=Example Title".to_string()));
         assert!(args.contains(&"--sub-auto=fuzzy".to_string()));
         assert!(args.contains(&"--sid=auto".to_string()));
+    }
+
+    #[test]
+    fn stream_command_caps_resolution_at_720p() {
+        let command = stream_command("https://www.youtube.com/watch?v=abc", "Example Title");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args.contains(&"--ytdl-format=bv*[height<=720]+ba/b[height<=720]".to_string()));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://www.youtube.com/watch?v=abc")
+        );
     }
 }
