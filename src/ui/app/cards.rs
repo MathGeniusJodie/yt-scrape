@@ -114,10 +114,11 @@ pub(super) fn create_context_menu(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
 ) {
-    const MENU_ACTIONS: [(&str, MenuAction); 7] = [
+    const MENU_ACTIONS: [(&str, MenuAction); 8] = [
         ("play_button", play_selected_video),
         ("watch_later_button", apply_watch_later_action),
         ("copy_url_button", copy_watch_url),
+        ("download_audio_button", super::download_audio_to_disk),
         ("summary_button", show_summary_dialog),
         ("transcript_button", show_transcript_dialog),
         ("comments_button", show_comments_dialog),

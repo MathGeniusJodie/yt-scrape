@@ -3,7 +3,7 @@ mod storage;
 mod subtitle_requests;
 mod transcript;
 
-pub use downloader::download_video;
+pub use downloader::{download_audio, download_video, downloads_dir};
 pub use storage::{Storage, write_text_atomic};
 pub use transcript::{fetch_transcript, transcript_from_vtt_file};
 

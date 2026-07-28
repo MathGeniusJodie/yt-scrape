@@ -31,6 +31,13 @@
       </object>
     </child>
     <child>
+      <object class="GtkButton" id="download_audio_button">
+        <property name="label">Download Audio</property>
+        <property name="name">menu-download-audio</property>
+        <style><class name="flat"/></style>
+      </object>
+    </child>
+    <child>
       <object class="GtkButton" id="summary_button">
         <property name="label">AI Summary</property>
         <property name="name">menu-summary</property>

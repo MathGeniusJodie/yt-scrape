@@ -2,7 +2,7 @@ mod cards;
 mod comments;
 mod summary_generator;
 
-use crate::cache::{Storage, download_video};
+use crate::cache::{Storage, download_audio, download_video};
 use crate::config::Config;
 use crate::data::{Tab, Video};
 use crate::feed::{
@@ -346,6 +346,9 @@ struct AppContextInner {
     /// Video IDs with an in-flight yt-dlp download, so duplicate downloads are
     /// never spawned and file deletion is deferred until the download finishes.
     downloads_in_progress: InFlight,
+    /// Video IDs with an in-flight audio export, so two yt-dlp processes never
+    /// write the same MP3 concurrently.
+    audio_exports_in_progress: InFlight,
     /// Video IDs with a running mpv session, so accidental double-plays never
     /// spawn a second player racing the watched-state detection.
     videos_playing: InFlight,
@@ -474,6 +477,42 @@ fn start_tracked_download(
         } else {
             refresh_video_download_failed_badge(&ui_context, &video_id);
         }
+    });
+}
+
+/// Exports `video_id`'s audio as an MP3 in the user's downloads directory,
+/// unless an export for it is already running.
+fn download_audio_to_disk(
+    _state_rc: &Rc<RefCell<AppState>>,
+    ui_context: &AppContext,
+    video_id: &str,
+) {
+    let Some(downloads_dir) = crate::cache::downloads_dir() else {
+        error!("Cannot export audio for {video_id}: no downloads directory available");
+        return;
+    };
+    if !ui_context.audio_exports_in_progress.try_claim(video_id) {
+        return;
+    }
+
+    let completion_rx = {
+        let video_id = video_id.to_string();
+        run_in_background(&ui_context.runtime, async move {
+            download_audio(&video_id, &downloads_dir).await
+        })
+    };
+
+    let ui_context = ui_context.clone();
+    let video_id = video_id.to_string();
+    glib::MainContext::default().spawn_local(async move {
+        match completion_rx.recv().await {
+            Ok(Ok(())) => info!("Exported audio for {video_id}"),
+            Ok(Err(export_error)) => {
+                error!("Failed to export audio for {video_id}: {export_error}");
+            }
+            Err(_) => error!("Audio export task for {video_id} died before reporting a result"),
+        }
+        ui_context.audio_exports_in_progress.release(&video_id);
     });
 }
 
@@ -1366,6 +1405,7 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
             watch_later_saves,
             subscription_removals,
             downloads_in_progress: InFlight::default(),
+            audio_exports_in_progress: InFlight::default(),
             videos_playing: InFlight::default(),
             activity_in_progress: std::cell::Cell::new(false),
         }),
