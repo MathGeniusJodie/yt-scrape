@@ -8,7 +8,6 @@ use crate::data::{Tab, Video};
 use crate::feed::{
     FeedError, FetchProgress, fetch_all_feeds, fetch_youtube_search, load_channel_ids,
 };
-use crate::frogpoints;
 use cards::TabCards;
 
 use adw::prelude::*;
@@ -785,16 +784,6 @@ fn unsubscribe_channel(state_rc: &Rc<RefCell<AppState>>, ui_context: &AppContext
     dialog.present(Some(&ui_context.window));
 }
 
-/// Refunds the refresh cost off the main thread after a fatal refresh failure.
-fn refund_refresh_frogpoints_in_background() {
-    std::thread::spawn(|| match frogpoints::refund_refresh_frogpoints() {
-        Ok(remaining) => {
-            info!("Refunded refresh frogpoints after fatal error; {remaining} remaining");
-        }
-        Err(refund_error) => warn!("Failed to refund refresh frogpoints: {refund_error}"),
-    });
-}
-
 fn spawn_refresh_progress_updates(
     progress_rx: async_channel::Receiver<FetchProgress>,
     status_ui: StatusUi,
@@ -854,9 +843,8 @@ fn spawn_refresh_progress_updates(
                 }
                 FetchProgress::Fatal { error } => {
                     spinner.stop();
-                    status_label.set_text(&format!("Refresh failed (frogpoints refunded): {error}"));
+                    status_label.set_text(&format!("Refresh failed: {error}"));
                     error!("Fatal refresh error: {error}");
-                    refund_refresh_frogpoints_in_background();
                     break;
                 }
                 FetchProgress::AllComplete {
@@ -865,15 +853,7 @@ fn spawn_refresh_progress_updates(
                     failed_channels: final_failed,
                 } => {
                     spinner.stop();
-                    // A majority-failed refresh delivered a degraded feed;
-                    // give the points back even though results were applied.
-                    if final_failed > successful_channels {
-                        refund_refresh_frogpoints_in_background();
-                        status_label.set_text(&format!(
-                            "{total_videos} videos loaded ({successful_channels} channels ok, \
-                             {final_failed} failed; frogpoints refunded)"
-                        ));
-                    } else if final_failed > 0 {
+                    if final_failed > 0 {
                         status_label.set_text(&format!(
                             "{total_videos} videos loaded ({successful_channels} channels ok, {final_failed} failed)"
                         ));
@@ -1052,30 +1032,26 @@ fn start_youtube_search(
     });
 }
 
-/// Why a refresh could not be prepared (no cost was charged).
+/// Why a refresh could not be prepared.
 #[derive(Debug, Error)]
 enum RefreshPrepError {
     #[error("Error: {0}")]
     LoadChannels(#[from] FeedError),
     #[error("Refresh blocked: GOOGLE_API_KEY is not set.")]
     MissingApiKey,
-    #[error("Refresh blocked: {0}")]
-    Frogpoints(#[from] frogpoints::FrogpointsError),
     #[error("Refresh setup task was dropped.")]
     SetupTaskDropped,
 }
 
-/// Reads the subscriptions file and debits the refresh cost, in that order,
-/// so a refresh that cannot possibly succeed never costs anything. Runs on a
-/// blocking thread: both steps are file I/O that must stay off the main loop.
+/// Reads the subscriptions file and checks for an API key. Runs on a blocking
+/// thread because reading the file is I/O that must stay off the main loop.
 fn prepare_refresh(
     subs_file: &Path,
     api_key: Option<String>,
-) -> Result<(Vec<String>, String, i64), RefreshPrepError> {
+) -> Result<(Vec<String>, String), RefreshPrepError> {
     let channel_ids = load_channel_ids(subs_file)?;
     let api_key = api_key.ok_or(RefreshPrepError::MissingApiKey)?;
-    let remaining = frogpoints::debit_refresh_frogpoints()?;
-    Ok((channel_ids, api_key, remaining))
+    Ok((channel_ids, api_key))
 }
 
 fn start_feed_refresh(
@@ -1105,7 +1081,7 @@ fn start_feed_refresh(
             .recv()
             .await
             .unwrap_or(Err(RefreshPrepError::SetupTaskDropped));
-        let (channel_ids, api_key, remaining) = match prepared {
+        let (channel_ids, api_key) = match prepared {
             Ok(prepared) => prepared,
             Err(prep_error) => {
                 status_ui.finish(&prep_error.to_string());
@@ -1113,10 +1089,6 @@ fn start_feed_refresh(
                 return;
             }
         };
-        status_ui
-            .label
-            .set_text(&format!("Refreshing... ({remaining} frogpoints remaining)"));
-
         let (progress_tx, progress_rx) = async_channel::bounded::<FetchProgress>(100);
         let (videos_tx, videos_rx) = async_channel::bounded::<Vec<Video>>(1);
 
@@ -1328,7 +1300,6 @@ pub fn build_ui(app: &adw::Application, subs_file: PathBuf) {
         .default_width(1200)
         .default_height(800)
         .build();
-    frogpoints::start_leisure_monitor();
 
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_string(include_str!("../style.css"));

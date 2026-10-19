@@ -2,7 +2,6 @@ mod cache;
 mod config;
 mod data;
 mod feed;
-mod frogpoints;
 mod player;
 mod summary;
 mod ui;
@@ -15,13 +14,12 @@ use log::{error, warn};
 use std::path::PathBuf;
 
 /// External binaries the app shells out to, paired with what degrades if missing.
-const EXTERNAL_DEPENDENCIES: [(&str, &str); 4] = [
+const EXTERNAL_DEPENDENCIES: [(&str, &str); 3] = [
     (
         "yt-dlp",
         "video downloads and transcript extraction will fail",
     ),
     ("mpv", "video playback will fail"),
-    ("pgrep", "frogpoints leisure detection will be unavailable"),
     (
         "nice",
         "downloads/encodes will run at normal priority instead of nice -n 19",
