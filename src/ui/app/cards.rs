@@ -441,6 +441,24 @@ fn watch_later_insert_position(state: &AppState, video_id: &str) -> Option<usize
         .position(|id| id == video_id)
 }
 
+/// Drops keyboard focus if it sits on `widget` or inside it.
+///
+/// When a focused widget is removed, GTK hands focus to its nearest focusable
+/// ancestor — the flow box — and the scrolled window's viewport then scrolls
+/// that whole grid into view, jumping back to the top. Clearing focus first
+/// leaves the scroll position alone.
+fn clear_focus_within(widget: &gtk::Widget) {
+    let Some(root) = widget.root() else {
+        return;
+    };
+    if root
+        .focus()
+        .is_some_and(|focus| focus == *widget || focus.is_ancestor(widget))
+    {
+        root.set_focus(None::<&gtk::Widget>);
+    }
+}
+
 pub(super) fn sync_watch_later_card(
     state_rc: &Rc<RefCell<AppState>>,
     ui_context: &AppContext,
@@ -459,6 +477,7 @@ pub(super) fn sync_watch_later_card(
         if let Some(card) = watch_later_cards.cards.remove(video_id)
             && let Some(flow_child) = card.root().parent()
         {
+            clear_focus_within(&flow_child);
             ui_context.watch_later_flow.remove(&flow_child);
         }
         watch_later_cards.order.retain(|id| id != video_id);
@@ -770,9 +789,6 @@ fn build_status_row(flags: &CardFlags) -> StatusRowWidgets {
     let status_box = GtkBox::new(Orientation::Horizontal, 4);
 
     let watch_later_toggle = Button::new();
-    // A focused toggle would drag the viewport back to the top when its card
-    // is removed from Watch Later (focus falls back to the flow box and the
-    // viewport scrolls to it), so keep it unfocusable like its siblings.
     watch_later_toggle.set_can_focus(false);
     set_watch_later_toggle_state(&watch_later_toggle, flags.is_watch_later);
     status_box.append(&watch_later_toggle);
